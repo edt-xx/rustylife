@@ -1,7 +1,20 @@
 use rayon::prelude::*;
+use std::sync::OnceLock;
 use crate::grid::*;
 
-const PROC_COUNT: usize = 8;
+fn max_procs() -> usize {
+    fn calc() -> usize {
+        // Cross-platform physical core count via sysinfo (static method in 0.37)
+        sysinfo::System::physical_core_count()
+            .map(|c| c as usize)
+            .unwrap_or_else(|| {
+                // Fallback: query logical threads, assume SMT=2
+                std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(4)
+            })
+    }
+    static MAX: OnceLock<usize> = OnceLock::new();
+    *MAX.get_or_init(calc)
+}
 
 fn neighbor_count_worker(
     chunk: &[u64],
@@ -45,7 +58,7 @@ fn neighbor_count_worker(
 
 impl Grid {
     pub fn step(&mut self) {
-        let n_procs = if self.alive.len() > 200 { PROC_COUNT } else { 1 };
+        let n_procs = if self.alive.len() > 25 * max_procs() { max_procs() } else { 1 };
         let prev_active_tiles = self.active_tiles.clone();
 
         // Strided split: chunk[i] gets every nth element starting at i
