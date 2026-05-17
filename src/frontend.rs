@@ -1,0 +1,568 @@
+// Auto-extracted from game_of_life.py
+pub const FRONTEND: &str = r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Game of Life</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#1a1a2e;width:100%;height:100%;font-family:monospace;color:#e94560}
+#viewport{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
+canvas#main{border:2px solid #e94560;image-rendering:pixelated;background:#1a1a2e;cursor:crosshair}
+.toolbar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;justify-content:center;padding:6px 14px;background:rgba(22,33,62,.9);border-radius:6px;z-index:10;min-width:95vw}
+button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px}
+button:hover{background:#e94560;color:#1a1a2e}
+input[type=range]{width:100px;vertical-align:middle}
+.info{font-size:12px;color:#888;margin-left:4px}
+#topInfo{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;gap:8px;font-family:monospace;font-size:12px;color:#888;z-index:10}
+</style></head><body>
+<div id="topInfo">
+  <span id="genLabel"></span>&nbsp;&nbsp;
+  <span id="fpsLabel"></span>&nbsp;&nbsp;
+  <span id="birthsLabel"></span>&nbsp;&nbsp;
+  <span id="deathsLabel"></span>&nbsp;&nbsp;
+  <span id="popLabel"></span>&nbsp;&nbsp;
+  <span id="heapLabel"></span>&nbsp;&nbsp;
+  <span id="zoomLabel"></span>&nbsp;&nbsp;
+  <span id="camLabel"></span>
+</div>
+<div id="viewport"><canvas id="main"></canvas></div>
+<div class="toolbar">
+  <button id="playBtn">&#9654; Play</button>
+  <button id="stepBtn">Step</button>
+  <label>Speed <input type="range" id="speedSlider" min="1" max="50" value="25"></label>
+  <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
+
+  <button id="randBtn">Randomize</button>
+  <button id="clearBtn">Clear</button>
+  <button id="loadBtn">Load .lif</button>
+  <input type="file" id="fileInput" accept=".lif,.txt,.rle" style="display:none"/>
+  <button id="tracksBtn">Tracks</button>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
+</div>
+<script>
+const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
+
+const step = [1,2,3,4,5,9,15,27,33,81,115,243];
+
+var cellSize = 3;               // pixels per cell (zoom level)
+var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
+var MIN_ZOOM = 1, MAX_ZOOM = 15;
+
+// Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
+function calcFrameSize() {
+    var ww = window.innerWidth;
+    var wh = window.innerHeight - 60; // leave room for toolbar
+    // Scale to fit within window while maintaining 16:9
+    var scale = Math.min(ww * 0.92 / 16, (wh * 0.90) / 9);
+    return {fw: Math.floor(scale * 16), fh: Math.floor(scale * 9)};
+}
+
+// How many cells fit in the frame at given cell size (16:9 aspect ratio)
+function calcCells(cs) {
+    var fs = calcFrameSize();
+    var maxVw = Math.max(2, Math.floor(fs.fw / cs));
+    var maxVh = Math.max(2, Math.floor(fs.fh / cs));
+    // Enforce 16:9 — trim whichever dimension is too large relative to the other
+    var vw, vh;
+    if (maxVw / maxVh > 16 / 9) { vw = Math.floor(maxVh * 16 / 9); vh = maxVh; }
+    else                        { vh = Math.floor(maxVw * 9  / 16); vw = maxVw; }
+    return {vw: vw, vh: vh};
+}
+
+const offCanvas = document.createElement('canvas');
+const offCtx    = offCanvas.getContext('2d');
+
+function call(a) {
+    return fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(a)});
+}
+function toggleCell(gx, gy) {
+    return fetch('/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({x:gx, y:gy})});
+}
+
+// RLE parser — .lif / .rle format, based on Golly specification
+function parseRLE(text) {
+    var cells = [];
+    var x = 0, y = 0;
+    var count = '';
+
+    // Strip comments (lines starting with #) and whitespace
+    text = text.replace(/#.*$/gm, '').replace(/\s/g, '');
+
+    for (var i = 0; i < text.length; i++) {
+        var c = text[i];
+        if (c >= '0' && c <= '9') { count += c; continue; }
+
+        var n = count ? parseInt(count) : 1;
+        count = '';
+
+        if (c === 'o') {
+            for (var j = 0; j < n; j++) { cells.push([x, y]); x++; }
+        } else if (c === 'b') {
+            x += n;
+        } else if (c === '$') {
+            x = 0; y += n;
+        } else if (c === '!') {
+            break;
+        }
+    }
+    return cells;
+}
+
+// Fixed frame size tracking — only resize when dimensions actually change (setting .width/.height clears canvas!)
+var canvasW = 0, canvasH = 0;
+
+function ensureCanvasSize() {
+    var fs = calcFrameSize();
+    if (fs.fw !== canvasW || fs.fh !== canvasH) {
+        canvasW = fs.fw; canvasH = fs.fh;
+        canvas.width  = canvasW;
+        canvas.height = canvasH;
+        canvas.style.width  = canvasW + 'px';
+        canvas.style.height = canvasH + 'px';
+    }
+}
+
+// Persistent buffers — reused across frames to avoid reallocation
+var prevBits = null, imgData = null, prevOverlay = null;
+var prevVw = 0, prevVh = 0;
+var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
+// Global label data accessible from updateLabels
+var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0;
+var refreshSeq = 0; // sequence guard: discard stale async responses
+var tracksEnabled = false; // disabled by default, hide active overlay when on
+
+function drawGrid(data) {
+    var hdr  = new DataView(data, 0, 32);
+    var gen     = hdr.getUint32(0, false);
+    var vw      = hdr.getUint16(4, false);
+    var vh      = hdr.getUint16(6, false);
+    var pop     = hdr.getUint32(8, false);
+    var active  = hdr.getUint32(12, false);
+    var ol_len  = hdr.getUint32(16, false);
+    var births  = hdr.getUint32(20, false);
+    var deaths  = hdr.getUint32(24, false);
+    var heap    = hdr.getUint32(28, false);
+
+    // Set globals for updateLabels()
+    lblGen = gen; lblPop = pop; lblActive = active;
+    lblBirths = births; lblDeaths = deaths; lblHeap = heap;
+
+    var bitsLen = ((vw * vh + 7) >> 3);
+    var bits = new Uint8Array(data, 32, bitsLen);
+    var overlayOff = 32 + bitsLen;
+    var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
+
+    // Decide: full redraw (viewport/zoom changed or first call) vs delta update
+    var needsFullRedraw = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
+
+    // Only resize offCanvas when needed — setting .width/.height clears it!
+    if (offCanvas.width !== vw || offCanvas.height !== vh) {
+        offCanvas.width  = vw;
+        offCanvas.height = vh;
+    }
+
+    if (needsFullRedraw) {
+        // Full redraw: create fresh ImageData, fill all pixels, paint entire canvas
+        imgData = offCtx.createImageData(vw, vh);
+        var px = imgData.data;
+        for (var i = 0; i < vw * vh; i++) {
+            var alive = (bits[i >>> 3] >> (i & 7)) & 1;
+            var p = i * 4;
+            if (alive) { px[p]=233; px[p+1]=69; px[p+2]=96; }                    // always pink
+            else if (tracksEnabled) { px[p]=26; px[p+1]=26; px[p+2]=46; }      // tracks mode = dark bg (no overlay)
+            else { var inAct = overlay.length > 0 && ((overlay[i>>>3]>>(i&7))&1); if(inAct){px[p]=34;px[p+1]=34;px[p+2]=58;}else{px[p]=26;px[p+1]=26;px[p+2]=46;} }
+            px[p+3] = 255;
+        }
+        ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(0, 0, canvasW, canvasH);
+
+        offCtx.putImageData(imgData, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        var cw = vw * cellSize;
+        var ch = vh * cellSize;
+        var ox = Math.floor((canvasW - cw) / 2);
+        var oy = Math.floor((canvasH - ch) / 2);
+        ctx.drawImage(offCanvas, ox, oy, cw, ch);
+        if (overlay.length > 0) { var copyOv2 = new Uint8Array(overlay.length); copyOv2.set(overlay); prevOverlay = copyOv2; }
+    } else {
+        // Delta: draw ONLY changed cells directly on main canvas
+        // (avoids putImageData of megabytes per frame at 1px zoom)
+        var total = vw * vh;
+        var numBytes = (total + 7) >> 3;
+
+        var cw2 = vw * cellSize, ch2 = vh * cellSize;
+        var ox2 = Math.floor((canvasW - cw2) / 2);
+        var oy2 = Math.floor((canvasH - ch2) / 2);
+
+        // Collect changes by color to minimize fillStyle switches
+        var aliveCells = [];
+        var deadCells = [];
+
+        for (var b = 0; b < numBytes; b++) {
+            var diff = bits[b] ^ prevBits[b];
+            if (diff === 0) continue;
+
+            var startPixel = b << 3;
+            for (var bit = 0; bit < 8; bit++) {
+                var idx = startPixel + bit;
+                if (idx >= total) break;
+                if (!(diff & (1 << bit))) continue;
+
+                var row = Math.floor(idx / vw);
+                var col = idx - row * vw;
+                if ((bits[b] >> bit) & 1) aliveCells.push(col, row);
+                else deadCells.push(col, row);
+            }
+        }
+
+        if (aliveCells.length === 0 && deadCells.length === 0) {
+            prevBits = bits;
+            updateLabels(vw, vh);
+            return;
+        }
+
+        // Batch draw: dead cells first — show tracks or restore bg
+        for (var i = 0; i < deadCells.length; i += 2) {
+             var di = deadCells[i+1] * vw + deadCells[i];
+            if (tracksEnabled && camX === prevCamX && camY === prevCamY) ctx.fillStyle = '#3a3a5a'; // track color only on static frames, not pan
+            else ctx.fillStyle = (overlay.length > 0 && ((overlay[di >>> 3] >> (di & 7)) & 1)) ? '#22223a' : '#1a1a2e';
+            ctx.fillRect(ox2 + deadCells[i]*cellSize, oy2 + deadCells[i+1]*cellSize, cellSize, cellSize);
+        }
+
+        ctx.fillStyle = '#e94560';
+        for (var i = 0; i < aliveCells.length; i += 2)
+            ctx.fillRect(ox2 + aliveCells[i] * cellSize, oy2 + aliveCells[i+1] * cellSize, cellSize, cellSize);
+
+        // Redraw background cells whose tile status changed (overlay update) — skip when tracks on
+        if (!tracksEnabled && prevOverlay !== null && overlay.length > 0) {
+            var bgLight = [], bgDark = [];
+            for (var b2 = 0; b2 < numBytes; b2++) {
+                var diff2 = overlay[b2] ^ prevOverlay[b2];
+                if (diff2 === 0) continue;
+                var startPx2 = b2 << 3;
+                for (var bit2 = 0; bit2 < 8; bit2++) {
+                    var idx2 = startPx2 + bit2;
+                    if (idx2 >= total) break;
+                    if (!(diff2 & (1 << bit2))) continue;
+                    // Only redraw dead cells (alive cells keep pink color)
+                    if (!((bits[b2] >> bit2) & 1)) {
+                        var row2 = Math.floor(idx2 / vw);
+                        var col2 = idx2 - row2 * vw;
+                        if ((overlay[b2] >> bit2) & 1) bgLight.push(col2, row2);
+                        else bgDark.push(col2, row2);
+                    }
+                }
+            }
+            ctx.fillStyle = '#22223a';
+            for (var i = 0; i < bgLight.length; i += 2)
+                ctx.fillRect(ox2 + bgLight[i]*cellSize, oy2 + bgLight[i+1]*cellSize, cellSize, cellSize);
+            ctx.fillStyle = '#1a1a2e';
+            for (var i = 0; i < bgDark.length; i += 2)
+                ctx.fillRect(ox2 + bgDark[i]*cellSize, oy2 + bgDark[i+1]*cellSize, cellSize, cellSize);
+        }
+    }
+
+    prevBits = bits;
+
+    prevVw = vw; prevVh = vh; prevCamX = camX; prevCamY = camY;
+    if (overlay.length > 0) { var copyOv = new Uint8Array(overlay.length); copyOv.set(overlay); prevOverlay = copyOv; } else { prevOverlay = null; }
+    updateLabels(vw, vh);
+}
+
+function updateLabels(vw, vh) {
+    var topInfo = document.getElementById('topInfo');
+    if (topInfo) {
+        topInfo.children[0].textContent = 'Gen: ' + lblGen;
+        // fpsLabel updated in animLoop
+        topInfo.children[2].textContent = 'Births: ' + lblBirths;
+        topInfo.children[3].textContent = 'Deaths: ' + lblDeaths;
+        topInfo.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
+        topInfo.children[5].textContent = 'Heap: ' + lblHeap;
+        topInfo.children[6].textContent = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
+        topInfo.children[7].textContent = 'Cam: ' + camX + ', ' + camY;
+    }
+}
+
+async function refresh() {
+    ensureCanvasSize();  // only resizes when dimensions actually changed
+    var vp = calcCells(cellSize);
+    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh;
+    var seq = ++refreshSeq;
+
+    // Wait until gen has advanced (avoid getting stale cached state)
+    var initialGen = lblGen;
+    while (true) {
+        var r = await fetch(url);
+        var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
+        if (seq !== refreshSeq) return;   // stale response, discard
+        var hdr = new DataView(data, 0, 32);
+        var gen = hdr.getUint32(0, false);
+        if (gen !== initialGen) {
+            drawGrid(data);
+            return;
+        }
+        // Gen hasn't advanced — Python still stepping, wait and retry
+        await new Promise(function(resolve) { setTimeout(resolve, 5); });
+    }
+}
+
+// Zoom refresh: doesn't touch refreshSeq so it won't cancel pending animLoop requests
+async function zoomRefresh() {
+    ensureCanvasSize();
+    var vp = calcCells(cellSize);
+    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh;
+    var r = await fetch(url);
+    var data = await r.arrayBuffer();
+    drawGrid(data);
+}
+
+async function doQuit() { stopAnim(); await fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'quit'})}); }
+
+// ---- Pan: Shift+drag or right-click drag. Right-click: recenter on mouseup ----
+var panning = false, pStartX, pStartY, camStartX, camStartY;
+var rcPending = null; // {cellX, cellY} — right-click held, awaiting click vs drag
+var wasPlayingBeforePan = false; // remember playback state during pan
+
+// Global so play/stop functions can be called from anywhere
+var running = false;
+var lastGenCount = 0, lastTime = 0, lastGenNum = 0; // for G/s calculation
+
+function stopAnim() { running = false; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
+
+function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastGenCount = 0; lastTime = performance.now(); animLoop(); }
+
+var animLoopPending = false; // prevent multiple simultaneous dispatches
+async function animLoop() {
+    var speedEl = document.getElementById('speedSlider');
+    var stepEl = document.getElementById('stepSlider');
+    if (!running || animLoopPending) return; // block while still processing previous step
+
+    var stepCount = step[+stepEl.value];
+    var startTime = performance.now();
+
+    animLoopPending = true; // block new dispatches until this iteration completes
+    try {
+        if (stepCount > 1) {
+            // Batch-step: step on server, then fetch snapshot
+            await call({action:'batch-step', count: stepCount});
+            await refresh();
+     } else {
+            // Use zoomRefresh (no gen-wait loop) to avoid stale data issues with keep-alive
+            await call({action:'step'});
+            zoomRefresh();
+        }
+
+        // If Stop was pressed while awaiting, exit loop
+        if (!running) return;
+    } finally {
+        animLoopPending = false; // allow next iteration to dispatch
+    }
+
+    var elapsed = performance.now() - startTime;
+
+    // G/s: measure actual generation progress from server-reported gen numbers
+    var now = performance.now();
+    if (now - lastTime >= 1000) {
+        var gs = Math.round((lblGen - lastGenNum) / ((now - lastTime) / 1000));
+        document.getElementById('fpsLabel').textContent = 'Gen/s: ' + gs;
+        lastGenNum = lblGen;
+        lastGenCount = 0; lastTime = now;
+    }
+
+    // max of 500 f/s with 2ms frame times, provided we can run that fast
+    var targetInterval = Math.max(2, 510 - 20 * (+speedEl.value));
+    var remaining = targetInterval - elapsed;
+    setTimeout(animLoop, remaining > 0 ? remaining : 0);
+}
+
+canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+// Helper: map click coords to grid cell
+function clickToGrid(e) {
+    var rect = canvas.getBoundingClientRect();
+    var scaleX = canvas.width / (rect.right - rect.left);
+    var scaleY = canvas.height / (rect.bottom - rect.top);
+    var mx = ((e.clientX - rect.left)) * scaleX;
+    var my = ((e.clientY - rect.top))  * scaleY;
+
+    var vp = calcCells(cellSize);
+    var cw = vp.vw * cellSize;
+    var ch = vp.vh * cellSize;
+    var ox = Math.floor((canvas.width  - cw) / 2);
+    var oy = Math.floor((canvas.height - ch) / 2);
+    mx -= ox; my -= oy;
+
+    if (mx < 0 || my < 0 || mx >= cw || my >= ch) return null;
+
+    return { cellX: Math.floor(mx / cellSize) + camX, cellY: Math.floor(my / cellSize) + camY };
+}
+
+canvas.addEventListener('mousedown', function(e) {
+    var target = clickToGrid(e);
+    if (!target) return;
+
+    // Right-click: record for recenter vs pan decision on mouseup
+    if (e.button === 2) {
+        e.preventDefault();
+        wasPlayingBeforePan = running;
+        if (running) stopAnim();
+        rcPending   = target;
+        pStartX     = e.clientX; pStartY = e.clientY;
+        camStartX   = camX;      camStartY = camY;
+        canvas.style.cursor = 'grabbing';
+        return;
+    }
+
+    // Shift+drag for pan (left-click only)
+    if (e.shiftKey) {
+        panning   = true;
+        wasPlayingBeforePan = running;
+        if (running) stopAnim();
+        pStartX   = e.clientX; pStartY = e.clientY;
+        camStartX = camX;      camStartY = camY;
+        canvas.style.cursor = 'grabbing';
+        return;
+    }
+
+    // Left-click: toggle cell
+    if (e.button === 0) {
+      toggleCell(target.cellX, target.cellY).then(zoomRefresh);
+    }
+});
+
+window.addEventListener('mouseup', function(e) {
+    panning = false; canvas.style.cursor = 'crosshair';
+
+    // Right-click released: recenter if we didn't end up panning
+    if (e.button === 2 && rcPending && !panning) {
+        camX = rcPending.cellX - Math.floor(calcCells(cellSize).vw / 2);
+       camY = rcPending.cellY - Math.floor(calcCells(cellSize).vh / 2);
+        rcPending = null;
+        zoomRefresh();
+    }
+
+    // Restart playback if it was running before pan started
+    if (wasPlayingBeforePan) {
+        wasPlayingBeforePan = false;
+        startAnim();
+    }
+});
+
+window.addEventListener('mousemove', function(e) {
+    if (panning) {
+        var dx = Math.round((e.clientX - pStartX) / cellSize);
+        var dy = Math.round((e.clientY - pStartY) / cellSize);
+        camX = camStartX - dx;
+        camY = camStartY - dy;
+   zoomRefresh(); // fire-and-forget, gen-wait loop handles stale data
+    }
+    // Right-click: check if we should switch from recenter to pan (moved > 10px)
+    if (rcPending && !panning) {
+        var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
+        if (moved > 10) {
+            panning = true;
+            camStartX = camX; camStartY = camY;
+            rcPending = null; // was a drag, cancel recenter
+        }
+    }
+});
+
+// ---- Zoom: mouse wheel & keyboard ----
+function doZoom(oldCs) {
+    // Keep center of viewport anchored in grid coords
+    var vpOld = calcCells(oldCs);
+    var centerX = camX + Math.floor(vpOld.vw / 2);
+    var centerY = camY + Math.floor(vpOld.vh / 2);
+
+    var vpNew = calcCells(cellSize);
+    camX = centerX - Math.floor(vpNew.vw / 2);
+    camY = centerY - Math.floor(vpNew.vh / 2);
+    if (!running) zoomRefresh();
+}
+
+canvas.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var oldCs = cellSize;
+    if (e.deltaY < 0) { cellSize = Math.min(MAX_ZOOM, cellSize + 1); }
+    else { cellSize = Math.max(MIN_ZOOM, cellSize - 1); }
+    if (cellSize !== oldCs) doZoom(oldCs);
+
+}, {passive: false});
+
+document.addEventListener('keydown', function(e) {
+    if (e.target.tagName === 'INPUT') return;
+    var oldCs = cellSize;
+    if (e.key === '=' || e.key === '+') { cellSize = Math.min(MAX_ZOOM, cellSize + 1); }
+    else if (e.key === '-') { cellSize = Math.max(MIN_ZOOM, cellSize - 1); }
+    else return;
+    if (cellSize !== oldCs) doZoom(oldCs);
+
+});
+
+// ---- Resize handler ----
+window.addEventListener('resize', function() { refresh(); });
+
+// ---- Controls ----
+document.addEventListener('DOMContentLoaded', async function() {
+    var playBtn = document.getElementById('playBtn');
+
+    playBtn.addEventListener('click', function() {
+        if (running) stopAnim();
+        else startAnim();
+    });
+
+    document.getElementById('stepBtn').addEventListener('click', async function() {
+ stopAnim(); await call({action:'step'}); zoomRefresh();
+    });
+
+    document.getElementById('randBtn').addEventListener('click', async function() {
+        stopAnim();
+        var vp = calcCells(cellSize);
+        var centerX = camX + Math.floor(vp.vw / 2);
+        var centerY = camY + Math.floor(vp.vh / 2);
+        await call({action:'randomize', cx: centerX, cy: centerY, size:100});
+        zoomRefresh();
+    });
+
+    document.getElementById('quitBtn').addEventListener('click', doQuit);
+    document.getElementById('tracksBtn').addEventListener('click', function() {
+        tracksEnabled = !tracksEnabled;
+        this.textContent = tracksEnabled ? 'Active' : 'Tracks';
+        imgData = null; // force full redraw
+        zoomRefresh();
+    });
+    document.getElementById('clearBtn').addEventListener('click', async function() {
+       stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';
+       await call({action:'clear'}); imgData = null; prevBits = null; prevOverlay = null; zoomRefresh();
+    });
+
+    // Load .lif file: parse RLE, load cells centered on viewport
+    document.getElementById('loadBtn').addEventListener('click', function() {
+        document.getElementById('fileInput').click();
+    });
+    document.getElementById('fileInput').addEventListener('change', async function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        stopAnim();
+        await call({action:'clear'});  // clear board before loading
+        var text = await file.text();
+        var cells = parseRLE(text);
+        var centerX = camX + Math.floor(calcCells(cellSize).vw / 2);
+        var centerY = camY + Math.floor(calcCells(cellSize).vh / 2);
+       await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: centerX, anchor_y: centerY})});
+        zoomRefresh();
+        e.target.value = ''; // allow re-selecting same file
+    });
+
+ // Update step value display when slider changes
+    document.getElementById('stepSlider').addEventListener('input', function() {
+        document.getElementById('stepVal').textContent = step[+this.value];
+    });
+
+    // Init
+    camX = 2000000000; camY = 2000000000;
+    var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
+    cx += 2000000000; cy += 2000000000;
+    await call({action:'randomize', cx: cx, cy: cy});
+    zoomRefresh();
+    setInterval(function() { if (!running) refresh(); }, 2000);
+});
+</script></body></html>"#;
