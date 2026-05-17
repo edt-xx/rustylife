@@ -57,18 +57,17 @@ impl Grid {
             let (nc_dict, work) = neighbor_count_worker(&chunks[0], &prev_active_tiles);
             Self::apply_rules(self, &nc_dict, work, &prev_active_tiles);
         } else {
-            let results: Vec<(LifeHashMap<u64, u32>, u32)> = chunks.par_iter()
+            let (nc_dict, work) = chunks.par_iter()
                 .map(|chunk| neighbor_count_worker(chunk, &prev_active_tiles))
-                .collect();
-
-            let mut nc_dict: LifeHashMap<u64, u32> = std::collections::HashMap::with_hasher(LifeBuildHasher);
-            let mut work: u32 = 0;
-            for (partial_nc, partial_work) in &results {
-                work += *partial_work;
-                for (&k, &v) in partial_nc {
-                    *nc_dict.entry(k).or_insert(0) += v;
-                }
-            }
+                .reduce_with(
+                    |(mut nc1, w1), (nc2, w2)| {
+                        for (&k, &v) in &nc2 {
+                            *nc1.entry(k).or_insert(0) += v;
+                        }
+                        (nc1, w1 + w2)
+                    },
+                )
+                .unwrap();
 
             Self::apply_rules(self, &nc_dict, work, &prev_active_tiles);
         }
