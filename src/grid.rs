@@ -42,8 +42,7 @@ impl Hasher for LifeHasher {
     }
 
     fn finish(&self) -> u64 {
-        let x = (self.buf >> 32) as u32;
-        let y = self.buf as u32;
+        let (x, y) = Coord::unpack(self.buf);
         // Zig-style hash: multiplication spreads bits, shift extracts high bits
         ((x.wrapping_mul(x) >> LIFE_HASH_SHIFT) as u64) ^
         (((y.wrapping_mul(y) >> LIFE_HASH_SHIFT) as u64) << 13)
