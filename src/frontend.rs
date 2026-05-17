@@ -11,17 +11,21 @@ button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5
 button:hover{background:#e94560;color:#1a1a2e}
 input[type=range]{width:100px;vertical-align:middle}
 .info{font-size:12px;color:#888;margin-left:4px}
-#topInfo{position:absolute;top:8px;left:50%;transform:translateX(-50%);display:flex;gap:8px;font-family:monospace;font-size:12px;color:#888;z-index:10}
+#topInfo{position:absolute;top:8px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
 </style></head><body>
 <div id="topInfo">
-  <span id="genLabel"></span>&nbsp;&nbsp;
-  <span id="fpsLabel"></span>&nbsp;&nbsp;
-  <span id="birthsLabel"></span>&nbsp;&nbsp;
-  <span id="deathsLabel"></span>&nbsp;&nbsp;
-  <span id="popLabel"></span>&nbsp;&nbsp;
-  <span id="heapLabel"></span>&nbsp;&nbsp;
-  <span id="zoomLabel"></span>&nbsp;&nbsp;
-  <span id="camLabel"></span>
+  <div id="infoLine1">
+    <span id="genLabel"></span>&nbsp;&nbsp;
+    <span id="fpsLabel"></span>&nbsp;&nbsp;
+    <span id="birthsLabel"></span>&nbsp;&nbsp;
+    <span id="deathsLabel"></span>&nbsp;&nbsp;
+    <span id="popLabel"></span>&nbsp;&nbsp;
+    <span id="heapLabel"></span>
+  </div>
+  <div id="infoLine2">
+    <span id="zoomLabel"></span>&nbsp;&nbsp;
+    <span id="camLabel"></span>
+  </div>
 </div>
 <div id="viewport"><canvas id="main"></canvas></div>
 <div class="toolbar">
@@ -381,16 +385,19 @@ function drawGrid(data) {
 }
 
 function updateLabels(vw, vh) {
-    var topInfo = document.getElementById('topInfo');
-    if (topInfo) {
-        topInfo.children[0].textContent = 'Gen: ' + lblGen;
+    var l1 = document.getElementById('infoLine1');
+    if (l1) {
+        l1.children[0].textContent = 'Gen: ' + lblGen;
         // fpsLabel updated in animLoop
-        topInfo.children[2].textContent = 'Births: ' + lblBirths;
-        topInfo.children[3].textContent = 'Deaths: ' + lblDeaths;
-        topInfo.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
-        topInfo.children[5].textContent = 'Heap: ' + lblHeap;
-        topInfo.children[6].textContent = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
-        topInfo.children[7].textContent = 'Cam: ' + camX + ', ' + camY;
+        l1.children[2].textContent = 'Births: ' + lblBirths;
+        l1.children[3].textContent = 'Deaths: ' + lblDeaths;
+        l1.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
+        l1.children[5].textContent = 'Heap: ' + lblHeap;
+    }
+    var l2 = document.getElementById('infoLine2');
+    if (l2) {
+        l2.children[0].textContent = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
+        l2.children[1].textContent = 'Cam: ' + camX + ', ' + camY;
     }
 }
 
