@@ -42,9 +42,10 @@ const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
 const step = [1,2,3,4,5,9,15,27,33,81,115,243];
 
-var cellSize = 3;               // pixels per cell (zoom level)
+var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
+var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
+var cellSize = ZOOM_LEVELS[zoomIdx];
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
-var MIN_ZOOM = 1, MAX_ZOOM = 15;
 
 // Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
 function calcFrameSize() {
@@ -481,8 +482,9 @@ function doZoom(oldCs) {
 canvas.addEventListener('wheel', function(e) {
     e.preventDefault();
     var oldCs = cellSize;
-    if (e.deltaY < 0) { cellSize = Math.min(MAX_ZOOM, cellSize + 1); }
-    else { cellSize = Math.max(MIN_ZOOM, cellSize - 1); }
+    if (e.deltaY < 0) { zoomIdx = Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1); }
+    else { zoomIdx = Math.max(0, zoomIdx - 1); }
+    cellSize = ZOOM_LEVELS[zoomIdx];
     if (cellSize !== oldCs) doZoom(oldCs);
 
 }, {passive: false});
@@ -490,9 +492,10 @@ canvas.addEventListener('wheel', function(e) {
 document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
     var oldCs = cellSize;
-    if (e.key === '=' || e.key === '+') { cellSize = Math.min(MAX_ZOOM, cellSize + 1); }
-    else if (e.key === '-') { cellSize = Math.max(MIN_ZOOM, cellSize - 1); }
+    if (e.key === '=' || e.key === '+') { zoomIdx = Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1); }
+    else if (e.key === '-') { zoomIdx = Math.max(0, zoomIdx - 1); }
     else return;
+    cellSize = ZOOM_LEVELS[zoomIdx];
     if (cellSize !== oldCs) doZoom(oldCs);
 
 });
