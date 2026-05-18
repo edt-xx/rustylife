@@ -78,6 +78,10 @@ pub struct Grid {
     pub heap: u32,
     pub active_tiles: LifeHashSet<u64>,
     pub active_count: u32,
+    // Pre-allocated buffers for step() — reused across generations to avoid allocations
+    pub(crate) apply_death_set: LifeHashSet<u64>,
+    pub(crate) apply_new_active: LifeHashSet<u64>,
+    pub(crate) apply_birth_list: Vec<u64>,
 }
 
 impl Grid {
@@ -90,6 +94,9 @@ impl Grid {
             heap: 0,
             active_tiles: std::collections::HashSet::with_hasher(LifeBuildHasher),
             active_count: 0,
+            apply_death_set: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
+            apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
+            apply_birth_list: Vec::with_capacity(128),
         }
     }
 

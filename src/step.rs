@@ -88,35 +88,43 @@ impl Grid {
     }
 
     fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u32>, work: u32) {
-        let mut birth_list = Vec::new();
-        let mut death_set: LifeHashSet<u64> = std::collections::HashSet::with_hasher(LifeBuildHasher);
-        let mut new_active: LifeHashSet<u64> = std::collections::HashSet::with_hasher(LifeBuildHasher);
+        // Use pre-allocated buffers from Grid struct to avoid per-step allocations
+        grid.apply_death_set.clear();
+        grid.apply_new_active.clear();
+        grid.apply_birth_list.clear();
 
-        for (&k, &c) in nc_dict {
-            if c < 10 {
-                if c == 3 {
-                    // Births only in active tiles
-                    let (x, y) = Coord::unpack(k);
-                    let ak = Coord::pack(Grid::tile(x), Grid::tile(y));
-                    if grid.active_tiles.contains(&ak) {
-                        Self::mark_active(k, &mut new_active);
-                        birth_list.push(k);
+        // Collect births/deaths/active using borrows to pre-allocated fields
+        // Borrow checker: all mutable field refs drop before accessing other fields below
+        {
+              let death_set = &mut grid.apply_death_set;
+            let new_active = &mut grid.apply_new_active;
+            let birth_list = &mut grid.apply_birth_list;
+
+            for (&k, &c) in nc_dict {
+                if c < 10 {
+                    if c == 3 {
+                        let (x, y) = Coord::unpack(k);
+                        let ak = Coord::pack(Grid::tile(x), Grid::tile(y));
+                        if grid.active_tiles.contains(&ak) {
+                            Self::mark_active(k, new_active);
+                            birth_list.push(k);
+                        }
                     }
+                } else if c < 12 || c > 13 {
+                    death_set.insert(k);
+                    Self::mark_active(k, new_active);
                 }
-            } else if c < 12 || c > 13 {
-                death_set.insert(k);
-                Self::mark_active(k, &mut new_active);
             }
         }
 
-        let births_count = birth_list.len();
-        grid.alive.retain(|e| !death_set.contains(e));
-        grid.alive.extend(birth_list);
-        grid.active_tiles = new_active;
+        let births_count = grid.apply_birth_list.len();
+        grid.alive.retain(|e| !grid.apply_death_set.contains(e));
+        grid.alive.extend_from_slice(&grid.apply_birth_list);
+        std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
         grid.active_count = work;
         grid.generation += 1;
         grid.births = births_count as u32;
-        grid.deaths = death_set.len() as u32;
+        grid.deaths = grid.apply_death_set.len() as u32;
         grid.heap = nc_dict.len() as u32;
     }
 }
