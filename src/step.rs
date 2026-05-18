@@ -59,7 +59,6 @@ fn neighbor_count_worker(
 impl Grid {
     pub fn step(&mut self) {
         let n_procs = if self.alive.len() > 25 * max_procs() { max_procs() } else { 1 };
-        let prev_active_tiles = self.active_tiles.clone();
 
         // Strided split: chunk[i] gets every nth element starting at i
         let chunks: Vec<Vec<u64>> = (0..n_procs)
@@ -67,11 +66,12 @@ impl Grid {
             .collect();
 
         if n_procs == 1 {
-            let (nc_dict, work) = neighbor_count_worker(&chunks[0], &prev_active_tiles);
-            Self::apply_rules(self, &nc_dict, work, &prev_active_tiles);
+            let (nc_dict, work) = neighbor_count_worker(&chunks[0], &self.active_tiles);
+            drop(chunks); // release borrow of self.alive before mutable call
+            Self::apply_rules(self, &nc_dict, work);
         } else {
             let (nc_dict, work) = chunks.par_iter()
-                .map(|chunk| neighbor_count_worker(chunk, &prev_active_tiles))
+                .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles))
                 .reduce_with(
                     |(mut nc1, w1), (nc2, w2)| {
                         for (&k, &v) in &nc2 {
@@ -82,11 +82,12 @@ impl Grid {
                 )
                 .unwrap();
 
-            Self::apply_rules(self, &nc_dict, work, &prev_active_tiles);
+            drop(chunks); // release borrow of self.alive before mutable call
+            Self::apply_rules(self, &nc_dict, work);
         }
     }
 
-    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u32>, work: u32, prev_active_tiles: &LifeHashSet<u64>) {
+    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u32>, work: u32) {
         let mut birth_list = Vec::new();
         let mut death_set: LifeHashSet<u64> = std::collections::HashSet::with_hasher(LifeBuildHasher);
         let mut new_active: LifeHashSet<u64> = std::collections::HashSet::with_hasher(LifeBuildHasher);
@@ -97,7 +98,7 @@ impl Grid {
                     // Births only in active tiles
                     let (x, y) = Coord::unpack(k);
                     let ak = Coord::pack(Grid::tile(x), Grid::tile(y));
-                    if prev_active_tiles.contains(&ak) {
+                    if grid.active_tiles.contains(&ak) {
                         Self::mark_active(k, &mut new_active);
                         birth_list.push(k);
                     }
