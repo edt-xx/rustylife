@@ -123,10 +123,9 @@ impl Grid {
 
     pub fn mark_active(k: u64, tiles: &mut LifeHashSet<u64>) {
         let (x, y) = Self::unpack(k);
-        let tx = Self::tile(x);
-        let ty = Self::tile(y);
-        let ox = x - tx;
-        let oy = y - ty;
+        let (ox, oy) = Self::mod_tile(k);
+        let tx = x - ox; 
+        let ty = y - oy;
 
         let ss = STATIC_SIZE as u32;
         let m1 = ss - 1; // SSM1 for u32
