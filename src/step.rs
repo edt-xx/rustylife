@@ -19,8 +19,8 @@ fn max_procs() -> usize {
 fn neighbor_count_worker(
     chunk: &[u64],
     active_tiles: &LifeHashSet<u64>,
-) -> (LifeHashMap<u64, u32>, u32) {
-    let mut local_nc: LifeHashMap<u64, u32> = std::collections::HashMap::with_hasher(LifeBuildHasher);
+) -> (LifeHashMap<u64, u8>, u32) {
+    let mut local_nc: LifeHashMap<u64, u8> = std::collections::HashMap::with_hasher(LifeBuildHasher);
     let mut work: u32 = 0;
     let ss1: u32 = (STATIC_SIZE - 1) as u32;
 
@@ -92,7 +92,7 @@ impl Grid {
         }
     }
 
-    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u32>, work: u32) {
+    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32) {
         // Use pre-allocated buffers from Grid struct to avoid per-step allocations
         grid.apply_new_active.clear();
 
