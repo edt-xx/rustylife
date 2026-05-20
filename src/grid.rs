@@ -71,32 +71,28 @@ pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
     [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)];
 
 pub struct Grid {
-    pub alive: Vec<u64>,
+    pub alive: LifeHashSet<u64>,
     pub generation: u32,
     pub births: u32,
     pub deaths: u32,
     pub heap: u32,
     pub active_tiles: LifeHashSet<u64>,
     pub active_count: u32,
-    // Pre-allocated buffers for step() — reused across generations to avoid allocations
-    pub(crate) apply_death_set: LifeHashSet<u64>,
+    // Pre-allocated buffer for step() — reused across generations to avoid allocations
     pub(crate) apply_new_active: LifeHashSet<u64>,
-    pub(crate) apply_birth_list: Vec<u64>,
 }
 
 impl Grid {
     pub fn new() -> Self {
         Self {
-            alive: Vec::new(),
+            alive: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             generation: 0,
             births: 0,
             deaths: 0,
             heap: 0,
             active_tiles: std::collections::HashSet::with_hasher(LifeBuildHasher),
             active_count: 0,
-            apply_death_set: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
-            apply_birth_list: Vec::with_capacity(128),
         }
     }
 
@@ -116,6 +112,13 @@ impl Grid {
     #[inline]
     pub fn tile(x: u32) -> u32 {
         x - x % (STATIC_SIZE as u32)
+    }
+
+    /// tile
+    #[inline]
+    pub fn mod_tile(k: u64) -> (u32, u32) {
+       let (x, y) = Coord::unpack(k);
+       ( x % (STATIC_SIZE as u32),  y % (STATIC_SIZE as u32))
     }
 
     pub fn mark_active(k: u64, tiles: &mut LifeHashSet<u64>) {
@@ -172,7 +175,7 @@ impl Grid {
                 if rng.f64() < density {
                     let x = (cx + dx as i64) as u32;
                     let y = (cy + dy as i64) as u32;
-                    self.alive.push(Self::k(x, y));
+                    self.alive.insert(Self::k(x, y));
                 }
             }
         }
@@ -192,10 +195,10 @@ impl Grid {
 
     pub fn toggle(&mut self, x: i64, y: i64) {
         let k = Self::k(x as u32, y as u32);
-        if let Some(pos) = self.alive.iter().position(|&v| v == k) {
-            self.alive.remove(pos);
+        if self.alive.contains(&k) {
+            self.alive.remove(&k);
         } else {
-            self.alive.push(k);
+            self.alive.insert(k);
         }
         Self::mark_active(k, &mut self.active_tiles);
     }
@@ -204,7 +207,7 @@ impl Grid {
         for &(cx, cy) in cells {
             let x = (cx + anchor_x) as u32;
             let y = (cy + anchor_y) as u32;
-            self.alive.push(Self::k(x, y));
+            self.alive.insert(Self::k(x, y));
         }
         self.init_active();
     }
