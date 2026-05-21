@@ -119,7 +119,7 @@ fn serve_state(
     }
 
     // Overlay: mark cells in active tiles within viewport (STATIC_SIZE×STATIC_SIZE blocks)
-    let ss = crate::grid::STATIC_SIZE as u32;
+    let ss = crate::grid::STATIC_SIZE;
     let mut overlay = vec![0u8; bits_len];
     for &tkey in &g.active_tiles {
         let (tx, ty) = Coord::unpack(tkey);

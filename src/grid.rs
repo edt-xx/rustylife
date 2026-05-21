@@ -66,7 +66,7 @@ pub type LifeHashSet<K> = std::collections::HashSet<K, LifeBuildHasher>;
 /// HashMap using Zig-style hash
 pub type LifeHashMap<K, V> = std::collections::HashMap<K, V, LifeBuildHasher>;
 
-pub const STATIC_SIZE: i64 = 4;
+pub const STATIC_SIZE: u32 = 4;
 pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
     [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)];
 
@@ -111,14 +111,14 @@ impl Grid {
     /// Tile coordinate: round down to nearest STATIC_SIZE boundary.
     #[inline]
     pub fn tile(x: u32) -> u32 {
-        x - x % (STATIC_SIZE as u32)
+        x - x % STATIC_SIZE
     }
 
     /// tile
     #[inline]
     pub fn mod_tile(k: u64) -> (u32, u32) {
        let (x, y) = Coord::unpack(k);
-       ( x % (STATIC_SIZE as u32),  y % (STATIC_SIZE as u32))
+       ( x % STATIC_SIZE,  y % STATIC_SIZE)
     }
 
     pub fn mark_active(k: u64, tiles: &mut LifeHashSet<u64>) {
@@ -127,7 +127,7 @@ impl Grid {
         let tx = x - ox; 
         let ty = y - oy;
 
-        let ss = STATIC_SIZE as u32;
+        let ss = STATIC_SIZE;
         let m1 = ss - 1; // SSM1 for u32
 
         tiles.insert(Coord::pack(tx, ty));

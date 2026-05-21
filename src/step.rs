@@ -22,7 +22,7 @@ fn neighbor_count_worker(
 ) -> (LifeHashMap<u64, u8>, u32) {
     let mut local_nc: LifeHashMap<u64, u8> = std::collections::HashMap::with_hasher(LifeBuildHasher);
     let mut work: u32 = 0;
-    let ss1: u32 = (STATIC_SIZE - 1) as u32;
+    let ss1: u32 = STATIC_SIZE - 1;
 
     for k in chunk {
         let (x, y) = Coord::unpack(*k);
