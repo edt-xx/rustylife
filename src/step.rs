@@ -22,7 +22,6 @@ fn neighbor_count_worker(
 ) -> (LifeHashMap<u64, u8>, u32) {
     let mut local_nc: LifeHashMap<u64, u8> = std::collections::HashMap::with_hasher(LifeBuildHasher);
     let mut work: u32 = 0;
-    let ss1: u32 = STATIC_SIZE - 1;
 
     for k in chunk {
         let (x, y) = Coord::unpack(*k);
@@ -41,18 +40,27 @@ fn neighbor_count_worker(
             }
             work += 1;
         } else {
-            // Static cell: propagate +1 ONLY to neighbors whose tile is active
-            // nothing to propagate if in center of static area
-            if mx > 0 && mx < ss1 && my > 0 && my < ss1 {
-                continue
+            // Static cell: grouped neighbor table — one active_tiles check per unique tile
+            let info = &TILE_NBR_MASK[mx as usize][my as usize];
+            if info.num_groups == 0 {
+                continue; // center — nothing to propagate
             }
-            for &(dx, dy) in &NEIGHBOR_OFFSETS {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                let n_tile = Coord::pack(Grid::tile(nx as u32), Grid::tile(ny as u32));
-                if active_tiles.contains(&n_tile) {
-                    let n = Coord::pack(nx as u32, ny as u32);
-                    *local_nc.entry(n).or_insert(0) += 1;
+
+            // Current tile world-space origin
+            let ct_x: i32 = (x - mx) as i32;
+            let ct_y: i32 = (y - my) as i32;
+
+            for gi in 0..info.num_groups as usize {
+                let g = &info.groups[gi];
+                let n_tile_x = ct_x + g.tdx as i32;
+                let n_tile_y = ct_y + g.tdy as i32;
+                if active_tiles.contains(&Coord::pack(n_tile_x as u32, n_tile_y as u32)) {
+                    for ci in 0..g.count as usize {
+                        let (cpx, cpy) = g.cells[ci];
+                        let nx = n_tile_x + cpx as i32;
+                        let ny = n_tile_y + cpy as i32;
+                        *local_nc.entry(Coord::pack(nx as u32, ny as u32)).or_insert(0) += 1;
+                    }
                 }
             }
         }

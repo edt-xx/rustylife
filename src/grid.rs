@@ -70,6 +70,59 @@ pub const STATIC_SIZE: u32 = 4;
 pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
     [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)];
 
+/// Groups cells by target tile — one active_tiles.contains() check per unique tile.
+#[derive(Clone, Copy)]
+pub struct TileNbrGroup {
+    pub tdx: i16,
+    pub tdy: i16,
+    pub count: u8,
+    pub cells: [(u8, u8); 3],
+}
+
+const TILE_NBR_GROUP_ZERO: TileNbrGroup = TileNbrGroup { tdx: 0, tdy: 0, count: 0, cells: [(0,0), (0,0), (0,0)] };
+
+#[derive(Clone, Copy)]
+pub struct TileNbrInfo {
+    pub num_groups: u8,
+    pub groups: [TileNbrGroup; 3],
+}
+
+const TILE_NBR_INFO_ZERO: TileNbrInfo = TileNbrInfo { num_groups: 0, groups: [TILE_NBR_GROUP_ZERO; 3] };
+
+// Compile-time guard: TABLE is hardcoded for STATIC_SIZE == 4
+const _: () = assert!(STATIC_SIZE == 4);
+
+pub const TILE_NBR_MASK: [[TileNbrInfo; 4]; 4] = [
+    // mx=0 (left edge)
+    [
+        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:-4,tdy:-4,count:1,cells:[(3,3),(0,0),(0,0)]},TileNbrGroup{tdx:-4,tdy:0,count:2,cells:[(3,0),(3,1),(0,0)]},TileNbrGroup{tdx:0,tdy:-4,count:2,cells:[(0,3),(1,3),(0,0)]}]},
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:-4,tdy:0,count:3,cells:[(3,0),(3,1),(3,2)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:-4,tdy:0,count:3,cells:[(3,1),(3,2),(3,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:-4,tdy:0,count:2,cells:[(3,2),(3,3),(0,0)]},TileNbrGroup{tdx:-4,tdy:4,count:1,cells:[(3,0),(0,0),(0,0)]},TileNbrGroup{tdx:0,tdy:4,count:2,cells:[(0,0),(1,0),(0,0)]}]},
+    ],
+    // mx=1
+    [
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:-4,count:3,cells:[(0,3),(1,3),(2,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TILE_NBR_INFO_ZERO,
+        TILE_NBR_INFO_ZERO,
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:4,count:3,cells:[(0,0),(1,0),(2,0)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+    ],
+    // mx=2
+    [
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:-4,count:3,cells:[(1,3),(2,3),(3,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TILE_NBR_INFO_ZERO,
+        TILE_NBR_INFO_ZERO,
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:4,count:3,cells:[(1,0),(2,0),(3,0)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+    ],
+    // mx=3 (right edge)
+    [
+        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:0,tdy:-4,count:2,cells:[(2,3),(3,3),(0,0)]},TileNbrGroup{tdx:4,tdy:-4,count:1,cells:[(0,3),(0,0),(0,0)]},TileNbrGroup{tdx:4,tdy:0,count:2,cells:[(0,0),(0,1),(0,0)]}]},
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:4,tdy:0,count:3,cells:[(0,0),(0,1),(0,2)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:4,tdy:0,count:3,cells:[(0,1),(0,2),(0,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:0,tdy:4,count:2,cells:[(2,0),(3,0),(0,0)]},TileNbrGroup{tdx:4,tdy:0,count:2,cells:[(0,2),(0,3),(0,0)]},TileNbrGroup{tdx:4,tdy:4,count:1,cells:[(0,0),(0,0),(0,0)]}]},
+    ],
+];
+
 pub struct Grid {
     pub alive: LifeHashSet<u64>,
     pub generation: u32,
