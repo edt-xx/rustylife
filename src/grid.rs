@@ -95,31 +95,59 @@ const _: () = assert!(STATIC_SIZE == 4);
 pub const TILE_NBR_MASK: [[TileNbrInfo; 4]; 4] = [
     // mx=0 (left edge)
     [
-        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:-4,tdy:-4,count:1,cells:[(3,3),(0,0),(0,0)]},TileNbrGroup{tdx:-4,tdy:0,count:2,cells:[(3,0),(3,1),(0,0)]},TileNbrGroup{tdx:0,tdy:-4,count:2,cells:[(0,3),(1,3),(0,0)]}]},
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:-4,tdy:0,count:3,cells:[(3,0),(3,1),(3,2)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:-4,tdy:0,count:3,cells:[(3,1),(3,2),(3,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
-        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:-4,tdy:0,count:2,cells:[(3,2),(3,3),(0,0)]},TileNbrGroup{tdx:-4,tdy:4,count:1,cells:[(3,0),(0,0),(0,0)]},TileNbrGroup{tdx:0,tdy:4,count:2,cells:[(0,0),(1,0),(0,0)]}]},
+        TileNbrInfo{num_groups:3,groups:[
+            TileNbrGroup{tdx:-4,tdy:-4,count:1,cells:[(3,3),(0,0),(0,0)]},
+            TileNbrGroup{tdx:-4,tdy: 0,count:2,cells:[(3,0),(3,1),(0,0)]},
+            TileNbrGroup{tdx: 0,tdy:-4,count:2,cells:[(0,3),(1,3),(0,0)]}]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx:-4,tdy: 0,count:3,cells:[(3,0),(3,1),(3,2)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx:-4,tdy: 0,count:3,cells:[(3,1),(3,2),(3,3)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:3,groups:[
+            TileNbrGroup{tdx:-4,tdy: 0,count:2,cells:[(3,2),(3,3),(0,0)]},
+            TileNbrGroup{tdx:-4,tdy: 4,count:1,cells:[(3,0),(0,0),(0,0)]},
+            TileNbrGroup{tdx: 0,tdy: 4,count:2,cells:[(0,0),(1,0),(0,0)]}]},
     ],
     // mx=1
     [
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:-4,count:3,cells:[(0,3),(1,3),(2,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 0,tdy:-4,count:3,cells:[(0,3),(1,3),(2,3)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
         TILE_NBR_INFO_ZERO,
         TILE_NBR_INFO_ZERO,
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:4,count:3,cells:[(0,0),(1,0),(2,0)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 0,tdy: 4,count:3,cells:[(0,0),(1,0),(2,0)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
     ],
     // mx=2
     [
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:-4,count:3,cells:[(1,3),(2,3),(3,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 0,tdy:-4,count:3,cells:[(1,3),(2,3),(3,3)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
         TILE_NBR_INFO_ZERO,
         TILE_NBR_INFO_ZERO,
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:0,tdy:4,count:3,cells:[(1,0),(2,0),(3,0)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 0,tdy: 4,count:3,cells:[(1,0),(2,0),(3,0)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
     ],
     // mx=3 (right edge)
     [
-        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:0,tdy:-4,count:2,cells:[(2,3),(3,3),(0,0)]},TileNbrGroup{tdx:4,tdy:-4,count:1,cells:[(0,3),(0,0),(0,0)]},TileNbrGroup{tdx:4,tdy:0,count:2,cells:[(0,0),(0,1),(0,0)]}]},
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:4,tdy:0,count:3,cells:[(0,0),(0,1),(0,2)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
-        TileNbrInfo{num_groups:1,groups:[TileNbrGroup{tdx:4,tdy:0,count:3,cells:[(0,1),(0,2),(0,3)]},TILE_NBR_GROUP_ZERO,TILE_NBR_GROUP_ZERO]},
-        TileNbrInfo{num_groups:3,groups:[TileNbrGroup{tdx:0,tdy:4,count:2,cells:[(2,0),(3,0),(0,0)]},TileNbrGroup{tdx:4,tdy:0,count:2,cells:[(0,2),(0,3),(0,0)]},TileNbrGroup{tdx:4,tdy:4,count:1,cells:[(0,0),(0,0),(0,0)]}]},
+        TileNbrInfo{num_groups:3,groups:[
+            TileNbrGroup{tdx: 0,tdy:-4,count:2,cells:[(2,3),(3,3),(0,0)]},
+            TileNbrGroup{tdx: 4,tdy:-4,count:1,cells:[(0,3),(0,0),(0,0)]},
+            TileNbrGroup{tdx: 4,tdy: 0,count:2,cells:[(0,0),(0,1),(0,0)]}]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 4,tdy: 0,count:3,cells:[(0,0),(0,1),(0,2)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:1,groups:[
+            TileNbrGroup{tdx: 4,tdy: 0,count:3,cells:[(0,1),(0,2),(0,3)]},
+            TILE_NBR_GROUP_ZERO, TILE_NBR_GROUP_ZERO]},
+        TileNbrInfo{num_groups:3,groups:[
+            TileNbrGroup{tdx: 0,tdy: 4,count:2,cells:[(2,0),(3,0),(0,0)]},
+            TileNbrGroup{tdx: 4,tdy: 0,count:2,cells:[(0,2),(0,3),(0,0)]},
+            TileNbrGroup{tdx: 4,tdy: 4,count:1,cells:[(0,0),(0,0),(0,0)]}]},
     ],
 ];
 
