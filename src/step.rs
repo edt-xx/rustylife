@@ -29,19 +29,8 @@ fn neighbor_count_worker(
         let (mx, my) = Grid::mod_tile(*k);
         let ak = Coord::pack(x-mx, y-my);
 
-        if active_tiles.contains(&ak) {
-            // Active cell: full processing (self +10, neighbors +1)
-            // this can create local_nc entries in static areas - filtered out later
-            *local_nc.entry(*k).or_insert(0) += 10;
-            for &(dx, dy) in &NEIGHBOR_OFFSETS {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                let n = Coord::pack(nx as u32, ny as u32);
-                *local_nc.entry(n).or_insert(0) += 1;
-            }
-            work += 1;
-        } else {
-            // Static cell: grouped neighbor table — one active_tiles check per unique tile
+        if !active_tiles.contains(&ak) {
+            // Static cell (hot path): grouped neighbor table — one active_tiles check per unique tile
             let info = &TILE_NBR_MASK[mx as usize][my as usize];
             if info.num_groups == 0 {
                 continue; // center — nothing to propagate
@@ -64,6 +53,17 @@ fn neighbor_count_worker(
                     }
                 }
             }
+        } else {
+            // Active cell (cold path): full processing (self +10, neighbors +1)
+            // this can create local_nc entries in static areas - filtered out later
+            *local_nc.entry(*k).or_insert(0) += 10;
+            for &(dx, dy) in &NEIGHBOR_OFFSETS {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                let n = Coord::pack(nx as u32, ny as u32);
+                *local_nc.entry(n).or_insert(0) += 1;
+            }
+            work += 1;
         }
     }
 
@@ -74,29 +74,26 @@ impl Grid {
     pub fn step(&mut self) {
         let n_procs = if self.alive.len() > 25 * max_procs() { max_procs() } else { 1 };
 
-        // Pre-allocate chunk buffers if needed (grow once, reuse every step)
-        while self.chunk_bufs.len() < n_procs {
-            self.chunk_bufs.push(Vec::new());
-        }
-        for buf in self.chunk_bufs.iter_mut().take(n_procs) {
-            buf.clear();
+        // Collect alive into flat contiguous buffer once per step
+        self.alive_vec.clear();
+        for &k in &self.alive {
+            self.alive_vec.push(k);
         }
 
-        // Single-pass round-robin distribution into pre-allocated buffers
-        for (i, &k) in self.alive.iter().enumerate() {
-            self.chunk_bufs[i % n_procs].push(k);
-        }
-        let chunks: &[Vec<u64>] = &self.chunk_bufs[..n_procs];
+        // Split into n_procs contiguous slices
+        let total = self.alive_vec.len();
+        let chunk_size = total / n_procs;
 
         if n_procs == 1 {
             let (nc_dict, work) = {
-                let hint = chunks[0].len().saturating_mul(11);
-                neighbor_count_worker(&chunks[0], &self.active_tiles, hint)
+                let chunk = &self.alive_vec[..];
+                let hint = chunk.len().saturating_mul(11);
+                neighbor_count_worker(chunk, &self.active_tiles, hint)
             };
             Self::apply_rules(self, &nc_dict, work);
         } else {
             let (nc_dict, work) = {
-                chunks.par_iter()
+                self.alive_vec.par_chunks(chunk_size)
                     .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles, chunk.len().saturating_mul(11)))
                     .reduce_with(
                         |(mut nc1, w1), (nc2, w2)| {

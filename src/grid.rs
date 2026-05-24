@@ -161,8 +161,8 @@ pub struct Grid {
     pub active_count: u32,
     // Pre-allocated buffer for step() — reused across generations to avoid allocations
     pub(crate) apply_new_active: LifeHashSet<u64>,
-    // Pre-allocated chunk buffers for parallel neighbor counting — reused each step
-    pub(crate) chunk_bufs: Vec<Vec<u64>>,
+    // Pre-allocated flat buffer for step() — contiguous slices distributed to workers
+    pub(crate) alive_vec: Vec<u64>,
 }
 
 impl Grid {
@@ -176,7 +176,7 @@ impl Grid {
             active_tiles: std::collections::HashSet::with_hasher(LifeBuildHasher),
             active_count: 0,
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
-            chunk_bufs: Vec::new(),
+            alive_vec: Vec::new(),
         }
     }
 
