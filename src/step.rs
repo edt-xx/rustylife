@@ -19,8 +19,9 @@ fn max_procs() -> usize {
 fn neighbor_count_worker(
     chunk: &[u64],
     active_tiles: &LifeHashSet<u64>,
+    hint: usize,
 ) -> (LifeHashMap<u64, u8>, u32) {
-    let mut local_nc: LifeHashMap<u64, u8> = std::collections::HashMap::with_hasher(LifeBuildHasher);
+    let mut local_nc: LifeHashMap<u64, u8> = std::collections::HashMap::with_capacity_and_hasher(hint, LifeBuildHasher);
     let mut work: u32 = 0;
 
     for k in chunk {
@@ -73,29 +74,41 @@ impl Grid {
     pub fn step(&mut self) {
         let n_procs = if self.alive.len() > 25 * max_procs() { max_procs() } else { 1 };
 
-        // Strided split: chunk[i] gets every nth element starting at i
-        let chunks: Vec<Vec<u64>> = (0..n_procs)
-            .map(|i| self.alive.iter().enumerate().filter(|(idx, _)| *idx % n_procs == i).map(|(_, &v)| v).collect())
-            .collect();
+        // Pre-allocate chunk buffers if needed (grow once, reuse every step)
+        while self.chunk_bufs.len() < n_procs {
+            self.chunk_bufs.push(Vec::new());
+        }
+        for buf in self.chunk_bufs.iter_mut().take(n_procs) {
+            buf.clear();
+        }
+
+        // Single-pass round-robin distribution into pre-allocated buffers
+        for (i, &k) in self.alive.iter().enumerate() {
+            self.chunk_bufs[i % n_procs].push(k);
+        }
+        let chunks: &[Vec<u64>] = &self.chunk_bufs[..n_procs];
 
         if n_procs == 1 {
-            let (nc_dict, work) = neighbor_count_worker(&chunks[0], &self.active_tiles);
-            drop(chunks); // release borrow of self.alive before mutable call
+            let (nc_dict, work) = {
+                let hint = chunks[0].len().saturating_mul(11);
+                neighbor_count_worker(&chunks[0], &self.active_tiles, hint)
+            };
             Self::apply_rules(self, &nc_dict, work);
         } else {
-            let (nc_dict, work) = chunks.par_iter()
-                .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles))
-                .reduce_with(
-                    |(mut nc1, w1), (nc2, w2)| {
-                        for (&k, &v) in &nc2 {
-                            *nc1.entry(k).or_insert(0) += v;
-                        }
-                        (nc1, w1 + w2)
-                    },
-                )
-                .unwrap();
+            let (nc_dict, work) = {
+                chunks.par_iter()
+                    .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles, chunk.len().saturating_mul(11)))
+                    .reduce_with(
+                        |(mut nc1, w1), (nc2, w2)| {
+                            for (&k, &v) in &nc2 {
+                                *nc1.entry(k).or_insert(0) += v;
+                            }
+                            (nc1, w1 + w2)
+                        },
+                    )
+                    .unwrap()
+            };
 
-            drop(chunks); // release borrow of self.alive before mutable call
             Self::apply_rules(self, &nc_dict, work);
         }
     }
