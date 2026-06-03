@@ -98,7 +98,7 @@ impl Grid {
             };
             Self::apply_rules(self, &nc_dict, work);
         } else {
-            let (nc_dict, work) = {
+          let (nc_dict, work) = {
                 self.alive_vec.par_chunks(chunk_size)
                     .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles, chunk.len().saturating_mul(11)))
                     .reduce_with(
@@ -111,6 +111,38 @@ impl Grid {
                     )
                     .unwrap()
             };
+            // Profiling (commented out):
+            // let last_worker_finish = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            // let active_tiles = &self.active_tiles;
+            // let (nc_dict, work) = {
+            //     let last_finish = std::sync::Arc::clone(&last_worker_finish);
+            //     self.alive_vec.par_chunks(chunk_size)
+            //         .map(move |chunk| {
+            //             let result = neighbor_count_worker(chunk, active_tiles, chunk.len().saturating_mul(11));
+            //             let ts = std::time::SystemTime::now()
+            //                 .duration_since(std::time::UNIX_EPOCH)
+            //                 .unwrap()
+            //                 .as_nanos() as u64;
+            //             last_finish.fetch_max(ts, std::sync::atomic::Ordering::Relaxed);
+            //             result
+            //         })
+            //         .reduce_with(
+            //             |(mut nc1, w1), (nc2, w2)| {
+            //                 for (&k, &v) in &nc2 {
+            //                     *nc1.entry(k).or_insert(0) += v;
+            //                 }
+            //                 (nc1, w1 + w2)
+            //             },
+            //         )
+            //         .unwrap()
+            // };
+            // let merge_end_ns = std::time::SystemTime::now()
+            //     .duration_since(std::time::UNIX_EPOCH)
+            //     .unwrap()
+            //     .as_nanos() as u64;
+            // let last_finish_ns = last_worker_finish.load(std::sync::atomic::Ordering::Relaxed);
+            // let merge_elapsed_ns = merge_end_ns - last_finish_ns;
+            // eprintln!("MERGE: {:.2}ms (nc_dict size: {})", merge_elapsed_ns as f64 / 1e6, nc_dict.len());
 
             Self::apply_rules(self, &nc_dict, work);
         }
