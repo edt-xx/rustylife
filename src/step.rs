@@ -2,6 +2,12 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 use crate::grid::*;
 
+#[derive(Clone)]
+struct ApplyEntry {
+    k: u64,
+    is_birth: bool,
+}
+
 fn max_procs() -> usize {
     fn calc() -> usize {
         // Cross-platform physical core count via sysinfo (static method in 0.37)
@@ -111,16 +117,15 @@ impl Grid {
     }
 
     fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32) {
-        // Use pre-allocated buffers from Grid struct to avoid per-step allocations
         grid.apply_new_active.clear();
+        grid.deaths = 0;
+        grid.births = 0;
 
-        // Collect births/deaths/active using borrows to pre-allocated fields
-        // Borrow checker: all mutable field refs drop before accessing other fields below
-        {
+        let n_procs = max_procs();
+
+        if n_procs <= 1 || nc_dict.len() < 25*n_procs {
+            // Sequential path for small dicts
             let new_active = &mut grid.apply_new_active;
-            grid.deaths = 0;
-            grid.births = 0;
-
             for (&k, &c) in nc_dict {
                 if c < 10 {
                     if c == 3 {
@@ -138,7 +143,44 @@ impl Grid {
                     grid.deaths += 1;
                 }
             }
+        } else {
+ // Parallel path with crossbeam channel (Sync receiver)
+            let (tx, rx) = crossbeam_channel::bounded::<ApplyEntry>(16384);
+            let active_tiles_ref = &grid.active_tiles;
+
+            rayon::scope(|s| {
+                // Single feeder thread — sequential iter is fast enough
+                s.spawn(move |_| {
+                    for (&k, &c) in nc_dict {
+                        if c < 10 {
+                            if c == 3 {
+                                let (x, y) = Coord::unpack(k);
+                                let ak = Coord::pack(Grid::tile(x), Grid::tile(y));
+                                if active_tiles_ref.contains(&ak) {
+                                    tx.send(ApplyEntry { k, is_birth: true }).unwrap();
+                                }
+                            }
+                        } else if c < 12 || c > 13 {
+                            tx.send(ApplyEntry { k, is_birth: false }).unwrap();
+                        }
+                    }
+                });
+
+                // Main thread receives and applies concurrently
+                let new_active = &mut grid.apply_new_active;
+                for entry in rx.iter() {
+                    if entry.is_birth {
+                        grid.alive.insert(entry.k);
+                        grid.births += 1;
+                    } else {
+                        grid.alive.remove(&entry.k);
+                        grid.deaths += 1;
+                    }
+                    Self::mark_active(entry.k, new_active);
+                }
+            });
         }
+
         std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
         grid.active_count = work;
         grid.generation += 1;
