@@ -72,13 +72,18 @@ fn neighbor_count_worker(
 
 impl Grid {
     pub fn step(&mut self) {
-        let n_procs = if self.alive.len() > 25 * max_procs() { max_procs() } else { 1 };
-
-        // Collect alive into flat contiguous buffer once per step
-        self.alive_vec.clear();
-        for &k in &self.alive {
-            self.alive_vec.push(k);
+        // Wait for background alive_vec collection from previous step
+        if let Some(handle) = self.collect_handle.take() {
+            handle.join().unwrap();
+        } else {
+            // No async collection pending (small population, randomize, load, edit, etc.)
+            self.alive_vec.clear();
+            for &k in &self.alive {
+                self.alive_vec.push(k);
+            }
         }
+
+        let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
 
         // Split into n_procs contiguous slices
         let total = self.alive_vec.len();
@@ -117,7 +122,7 @@ impl Grid {
 
         let n_procs = max_procs();
 
-        if n_procs <= 1 || nc_dict.len() < 25*n_procs {
+        if n_procs <= 1 || nc_dict.len() < 10000 {
             // Sequential path for small dicts
             let new_active = &mut grid.apply_new_active;
             for (&k, &c) in nc_dict {
@@ -180,5 +185,23 @@ impl Grid {
         grid.active_count = work;
         grid.generation += 1;
         grid.heap = nc_dict.len() as u32;
+
+        // Spawn background thread to collect alive into alive_vec for next step
+        // Only when population > 250K — thread overhead not worth it for small populations
+        if grid.alive.len() > 250_000 {
+            let grid_ptr = grid as *mut Grid as usize;
+            let handle = std::thread::spawn(move || {
+                let grid = unsafe { &mut *(grid_ptr as *mut Grid) };
+                let alive = &grid.alive;
+                let vec = &mut grid.alive_vec;
+                vec.clear();
+                for &k in alive {
+                    vec.push(k);
+                }
+            });
+            grid.collect_handle = Some(handle);
+        } else {
+            grid.collect_handle = None;
+        }
     }
 }

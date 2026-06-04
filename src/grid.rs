@@ -163,6 +163,8 @@ pub struct Grid {
     pub(crate) apply_new_active: LifeHashSet<u64>,
     // Pre-allocated flat buffer for step() — contiguous slices distributed to workers
     pub(crate) alive_vec: Vec<u64>,
+    // Background thread handle for async alive_vec collection (only when population > 100K)
+    pub(crate) collect_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Grid {
@@ -177,6 +179,7 @@ impl Grid {
             active_count: 0,
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             alive_vec: Vec::new(),
+            collect_handle: None,
         }
     }
 
