@@ -2,12 +2,6 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 use crate::grid::*;
 
-#[derive(Clone)]
-struct ApplyEntry {
-    k: u64,
-    is_birth: bool,
-}
-
 fn max_procs() -> usize {
     fn calc() -> usize {
         // Cross-platform physical core count via sysinfo (static method in 0.37)
@@ -98,7 +92,7 @@ impl Grid {
             };
             Self::apply_rules(self, &nc_dict, work);
         } else {
-          let (nc_dict, work) = {
+            let (nc_dict, work) = {
                 self.alive_vec.par_chunks(chunk_size)
                     .map(|chunk| neighbor_count_worker(chunk, &self.active_tiles, chunk.len().saturating_mul(11)))
                     .reduce_with(
@@ -111,38 +105,6 @@ impl Grid {
                     )
                     .unwrap()
             };
-            // Profiling (commented out):
-            // let last_worker_finish = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            // let active_tiles = &self.active_tiles;
-            // let (nc_dict, work) = {
-            //     let last_finish = std::sync::Arc::clone(&last_worker_finish);
-            //     self.alive_vec.par_chunks(chunk_size)
-            //         .map(move |chunk| {
-            //             let result = neighbor_count_worker(chunk, active_tiles, chunk.len().saturating_mul(11));
-            //             let ts = std::time::SystemTime::now()
-            //                 .duration_since(std::time::UNIX_EPOCH)
-            //                 .unwrap()
-            //                 .as_nanos() as u64;
-            //             last_finish.fetch_max(ts, std::sync::atomic::Ordering::Relaxed);
-            //             result
-            //         })
-            //         .reduce_with(
-            //             |(mut nc1, w1), (nc2, w2)| {
-            //                 for (&k, &v) in &nc2 {
-            //                     *nc1.entry(k).or_insert(0) += v;
-            //                 }
-            //                 (nc1, w1 + w2)
-            //             },
-            //         )
-            //         .unwrap()
-            // };
-            // let merge_end_ns = std::time::SystemTime::now()
-            //     .duration_since(std::time::UNIX_EPOCH)
-            //     .unwrap()
-            //     .as_nanos() as u64;
-            // let last_finish_ns = last_worker_finish.load(std::sync::atomic::Ordering::Relaxed);
-            // let merge_elapsed_ns = merge_end_ns - last_finish_ns;
-            // eprintln!("MERGE: {:.2}ms (nc_dict size: {})", merge_elapsed_ns as f64 / 1e6, nc_dict.len());
 
             Self::apply_rules(self, &nc_dict, work);
         }
@@ -176,8 +138,8 @@ impl Grid {
                 }
             }
         } else {
- // Parallel path with crossbeam channel (Sync receiver)
-            let (tx, rx) = crossbeam_channel::bounded::<ApplyEntry>(16384);
+ // Parallel path with crossbeam channel — i64: negative=birth, positive=death
+            let (tx, rx) = crossbeam_channel::bounded::<i64>(16384);
             let active_tiles_ref = &grid.active_tiles;
 
             rayon::scope(|s| {
@@ -189,26 +151,27 @@ impl Grid {
                                 let (x, y) = Coord::unpack(k);
                                 let ak = Coord::pack(Grid::tile(x), Grid::tile(y));
                                 if active_tiles_ref.contains(&ak) {
-                                    tx.send(ApplyEntry { k, is_birth: true }).unwrap();
+                                    tx.send(-(k as i64)).unwrap();
                                 }
                             }
                         } else if c < 12 || c > 13 {
-                            tx.send(ApplyEntry { k, is_birth: false }).unwrap();
+                            tx.send(k as i64).unwrap();
                         }
                     }
                 });
 
                 // Main thread receives and applies concurrently
                 let new_active = &mut grid.apply_new_active;
-                for entry in rx.iter() {
-                    if entry.is_birth {
-                        grid.alive.insert(entry.k);
+                for val in rx.iter() {
+                    let k = val.unsigned_abs();
+                    if val < 0 {
+                        grid.alive.insert(k);
                         grid.births += 1;
                     } else {
-                        grid.alive.remove(&entry.k);
+                        grid.alive.remove(&k);
                         grid.deaths += 1;
                     }
-                    Self::mark_active(entry.k, new_active);
+                    Self::mark_active(k, new_active);
                 }
             });
         }

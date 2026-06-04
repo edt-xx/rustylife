@@ -49,7 +49,7 @@ const step = [1,2,3,4,5,9,17,27,53,81,161,243];
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
-var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
+var camX = 1000000000, camY = 1000000000;         // top-left of viewport in grid coords
 
 // Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
 function calcFrameSize() {
@@ -680,9 +680,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 
     // Init
-    camX = 2000000000; camY = 2000000000;
+    camX = 1000000000; camY = 1000000000;
     var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
-    cx += 2000000000; cy += 2000000000;
+    cx += 1000000000; cy += 1000000000;
     await call({action:'randomize', cx: cx, cy: cy});
     zoomRefresh();
     setInterval(function() { if (!running) refresh(); }, 2000);
