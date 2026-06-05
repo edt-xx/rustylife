@@ -131,12 +131,12 @@ var prevAggBits = null;   // persistent aggregated bitmap for sub-pixel delta re
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
-var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0;
+var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0;
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var tracksEnabled = false; // disabled by default, hide active overlay when on
 
 function drawGrid(data) {
-    var hdr  = new DataView(data, 0, 32);
+    var hdr  = new DataView(data, 0, 36);
     var gen     = hdr.getUint32(0, false);
     var vw      = hdr.getUint16(4, false);
     var vh      = hdr.getUint16(6, false);
@@ -146,14 +146,15 @@ function drawGrid(data) {
     var births  = hdr.getUint32(20, false);
     var deaths  = hdr.getUint32(24, false);
     var heap    = hdr.getUint32(28, false);
+    var tiles   = hdr.getUint32(32, false);
 
     // Set globals for updateLabels()
     lblGen = gen; lblPop = pop; lblActive = active;
-    lblBirths = births; lblDeaths = deaths; lblHeap = heap;
+    lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
 
     var bitsLen = ((vw * vh + 7) >> 3);
-    var bits = new Uint8Array(data, 32, bitsLen);
-    var overlayOff = 32 + bitsLen;
+    var bits = new Uint8Array(data, 36, bitsLen);
+    var overlayOff = 36 + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
    // Sub-pixel mode: aggregate bits with delta updates
@@ -392,7 +393,7 @@ function updateLabels(vw, vh) {
         l1.children[2].textContent = 'Births: ' + lblBirths;
         l1.children[3].textContent = 'Deaths: ' + lblDeaths;
         l1.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
-        l1.children[5].textContent = 'Heap: ' + lblHeap;
+        l1.children[5].textContent = 'Heap: ' + lblHeap + ' (' + lblTiles + ')';
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
@@ -413,7 +414,7 @@ async function refresh() {
         var r = await fetch(url);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
         if (seq !== refreshSeq) return;   // stale response, discard
-        var hdr = new DataView(data, 0, 32);
+        var hdr = new DataView(data, 0, 36);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen) {
             drawGrid(data);

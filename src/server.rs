@@ -136,8 +136,8 @@ fn serve_state(
         }
     }
 
-    // Header: gen(u32), vw(u16), vh(u16), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32)
-    // Big-endian from Python's struct.pack(">IHHIIIIII", ...)
+    // Header: gen(u32), vw(u16), vh(u16), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
+    // Big-endian from Python's struct.pack(">IHHIIIIIII", ...)
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
     data.extend((vw as u16).to_be_bytes());
@@ -148,6 +148,7 @@ fn serve_state(
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
     data.extend(g.heap.to_be_bytes());
+    data.extend((g.active_tiles.len() as u32).to_be_bytes());
 
     data.extend(bits);
     data.extend(overlay);
