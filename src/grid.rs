@@ -70,6 +70,78 @@ pub const STATIC_SIZE: u32 = 4;
 pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
     [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)];
 
+/// Resizable bloom filter — power-of-2 size, 2 hashes, ~3% FP rate
+/// Power-of-2 eliminates division (uses bitwise AND). Single hash + split saves multiplies.
+pub struct BloomFilter {
+    bits: Vec<u64>,
+    pub size_bits: usize,
+    mask: usize, // size_bits - 1 (power of 2)
+}
+
+impl BloomFilter {
+    /// Round up to next power of 2
+    #[inline]
+    fn next_power_of_2(n: usize) -> usize {
+        if n <= 1 { return 1; }
+        1usize.saturating_mul(2).pow(64 - n.leading_zeros())
+    }
+
+    /// Resize bloom filter for `expected_elements` with ~3% false positive rate
+    /// With k=2 hashes: m ≈ 11 * n gives ~3% FP rate
+    pub fn resize(&mut self, expected_elements: usize) {
+        if expected_elements == 0 {
+            self.bits.clear();
+            self.size_bits = 0;
+            self.mask = 0;
+            return;
+        }
+        // m = 8 * n for ~5% FP with k=2, rounded up to power of 2
+        let raw_bits = expected_elements.saturating_mul(8);
+        let size_bits = Self::next_power_of_2(raw_bits);
+        let size_u64 = size_bits / 64;
+
+        if self.bits.len() != size_u64 {
+            self.bits = vec![0u64; size_u64];
+        } else {
+            self.bits.iter_mut().for_each(|w| *w = 0);
+        }
+        self.size_bits = size_bits;
+        self.mask = size_bits - 1;
+    }
+
+    #[inline]
+    pub fn insert(&mut self, key: u64) {
+        let (x, y) = Coord::unpack(key);
+        let h = ((x.wrapping_mul(x) >> 19) as u32) ^ (((y.wrapping_mul(y) >> 19) as u32) << 13);
+        let h1 = h as usize;
+        let h2 = (h >> 16) as usize;
+        let m = self.mask;
+
+        let bit1 = h1 & m;
+        self.bits[bit1 >> 6] |= 1u64 << (bit1 & 63);
+
+        let bit2 = h2 & m;
+        self.bits[bit2 >> 6] |= 1u64 << (bit2 & 63);
+    }
+
+    #[inline]
+    pub fn contains(&self, key: u64) -> bool {
+        let (x, y) = Coord::unpack(key);
+        let h = ((x.wrapping_mul(x) >> 19) as u32) ^ (((y.wrapping_mul(y) >> 19) as u32) << 13);
+        let h1 = h as usize;
+        let h2 = (h >> 16) as usize;
+        let m = self.mask;
+
+        let bit1 = h1 & m;
+        if self.bits[bit1 >> 6] & (1u64 << (bit1 & 63)) == 0 {
+            return false;
+        }
+
+        let bit2 = h2 & m;
+        self.bits[bit2 >> 6] & (1u64 << (bit2 & 63)) != 0
+    }
+}
+
 /// Groups cells by target tile — one active_tiles.contains() check per unique tile.
 #[derive(Clone, Copy)]
 pub struct TileNbrGroup {
@@ -165,6 +237,8 @@ pub struct Grid {
     pub(crate) alive_vec: Vec<u64>,
     // Background thread handle for async alive_vec collection (only when population > 100K)
     pub(crate) collect_handle: Option<std::thread::JoinHandle<()>>,
+    // Bloom filter for expanded active tiles — active_tiles + 1-tile neighborhood
+    pub(crate) expanded_bloom: BloomFilter,
 }
 
 impl Grid {
@@ -180,6 +254,7 @@ impl Grid {
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             alive_vec: Vec::new(),
             collect_handle: None,
+            expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
         }
     }
 
@@ -250,6 +325,19 @@ impl Grid {
         for k in &self.alive {
             Self::mark_active(*k, &mut self.active_tiles);
         }
+        // Expand active_tiles by 1 tile in all directions into bloom filter
+        self.expanded_bloom.resize(self.active_tiles.len() * 9);
+        let ss = STATIC_SIZE as i32;
+        for &tk in &self.active_tiles {
+            let (tx, ty) = Self::unpack(tk);
+            for dtx in [-ss, 0, ss] {
+                for dty in [-ss, 0, ss] {
+                    let ntx = (tx as i32 + dtx) as u32;
+                    let nty = (ty as i32 + dty) as u32;
+                    self.expanded_bloom.insert(Coord::pack(ntx, nty));
+                }
+            }
+        }
     }
 
     pub fn randomize(&mut self, cx: i64, cy: i64, size: i64, density: f64) {
@@ -272,6 +360,7 @@ impl Grid {
     pub fn clear(&mut self) {
         self.alive.clear();
         self.active_tiles.clear();
+        self.expanded_bloom.resize(0);
         self.active_count = 0;
         self.generation = 0;
         self.births = 0;
@@ -287,6 +376,17 @@ impl Grid {
             self.alive.insert(k);
         }
         Self::mark_active(k, &mut self.active_tiles);
+        // Expand this tile's neighborhood into bloom filter
+        let tk = Coord::pack(Self::tile(x as u32), Self::tile(y as u32));
+        let (tx, ty) = Self::unpack(tk);
+        let ss = STATIC_SIZE as i32;
+        for dtx in [-ss, 0, ss] {
+            for dty in [-ss, 0, ss] {
+                let ntx = (tx as i32 + dtx) as u32;
+                let nty = (ty as i32 + dty) as u32;
+                self.expanded_bloom.insert(Coord::pack(ntx, nty));
+            }
+        }
     }
 
     pub fn load_pattern(&mut self, cells: &[(i64, i64)], anchor_x: i64, anchor_y: i64) {
