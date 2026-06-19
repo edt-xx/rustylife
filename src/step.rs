@@ -82,19 +82,27 @@ impl Grid {
         #[allow(unused)]
         let t_start = if TIMING { Some(Instant::now()) } else { None };
 
-        // Wait for background alive_vec collection from previous step
-        if let Some(handle) = self.collect_handle.take() {
-            handle.join().unwrap();
+        // Initialize active_tiles and bloom filter on first step
+        if self.expanded_bloom.bits.is_empty() {
+            self.init_active();
         }
 
         // Filter alive_vec using bloom filter (filled from previous step)
         #[allow(unused)]
         let t_filter = if TIMING { Some(Instant::now()) } else { None };
         let bloom = &self.expanded_bloom;
-        self.alive_vec = self.alive.par_iter()
-            .filter(|k| bloom.contains(tile_key(**k)))
-            .copied()
+        let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
+        let chunk_size = self.alive.len() / n_procs;
+        let chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
+            .map(|chunk| chunk.iter()
+                .filter(|k| bloom.contains(tile_key(**k)))
+                .copied()
+                .collect())
             .collect();
+        self.alive_vec.clear();
+        for chunk in chunks {
+            self.alive_vec.extend(chunk);
+        }
         #[allow(unused)]
         let filter_us = if TIMING { t_filter.unwrap().elapsed().as_micros() } else { 0 };
 
@@ -149,29 +157,36 @@ impl Grid {
 
         if n_procs <= 1 || nc_dict.len() < 10000 {
             // Sequential path for small dicts
-            let new_active = &mut grid.apply_new_active;
+            let mut births: Vec<u64> = Vec::new();
+            let mut deaths: Vec<u64> = Vec::new();
             for (&k, &c) in nc_dict {
                 if c < 10 {
                     if c == 3 {
                         if grid.active_tiles.contains(&tile_key(k)) {
-                            Self::mark_active(k, new_active);
-                            grid.alive.insert(k);
-                            grid.births += 1;
+                            births.push(k);
                         }
                     }
                 } else if c < 12 || c > 13 {
-                    Self::mark_active(k, new_active);
-                    grid.alive.remove(&k);
-                    grid.deaths += 1;
+                    deaths.push(k);
                 }
             }
+            // Apply mutations
+            for k in births {
+                grid.insert_alive(k);
+                grid.births += 1;
+                Self::mark_active(k, &mut grid.apply_new_active);
+            }
+            for k in deaths {
+                grid.remove_alive(k);
+                grid.deaths += 1;
+                Self::mark_active(k, &mut grid.apply_new_active);
+            }
         } else {
- // Parallel path with crossbeam channel — i64: negative=birth, positive=death
+ // Parallel path — collect mutations first, apply after
             let (tx, rx) = crossbeam_channel::bounded::<i64>(16384);
             let active_tiles_ref = &grid.active_tiles;
 
             rayon::scope(|s| {
-                // Single feeder thread — sequential iter is fast enough
                 s.spawn(move |_| {
                     for (&k, &c) in nc_dict {
                         if c < 10 {
@@ -185,21 +200,20 @@ impl Grid {
                         }
                     }
                 });
-
-                // Main thread receives and applies concurrently
-                let new_active = &mut grid.apply_new_active;
-                for val in rx.iter() {
-                    let k = val.unsigned_abs();
-                    if val < 0 {
-                        grid.alive.insert(k);
-                        grid.births += 1;
-                    } else {
-                        grid.alive.remove(&k);
-                        grid.deaths += 1;
-                    }
-                    Self::mark_active(k, new_active);
-                }
             });
+
+            // Apply mutations after scope ends (no borrows)
+            for val in rx.iter() {
+                let k = val.unsigned_abs();
+                if val < 0 {
+                    grid.insert_alive(k);
+                    grid.births += 1;
+                } else {
+                    grid.remove_alive(k);
+                    grid.deaths += 1;
+                }
+                Self::mark_active(k, &mut grid.apply_new_active);
+            }
         }
 
         std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
@@ -232,27 +246,6 @@ impl Grid {
             eprintln!("gen={} filter={}us nc={}us ar={}us expand={}us total={}us bloom_bits={}",
                 grid.generation, filter_us, nc_us, ar_us, expand_us, total_us,
                 grid.expanded_bloom.size_bits);
-        }
-
-        // Spawn background thread to collect alive into alive_vec for next step
-        // Only when population > 250K — thread overhead not worth it for small populations
-        if grid.alive.len() > 250_000 {
-            let grid_ptr = grid as *mut Grid as usize;
-            let handle = std::thread::spawn(move || {
-                let grid = unsafe { &mut *(grid_ptr as *mut Grid) };
-                let alive = &grid.alive;
-                let bloom = &grid.expanded_bloom;
-                let vec = &mut grid.alive_vec;
-                vec.clear();
-                for &k in alive {
-                    if bloom.contains(tile_key(k)) {
-                        vec.push(k);
-                    }
-                }
-            });
-            grid.collect_handle = Some(handle);
-        } else {
-            grid.collect_handle = None;
         }
     }
 }

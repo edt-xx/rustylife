@@ -73,7 +73,7 @@ pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
 /// Resizable bloom filter — power-of-2 size, 2 hashes, ~3% FP rate
 /// Power-of-2 eliminates division (uses bitwise AND). Single hash + split saves multiplies.
 pub struct BloomFilter {
-    bits: Vec<u64>,
+    pub bits: Vec<u64>,
     pub size_bits: usize,
     mask: usize, // size_bits - 1 (power of 2)
 }
@@ -111,6 +111,7 @@ impl BloomFilter {
 
     #[inline]
     pub fn insert(&mut self, key: u64) {
+        if self.bits.is_empty() { return; }
         let (x, y) = Coord::unpack(key);
         let h = ((x.wrapping_mul(x) >> 19) as u32) ^ (((y.wrapping_mul(y) >> 19) as u32) << 13);
         let h1 = h as usize;
@@ -126,6 +127,7 @@ impl BloomFilter {
 
     #[inline]
     pub fn contains(&self, key: u64) -> bool {
+        if self.bits.is_empty() { return false; }
         let (x, y) = Coord::unpack(key);
         let h = ((x.wrapping_mul(x) >> 19) as u32) ^ (((y.wrapping_mul(y) >> 19) as u32) << 13);
         let h1 = h as usize;
@@ -224,7 +226,10 @@ pub const TILE_NBR_MASK: [[TileNbrInfo; 4]; 4] = [
 ];
 
 pub struct Grid {
-    pub alive: LifeHashSet<u64>,
+    /// Contiguous Vec for parallel chunked iteration
+    pub alive: Vec<u64>,
+    /// Maps key -> Vec index for O(1) swap-remove deletes
+    pub alive_index: LifeHashMap<u64, usize>,
     pub generation: u32,
     pub births: u32,
     pub deaths: u32,
@@ -235,8 +240,6 @@ pub struct Grid {
     pub(crate) apply_new_active: LifeHashSet<u64>,
     // Pre-allocated flat buffer for step() — contiguous slices distributed to workers
     pub(crate) alive_vec: Vec<u64>,
-    // Background thread handle for async alive_vec collection (only when population > 100K)
-    pub(crate) collect_handle: Option<std::thread::JoinHandle<()>>,
     // Bloom filter for expanded active tiles — active_tiles + 1-tile neighborhood
     pub(crate) expanded_bloom: BloomFilter,
 }
@@ -244,7 +247,8 @@ pub struct Grid {
 impl Grid {
     pub fn new() -> Self {
         Self {
-            alive: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
+            alive: Vec::with_capacity(256),
+            alive_index: LifeHashMap::with_capacity_and_hasher(256, LifeBuildHasher),
             generation: 0,
             births: 0,
             deaths: 0,
@@ -253,7 +257,6 @@ impl Grid {
             active_count: 0,
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             alive_vec: Vec::new(),
-            collect_handle: None,
             expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
         }
     }
@@ -281,6 +284,29 @@ impl Grid {
     pub fn mod_tile(k: u64) -> (u32, u32) {
        let (x, y) = Coord::unpack(k);
        ( x % STATIC_SIZE,  y % STATIC_SIZE)
+    }
+
+    /// Insert into alive Vec + index HashMap
+    pub fn insert_alive(&mut self, k: u64) {
+        self.alive.push(k);
+        self.alive_index.insert(k, self.alive.len() - 1);
+    }
+
+    /// Remove from alive Vec (swap-remove) + index HashMap
+    pub fn remove_alive(&mut self, k: u64) {
+        let idx = self.alive_index.remove(&k).unwrap();
+        let last = self.alive.len() - 1;
+        if idx != last {
+            let swapped = self.alive[last];
+            self.alive[idx] = swapped;
+            self.alive_index.insert(swapped, idx);
+        }
+        self.alive.pop();
+    }
+
+    /// Check if cell is alive
+    pub fn contains_alive(&self, k: u64) -> bool {
+        self.alive_index.contains_key(&k)
     }
 
     pub fn mark_active(k: u64, tiles: &mut LifeHashSet<u64>) {
@@ -320,10 +346,10 @@ impl Grid {
         }
     }
 
-    fn init_active(&mut self) {
+    pub(crate) fn init_active(&mut self) {
         self.active_tiles.clear();
-        for k in &self.alive {
-            Self::mark_active(*k, &mut self.active_tiles);
+        for &k in &self.alive {
+            Self::mark_active(k, &mut self.active_tiles);
         }
         // Expand active_tiles by 1 tile in all directions into bloom filter
         self.expanded_bloom.resize(self.active_tiles.len() * 9);
@@ -344,21 +370,24 @@ impl Grid {
         let half = (size / 2) as u32;
         let mut rng = fastrand::Rng::new();
         self.alive.clear();
+        self.alive_index.clear();
+        self.active_tiles.clear();
+        self.expanded_bloom.resize(0);
         for dx in -(half as i32)..=(half as i32) {
             for dy in -(half as i32)..=(half as i32) {
                 if rng.f64() < density {
                     let x = (cx + dx as i64) as u32;
                     let y = (cy + dy as i64) as u32;
-                    self.alive.insert(Self::k(x, y));
+                    self.insert_alive(Self::k(x, y));
                 }
             }
         }
         self.generation = 0;
-        self.init_active();
     }
 
     pub fn clear(&mut self) {
         self.alive.clear();
+        self.alive_index.clear();
         self.active_tiles.clear();
         self.expanded_bloom.resize(0);
         self.active_count = 0;
@@ -370,22 +399,10 @@ impl Grid {
 
     pub fn toggle(&mut self, x: i64, y: i64) {
         let k = Self::k(x as u32, y as u32);
-        if self.alive.contains(&k) {
-            self.alive.remove(&k);
+        if self.contains_alive(k) {
+            self.remove_alive(k);
         } else {
-            self.alive.insert(k);
-        }
-        Self::mark_active(k, &mut self.active_tiles);
-        // Expand this tile's neighborhood into bloom filter
-        let tk = Coord::pack(Self::tile(x as u32), Self::tile(y as u32));
-        let (tx, ty) = Self::unpack(tk);
-        let ss = STATIC_SIZE as i32;
-        for dtx in [-ss, 0, ss] {
-            for dty in [-ss, 0, ss] {
-                let ntx = (tx as i32 + dtx) as u32;
-                let nty = (ty as i32 + dty) as u32;
-                self.expanded_bloom.insert(Coord::pack(ntx, nty));
-            }
+            self.insert_alive(k);
         }
     }
 
@@ -393,8 +410,7 @@ impl Grid {
         for &(cx, cy) in cells {
             let x = (cx + anchor_x) as u32;
             let y = (cy + anchor_y) as u32;
-            self.alive.insert(Self::k(x, y));
+            self.insert_alive(Self::k(x, y));
         }
-        self.init_active();
     }
 }

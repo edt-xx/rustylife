@@ -106,8 +106,8 @@ fn serve_state(
 
     // Bits: bit-packed alive cells in viewport
     let mut bits = vec![0u8; bits_len];
-    for k in &g.alive {
-        let (ax, ay) = Coord::unpack(*k);
+    for &k in &g.alive {
+        let (ax, ay) = Coord::unpack(k);
         if ax >= vx && ay >= vy {
             let rx = ax - vx;
             let ry = ay - vy;
