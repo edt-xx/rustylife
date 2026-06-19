@@ -90,13 +90,11 @@ impl Grid {
         // Filter alive_vec using bloom filter (filled from previous step)
         #[allow(unused)]
         let t_filter = if TIMING { Some(Instant::now()) } else { None };
-        self.alive_vec.clear();
         let bloom = &self.expanded_bloom;
-        for &k in &self.alive {
-            if bloom.contains(tile_key(k)) {
-                self.alive_vec.push(k);
-            }
-        }
+        self.alive_vec = self.alive.par_iter()
+            .filter(|k| bloom.contains(tile_key(**k)))
+            .copied()
+            .collect();
         #[allow(unused)]
         let filter_us = if TIMING { t_filter.unwrap().elapsed().as_micros() } else { 0 };
 
