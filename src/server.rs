@@ -33,6 +33,7 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
             ("POST", "/action") => handle_action(&grid, &mut request),
             ("POST", "/toggle") => handle_toggle(&grid, &mut request),
             ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
+            ("POST", "/toggle-timing") => handle_toggle_timing(),
             _ => serve_404(),
         };
 
@@ -215,6 +216,11 @@ fn handle_toggle(
         grid.lock().unwrap().toggle(x, y);
     }
 
+    serve_json(r#"{"ok":true}"#)
+}
+
+fn handle_toggle_timing() -> Response<Cursor<Vec<u8>>> {
+    crate::step::toggle_timing();
     serve_json(r#"{"ok":true}"#)
 }
 

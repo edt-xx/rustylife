@@ -1,10 +1,20 @@
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 use crate::grid::*;
 
-/// Set to true to enable per-generation timing output to stderr
-const TIMING: bool = false;
+/// Runtime toggle for per-generation timing output to stderr
+static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn toggle_timing() {
+    let current = TIMING_ENABLED.load(Ordering::Relaxed);
+    TIMING_ENABLED.store(!current, Ordering::Relaxed);
+}
+
+fn timing_on() -> bool {
+    TIMING_ENABLED.load(Ordering::Relaxed)
+}
 
 fn max_procs() -> usize {
     fn calc() -> usize {
@@ -36,16 +46,17 @@ fn neighbor_count_worker(
 
     for k in chunk {
         let (x, y) = Coord::unpack(*k);
-        let (mx, my) = Grid::mod_tile(*k);
-        let ct_x: u32 = x - mx;
-        let ct_y: u32 = y - my;
 
-        if !active_tiles.contains(&Coord::pack(ct_x, ct_y)) {
+        if !active_tiles.contains(&tile_key(*k)) {
+            let (mx, my) = Grid::mod_tile(*k);
             // Static cell (hot path): grouped neighbor table — one active_tiles check per unique tile
             let info = &TILE_NBR_MASK[mx as usize][my as usize];
             if info.num_groups == 0 {
                 continue; // center — nothing to propagate
             }
+
+            let ct_x: u32 = x - mx;
+            let ct_y: u32 = y - my;
 
             for gi in 0..info.num_groups as usize {
                 let g = &info.groups[gi];
@@ -79,8 +90,7 @@ fn neighbor_count_worker(
 
 impl Grid {
     pub fn step(&mut self) {
-        #[allow(unused)]
-        let t_start = if TIMING { Some(Instant::now()) } else { None };
+        let t_start = Instant::now();
 
         // Initialize active_tiles and bloom filter on first step
         if self.expanded_bloom.bits.is_empty() {
@@ -88,23 +98,22 @@ impl Grid {
         }
 
         // Filter alive_vec using bloom filter (filled from previous step)
-        #[allow(unused)]
-        let t_filter = if TIMING { Some(Instant::now()) } else { None };
+        let t_filter = Instant::now();
         let bloom = &self.expanded_bloom;
         let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
         let chunk_size = self.alive.len() / n_procs;
-        let chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
+        let mut chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
             .map(|chunk| chunk.iter()
                 .filter(|k| bloom.contains(tile_key(**k)))
                 .copied()
                 .collect())
             .collect();
         self.alive_vec.clear();
+        fastrand::shuffle(&mut chunks);
         for chunk in chunks {
             self.alive_vec.extend(chunk);
         }
-        #[allow(unused)]
-        let filter_us = if TIMING { t_filter.unwrap().elapsed().as_micros() } else { 0 };
+        let filter_us = t_filter.elapsed().as_micros();
 
         // Bloom filter will be resized (and cleared) at end of apply_rules
 
@@ -114,16 +123,14 @@ impl Grid {
         let total = self.alive_vec.len();
         let chunk_size = total / n_procs;
 
-        #[allow(unused)]
-        let t_nc = if TIMING { Some(Instant::now()) } else { None };
+        let t_nc = Instant::now();
         if n_procs == 1 {
             let (nc_dict, work) = {
                 let chunk = &self.alive_vec[..];
                 let hint = chunk.len().saturating_mul(11);
                 neighbor_count_worker(chunk, &self.active_tiles, hint)
             };
-            #[allow(unused)]
-            let nc_us = if TIMING { t_nc.unwrap().elapsed().as_micros() } else { 0 };
+            let nc_us = t_nc.elapsed().as_micros();
             Self::apply_rules(self, &nc_dict, work, filter_us, nc_us, t_start);
         } else {
             let (nc_dict, work) = {
@@ -139,47 +146,35 @@ impl Grid {
                     )
                     .unwrap()
             };
-            #[allow(unused)]
-            let nc_us = if TIMING { t_nc.unwrap().elapsed().as_micros() } else { 0 };
+            let nc_us = t_nc.elapsed().as_micros();
             Self::apply_rules(self, &nc_dict, work, filter_us, nc_us, t_start);
         }
     }
 
-    #[allow(unused)]
-    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32, filter_us: u128, nc_us: u128, t_start: Option<Instant>) {
-        #[allow(unused)]
-        let t_ar = if TIMING { Some(Instant::now()) } else { None };
+    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32, filter_us: u128, nc_us: u128, t_start: Instant) {
+        let t_ar = Instant::now();
         grid.apply_new_active.clear();
         grid.deaths = 0;
         grid.births = 0;
 
         let n_procs = max_procs();
 
-        if n_procs <= 1 || nc_dict.len() < 10000 {
+        if n_procs <= 1 || nc_dict.len() < 1000000 {
             // Sequential path for small dicts
-            let mut births: Vec<u64> = Vec::new();
-            let mut deaths: Vec<u64> = Vec::new();
             for (&k, &c) in nc_dict {
                 if c < 10 {
                     if c == 3 {
                         if grid.active_tiles.contains(&tile_key(k)) {
-                            births.push(k);
+                            grid.insert_alive(k);
+                            grid.births += 1;
+                            Self::mark_active(k, &mut grid.apply_new_active);
                         }
                     }
                 } else if c < 12 || c > 13 {
-                    deaths.push(k);
+                    grid.remove_alive(k);
+                    grid.deaths += 1;
+                    Self::mark_active(k, &mut grid.apply_new_active);
                 }
-            }
-            // Apply mutations
-            for k in births {
-                grid.insert_alive(k);
-                grid.births += 1;
-                Self::mark_active(k, &mut grid.apply_new_active);
-            }
-            for k in deaths {
-                grid.remove_alive(k);
-                grid.deaths += 1;
-                Self::mark_active(k, &mut grid.apply_new_active);
             }
         } else {
  // Parallel path — collect mutations first, apply after
@@ -221,30 +216,28 @@ impl Grid {
         grid.generation += 1;
         grid.heap = nc_dict.len() as u32;
 
-        // Expand active_tiles by 1 tile in all directions for next step's alive_vec filter
-        #[allow(unused)]
-        let t_expand = if TIMING { Some(Instant::now()) } else { None };
-        // Resize bloom filter for optimal size (~3% FP rate)
+        // Expand active_tiles by 1 tile in all directions for next step's bloom filter
+        let t_expand = Instant::now();
+        // Resize bloom filter for optimal size (~5% FP rate)
         grid.expanded_bloom.resize(grid.active_tiles.len() * 9);
         let ss = STATIC_SIZE as i32;
         for &tk in &grid.active_tiles {
             let (tx_t, ty_t) = Coord::unpack(tk);
             for dtx in [-ss, 0, ss] {
                 for dty in [-ss, 0, ss] {
-                    let ntx = (tx_t as i32 + dtx) as u32;
-                    let nty = (ty_t as i32 + dty) as u32;
+                    let ntx = tx_t.wrapping_add(dtx as u32);
+                    let nty = ty_t.wrapping_add(dty as u32);
                     grid.expanded_bloom.insert(Coord::pack(ntx, nty));
                 }
             }
         }
-        #[allow(unused)]
-        let expand_us = if TIMING { t_expand.unwrap().elapsed().as_micros() } else { 0 };
+        let expand_us = t_expand.elapsed().as_micros();
 
-        if TIMING {
-            let ar_us = t_ar.unwrap().elapsed().as_micros();
-            let total_us = t_start.unwrap().elapsed().as_micros();
-            eprintln!("gen={} filter={}us nc={}us ar={}us expand={}us total={}us bloom_bits={}",
-                grid.generation, filter_us, nc_us, ar_us, expand_us, total_us,
+        if timing_on() {
+            let ar_us = t_ar.elapsed().as_micros();
+            let total_us = t_start.elapsed().as_micros();
+            eprintln!("gen={} filter={}us ({}) nc={}us ({}) ar={}us ({}) expand={}us ({}) total={}us bloom_bits={}",
+                grid.generation, filter_us, grid.apply_new_active.len(), nc_us, grid.alive_vec.len(), ar_us, nc_dict.len(), expand_us, grid.active_tiles.len(), total_us,
                 grid.expanded_bloom.size_bits);
         }
     }

@@ -274,10 +274,10 @@ impl Grid {
     }
 
     /// Tile coordinate: round down to nearest STATIC_SIZE boundary.
-    #[inline]
-    pub fn tile(x: u32) -> u32 {
-        x - x % STATIC_SIZE
-    }
+    //#[inline]
+    //pub fn tile(x: u32) -> u32 {
+    //    x - x % STATIC_SIZE
+    //}
 
     /// tile
     #[inline]

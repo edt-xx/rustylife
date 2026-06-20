@@ -3,6 +3,11 @@ mod grid;
 mod server;
 mod step;
 
+use jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use std::sync::{Arc, Mutex};
 use grid::Grid;
 

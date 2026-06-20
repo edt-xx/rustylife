@@ -41,6 +41,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="tracksBtn">Tracks</button>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
 </div>
+<button id="timingBtn" style="position:absolute;right:24px;bottom:12px;background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px;z-index:11">Timing</button>
 <script>
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
@@ -651,6 +652,10 @@ document.addEventListener('DOMContentLoaded', async function() {
         this.textContent = tracksEnabled ? 'Active' : 'Tracks';
         imgData = null; // force full redraw
         zoomRefresh();
+    });
+    document.getElementById('timingBtn').addEventListener('click', async function() {
+        await fetch('/toggle-timing', {method:'POST', headers:{'Content-Type':'application/json'}});
+        this.textContent = this.textContent === 'NoTiming' ? 'Timing' : 'NoTiming';
     });
     document.getElementById('clearBtn').addEventListener('click', async function() {
        stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';
