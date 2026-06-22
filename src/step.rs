@@ -182,9 +182,6 @@ impl Grid {
         grid.generation += 1;
         grid.heap = nc_dict.len() as u32;
 
-        // Capture bloom filter size before borrow conflict (21 entries per tile: tile + 20 border cells)
-        let bloom_size = grid.active_tiles.len() * 15;
-
         // Safety: raw pointers to disjoint fields — alive/alive_index/deaths_buf/births_buf
         // are accessed by closure 1, expanded_bloom/active_bloom/active_tiles by closure 2.
         // Converted to usize to bypass Send check. rayon::join guarantees no concurrent access.
@@ -226,8 +223,10 @@ impl Grid {
                 let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
                 let active_bloom = unsafe { &mut *(active_bloom_ptr as *mut BloomFilter) };
                 let active = unsafe { &*(active_ptr as *const LifeHashSet<u64>) };
-                bloom.resize(bloom_size);
-                active_bloom.resize(active.len());
+                // max of 20*active.len()
+                bloom.resize(active.len()*15);
+                // max of active.len() *2 to lower error rate
+                active_bloom.resize(active.len()*2);
                 let ss = STATIC_SIZE as u32;
                 for &tk in active {
                     let (tx, ty) = Coord::unpack(tk);
