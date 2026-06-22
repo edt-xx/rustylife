@@ -100,11 +100,12 @@ impl Grid {
         // Filter alive_vec using bloom filter (filled from previous step)
         let t_filter = Instant::now();
         let bloom = &self.expanded_bloom;
+        let active_bloom = &self.active_bloom;
         let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
         let chunk_size = self.alive.len() / n_procs;
         let mut chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
             .map(|chunk| chunk.iter()
-                .filter(|k| bloom.contains(tile_key(**k)))
+                .filter(|k| active_bloom.contains(tile_key(**k)) || bloom.contains(**k))
                 .copied()
                 .collect())
             .collect();
@@ -152,92 +153,124 @@ impl Grid {
     }
 
     fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32, filter_us: u128, nc_us: u128, t_start: Instant) {
-        let t_ar = Instant::now();
         grid.apply_new_active.clear();
         grid.deaths = 0;
         grid.births = 0;
 
-        let n_procs = max_procs();
+        // Collect births and deaths during scan (reused buffers)
+        grid.births_buf.clear();
+        grid.deaths_buf.clear();
 
-        if n_procs <= 1 || nc_dict.len() < 1000000 {
-            // Sequential path for small dicts
-            for (&k, &c) in nc_dict {
-                if c < 10 {
-                    if c == 3 {
-                        if grid.active_tiles.contains(&tile_key(k)) {
-                            grid.insert_alive(k);
-                            grid.births += 1;
-                            Self::mark_active(k, &mut grid.apply_new_active);
-                        }
-                    }
-                } else if c < 12 || c > 13 {
-                    grid.remove_alive(k);
-                    grid.deaths += 1;
+        let t_scan = Instant::now();
+        for (&k, &c) in nc_dict {
+            if c < 10 {
+                if c == 3 && grid.active_tiles.contains(&tile_key(k)) {
+                    grid.births_buf.push(k);
+                    grid.births += 1;
                     Self::mark_active(k, &mut grid.apply_new_active);
                 }
-            }
-        } else {
- // Parallel path — collect mutations first, apply after
-            let (tx, rx) = crossbeam_channel::bounded::<i64>(16384);
-            let active_tiles_ref = &grid.active_tiles;
-
-            rayon::scope(|s| {
-                s.spawn(move |_| {
-                    for (&k, &c) in nc_dict {
-                        if c < 10 {
-                            if c == 3 {
-                                if active_tiles_ref.contains(&tile_key(k)) {
-                                    tx.send(-(k as i64)).unwrap();
-                                }
-                            }
-                        } else if c < 12 || c > 13 {
-                            tx.send(k as i64).unwrap();
-                        }
-                    }
-                });
-            });
-
-            // Apply mutations after scope ends (no borrows)
-            for val in rx.iter() {
-                let k = val.unsigned_abs();
-                if val < 0 {
-                    grid.insert_alive(k);
-                    grid.births += 1;
-                } else {
-                    grid.remove_alive(k);
-                    grid.deaths += 1;
-                }
+            } else if c < 12 || c > 13 {
+                grid.deaths_buf.push(k);
+                grid.deaths += 1;
                 Self::mark_active(k, &mut grid.apply_new_active);
             }
         }
+        let scan_us = t_scan.elapsed().as_micros();
 
         std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
         grid.active_count = work;
         grid.generation += 1;
         grid.heap = nc_dict.len() as u32;
 
-        // Expand active_tiles by 1 tile in all directions for next step's bloom filter
-        let t_expand = Instant::now();
-        // Resize bloom filter for optimal size (~5% FP rate)
-        grid.expanded_bloom.resize(grid.active_tiles.len() * 9);
-        let ss = STATIC_SIZE as i32;
-        for &tk in &grid.active_tiles {
-            let (tx_t, ty_t) = Coord::unpack(tk);
-            for dtx in [-ss, 0, ss] {
-                for dty in [-ss, 0, ss] {
-                    let ntx = tx_t.wrapping_add(dtx as u32);
-                    let nty = ty_t.wrapping_add(dty as u32);
-                    grid.expanded_bloom.insert(Coord::pack(ntx, nty));
+        // Capture bloom filter size before borrow conflict (21 entries per tile: tile + 20 border cells)
+        let bloom_size = grid.active_tiles.len() * 15;
+
+        // Safety: raw pointers to disjoint fields — alive/alive_index/deaths_buf/births_buf
+        // are accessed by closure 1, expanded_bloom/active_bloom/active_tiles by closure 2.
+        // Converted to usize to bypass Send check. rayon::join guarantees no concurrent access.
+        let alive_ptr = &mut grid.alive as *mut Vec<u64> as usize;
+        let alive_index_ptr = &mut grid.alive_index as *mut LifeHashMap<u64, usize> as usize;
+        let deaths_ptr = &grid.deaths_buf as *const Vec<u64> as usize;
+        let births_ptr = &grid.births_buf as *const Vec<u64> as usize;
+        let bloom_ptr = &mut grid.expanded_bloom as *mut BloomFilter as usize;
+        let active_bloom_ptr = &mut grid.active_bloom as *mut BloomFilter as usize;
+        let active_ptr = &grid.active_tiles as *const LifeHashSet<u64> as usize;
+
+        let (alive_us, bloom_us) = rayon::join(
+            || {
+                let t = Instant::now();
+                let alive = unsafe { &mut *(alive_ptr as *mut Vec<u64>) };
+                let alive_index = unsafe { &mut *(alive_index_ptr as *mut LifeHashMap<u64, usize>) };
+                let deaths = unsafe { &*(deaths_ptr as *const Vec<u64>) };
+                let births = unsafe { &*(births_ptr as *const Vec<u64>) };
+                // Remove deaths (swap-remove)
+                for &k in deaths {
+                    let idx = alive_index.remove(&k).unwrap();
+                    let last = alive.len() - 1;
+                    if idx != last {
+                        let swapped = alive[last];
+                        alive[idx] = swapped;
+                        alive_index.insert(swapped, idx);
+                    }
+                    alive.pop();
                 }
-            }
-        }
-        let expand_us = t_expand.elapsed().as_micros();
+                // Add births
+                for &k in births {
+                    alive.push(k);
+                    alive_index.insert(k, alive.len() - 1);
+                }
+                t.elapsed().as_micros()
+            },
+            || {
+                let t = Instant::now();
+                let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
+                let active_bloom = unsafe { &mut *(active_bloom_ptr as *mut BloomFilter) };
+                let active = unsafe { &*(active_ptr as *const LifeHashSet<u64>) };
+                bloom.resize(bloom_size);
+                active_bloom.resize(active.len());
+                let ss = STATIC_SIZE as u32;
+                for &tk in active {
+                    let (tx, ty) = Coord::unpack(tk);
+
+                    // Tile key in active_bloom
+                    active_bloom.insert(tk);
+
+                    // Top border (y = ty-1, x = tx-1 .. tx+ss)
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
+                    bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
+
+                    // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
+                    bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+
+                    // Left border (x = tx-1, y = ty .. ty+ss-1)
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
+                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
+
+                    // Right border (x = tx+ss, y = ty .. ty+ss-1)
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
+                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
+                }
+                t.elapsed().as_micros()
+            },
+        );
 
         if timing_on() {
-            let ar_us = t_ar.elapsed().as_micros();
             let total_us = t_start.elapsed().as_micros();
-            eprintln!("gen={} filter={}us ({}) nc={}us ({}) ar={}us ({}) expand={}us ({}) total={}us bloom_bits={}",
-                grid.generation, filter_us, grid.apply_new_active.len(), nc_us, grid.alive_vec.len(), ar_us, nc_dict.len(), expand_us, grid.active_tiles.len(), total_us,
+            eprintln!("gen={} filter={}us ({}) nc={}us ({}) ncscan={}us join={}/{}us total={}us bloom_bits={}",
+                grid.generation, filter_us, grid.apply_new_active.len(), nc_us, grid.alive_vec.len(), scan_us, alive_us, bloom_us, total_us,
                 grid.expanded_bloom.size_bits);
         }
     }

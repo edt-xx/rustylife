@@ -240,8 +240,13 @@ pub struct Grid {
     pub(crate) apply_new_active: LifeHashSet<u64>,
     // Pre-allocated flat buffer for step() — contiguous slices distributed to workers
     pub(crate) alive_vec: Vec<u64>,
+    // Pre-allocated buffers for births/deaths — cleared and reused each generation
+    pub(crate) births_buf: Vec<u64>,
+    pub(crate) deaths_buf: Vec<u64>,
     // Bloom filter for expanded active tiles — active_tiles + 1-tile neighborhood
     pub(crate) expanded_bloom: BloomFilter,
+    // Bloom filter for active tile keys — replaces HashSet.contains for speed
+    pub(crate) active_bloom: BloomFilter,
 }
 
 impl Grid {
@@ -257,7 +262,10 @@ impl Grid {
             active_count: 0,
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             alive_vec: Vec::new(),
+            births_buf: Vec::with_capacity(256),
+            deaths_buf: Vec::with_capacity(256),
             expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
+            active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
         }
     }
 
@@ -351,18 +359,44 @@ impl Grid {
         for &k in &self.alive {
             Self::mark_active(k, &mut self.active_tiles);
         }
-        // Expand active_tiles by 1 tile in all directions into bloom filter
-        self.expanded_bloom.resize(self.active_tiles.len() * 9);
-        let ss = STATIC_SIZE as i32;
+        // Populate active_bloom from active_tiles
+        self.active_bloom.resize(self.active_tiles.len());
+
+        // Populate expanded_bloom with cell-level border coordinates
+        let ss = STATIC_SIZE as u32;
+        self.expanded_bloom.resize(self.active_tiles.len() * 15);
         for &tk in &self.active_tiles {
             let (tx, ty) = Self::unpack(tk);
-            for dtx in [-ss, 0, ss] {
-                for dty in [-ss, 0, ss] {
-                    let ntx = (tx as i32 + dtx) as u32;
-                    let nty = (ty as i32 + dty) as u32;
-                    self.expanded_bloom.insert(Coord::pack(ntx, nty));
-                }
-            }
+
+            self.active_bloom.insert(tk);
+
+            // Top border (y = ty-1, x = tx-1 .. tx+ss)
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
+            self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
+
+            // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
+            self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+
+            // Left border (x = tx-1, y = ty .. ty+ss-1)
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
+
+            // Right border (x = tx+ss, y = ty .. ty+ss-1)
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
+            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
         }
     }
 
@@ -373,6 +407,7 @@ impl Grid {
         self.alive_index.clear();
         self.active_tiles.clear();
         self.expanded_bloom.resize(0);
+        self.active_bloom.resize(0);
         for dx in -(half as i32)..=(half as i32) {
             for dy in -(half as i32)..=(half as i32) {
                 if rng.f64() < density {
@@ -383,6 +418,7 @@ impl Grid {
             }
         }
         self.generation = 0;
+        self.init_active();
     }
 
     pub fn clear(&mut self) {
@@ -390,6 +426,7 @@ impl Grid {
         self.alive_index.clear();
         self.active_tiles.clear();
         self.expanded_bloom.resize(0);
+        self.active_bloom.resize(0);
         self.active_count = 0;
         self.generation = 0;
         self.births = 0;
@@ -404,6 +441,8 @@ impl Grid {
         } else {
             self.insert_alive(k);
         }
+        // Sync bloom filters when transitioning from empty/stopped to running
+        self.init_active();
     }
 
     pub fn load_pattern(&mut self, cells: &[(i64, i64)], anchor_x: i64, anchor_y: i64) {
@@ -412,5 +451,7 @@ impl Grid {
             let y = (cy + anchor_y) as u32;
             self.insert_alive(Self::k(x, y));
         }
+        // Sync bloom filters when transitioning from empty/stopped to running
+        self.init_active();
     }
 }
