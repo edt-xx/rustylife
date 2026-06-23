@@ -16,3 +16,6 @@ serde_json = "1"
 sysinfo = "0.37"
 jemallocator = "0.5.4"
 
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
