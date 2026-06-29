@@ -236,6 +236,8 @@ pub struct Grid {
     pub heap: u32,
     pub active_tiles: LifeHashSet<u64>,
     pub active_count: u32,
+    /// alive_vec.len() / active_tiles.len() — FP rate proxy
+    pub active_ratio: f64,
     // Pre-allocated buffer for step() — reused across generations to avoid allocations
     pub(crate) apply_new_active: LifeHashSet<u64>,
     // Pre-allocated flat buffer for step() — contiguous slices distributed to workers
@@ -244,7 +246,7 @@ pub struct Grid {
     pub(crate) births_buf: Vec<u64>,
     pub(crate) deaths_buf: Vec<u64>,
     // Bloom filter for expanded active tiles — active_tiles + 1-tile neighborhood
-    pub(crate) expanded_bloom: BloomFilter,
+    // pub(crate) expanded_bloom: BloomFilter,
     // Bloom filter for active tile keys — replaces HashSet.contains for speed
     pub(crate) active_bloom: BloomFilter,
 }
@@ -260,11 +262,12 @@ impl Grid {
             heap: 0,
             active_tiles: std::collections::HashSet::with_hasher(LifeBuildHasher),
             active_count: 0,
+            active_ratio: 0.0,
             apply_new_active: LifeHashSet::with_capacity_and_hasher(256, LifeBuildHasher),
             alive_vec: Vec::new(),
             births_buf: Vec::with_capacity(256),
             deaths_buf: Vec::with_capacity(256),
-            expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
+            // expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
         }
     }
@@ -364,39 +367,47 @@ impl Grid {
 
         // Populate expanded_bloom with cell-level border coordinates
         let ss = STATIC_SIZE as u32;
-        self.expanded_bloom.resize(self.active_tiles.len() * 15);
+        // self.expanded_bloom.resize(self.active_tiles.len() * 15);
         for &tk in &self.active_tiles {
             let (tx, ty) = Self::unpack(tk);
 
             self.active_bloom.insert(tk);
+            self.active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_sub(ss)));
+            self.active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_add(ss)));
+            self.active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(ss)));
+            self.active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+            self.active_bloom.insert(Coord::pack(tx, ty.wrapping_sub(ss)));
+            self.active_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+            self.active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty));
+            self.active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
 
             // Top border (y = ty-1, x = tx-1 .. tx+ss)
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
-            self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
 
             // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
-            self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
 
             // Left border (x = tx-1, y = ty .. ty+ss-1)
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
 
             // Right border (x = tx+ss, y = ty .. ty+ss-1)
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
-            self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
+            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
         }
     }
 
@@ -406,7 +417,7 @@ impl Grid {
         self.alive.clear();
         self.alive_index.clear();
         self.active_tiles.clear();
-        self.expanded_bloom.resize(0);
+        //self.expanded_bloom.resize(0);
         self.active_bloom.resize(0);
         for dx in -(half as i32)..=(half as i32) {
             for dy in -(half as i32)..=(half as i32) {
@@ -425,9 +436,10 @@ impl Grid {
         self.alive.clear();
         self.alive_index.clear();
         self.active_tiles.clear();
-        self.expanded_bloom.resize(0);
+        //self.expanded_bloom.resize(0);
         self.active_bloom.resize(0);
         self.active_count = 0;
+        self.active_ratio = 0.0;
         self.generation = 0;
         self.births = 0;
         self.deaths = 0;

@@ -93,19 +93,22 @@ impl Grid {
         let t_start = Instant::now();
 
         // Initialize active_tiles and bloom filter on first step
-        if self.expanded_bloom.bits.is_empty() {
+        if self.active_bloom.bits.is_empty() {
             self.init_active();
         }
 
         // Filter alive_vec using bloom filter (filled from previous step)
         let t_filter = Instant::now();
-        let bloom = &self.expanded_bloom;
+        //let bloom = &self.expanded_bloom;
         let active_bloom = &self.active_bloom;
+        //let active_tiles = &self.active_tiles;
         let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
         let chunk_size = self.alive.len() / n_procs;
         let mut chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
             .map(|chunk| chunk.iter()
-                .filter(|k| active_bloom.contains(tile_key(**k)) || bloom.contains(**k))
+                // .filter(|k| active_bloom.contains(tile_key(**k)) || bloom.contains(**k))
+                // .filter(|k| active_bloom.contains(tile_key(**k)) || active_tiles.contains(&tile_key(**k)))
+                .filter(|k| active_bloom.contains(tile_key(**k)))
                 .copied()
                 .collect())
             .collect();
@@ -115,6 +118,8 @@ impl Grid {
             self.alive_vec.extend(chunk);
         }
         let filter_us = t_filter.elapsed().as_micros();
+        // Compute FP rate proxy: cells per active tile
+        self.active_ratio = self.alive_vec.len() as f64 / self.active_tiles.len() as f64;
 
         // Bloom filter will be resized (and cleared) at end of apply_rules
 
@@ -189,7 +194,7 @@ impl Grid {
         let alive_index_ptr = &mut grid.alive_index as *mut LifeHashMap<u64, usize> as usize;
         let deaths_ptr = &grid.deaths_buf as *const Vec<u64> as usize;
         let births_ptr = &grid.births_buf as *const Vec<u64> as usize;
-        let bloom_ptr = &mut grid.expanded_bloom as *mut BloomFilter as usize;
+        // let bloom_ptr = &mut grid.expanded_bloom as *mut BloomFilter as usize;
         let active_bloom_ptr = &mut grid.active_bloom as *mut BloomFilter as usize;
         let active_ptr = &grid.active_tiles as *const LifeHashSet<u64> as usize;
 
@@ -220,47 +225,58 @@ impl Grid {
             },
             || {
                 let t = Instant::now();
-                let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
+                // let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
                 let active_bloom = unsafe { &mut *(active_bloom_ptr as *mut BloomFilter) };
                 let active = unsafe { &*(active_ptr as *const LifeHashSet<u64>) };
-                // max of 20*active.len()
-                bloom.resize(active.len()*15);
-                // max of active.len() *2 to lower error rate
-                active_bloom.resize(active.len()*2);
+                // max of 15* active.len()
+                // bloom.resize(active.len()*15);
+                // max of active.len() 2* to lower error rate (ER 1.2)
+                // 9 unique inserts/tile: 9x ER 4.9%, x15 1.9, x21 1, x27 .5 
+                // 5 unique inserts/tile: 5x ER 4.9%, x9  1.7, x12 1, x17 .5
+                active_bloom.resize(active.len()*12);
                 let ss = STATIC_SIZE as u32;
                 for &tk in active {
                     let (tx, ty) = Coord::unpack(tk);
 
                     // Tile key in active_bloom
                     active_bloom.insert(tk);
+                    active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_sub(ss)));
+                    active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(ss)));
+                    active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_add(ss)));
+                    active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+                    active_bloom.insert(Coord::pack(tx, ty.wrapping_sub(ss)));
+                    active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty));
+                    active_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+                    active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
+                    
 
                     // Top border (y = ty-1, x = tx-1 .. tx+ss)
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
-                    bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
 
                     // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
-                    bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
 
                     // Left border (x = tx-1, y = ty .. ty+ss-1)
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
-                    bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
+                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
 
                     // Right border (x = tx+ss, y = ty .. ty+ss-1)
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
-                    bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
+                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
                 }
                 t.elapsed().as_micros()
             },
@@ -268,9 +284,9 @@ impl Grid {
 
         if timing_on() {
             let total_us = t_start.elapsed().as_micros();
-            eprintln!("gen={} filter={}us ({}) nc={}us ({}) ncscan={}us join={}/{}us total={}us bloom_bits={}",
-                grid.generation, filter_us, grid.apply_new_active.len(), nc_us, grid.alive_vec.len(), scan_us, alive_us, bloom_us, total_us,
-                grid.expanded_bloom.size_bits);
+            eprintln!("gen={} ({}) filter={}us ({}) nc={}us ({}) ncscan={}us ({}) join={}/{}us total={}us bloom_bits={} ratio={:.1}",
+                grid.generation, grid.alive.len(), filter_us, grid.active_tiles.len(), nc_us, grid.alive_vec.len(), scan_us, grid.heap, alive_us, bloom_us, total_us,
+                grid.active_bloom.size_bits, grid.active_ratio);
         }
     }
 }
