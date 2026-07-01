@@ -46,7 +46,8 @@ fn neighbor_count_worker(
 
     for k in chunk {
         let (x, y) = Coord::unpack(*k);
-
+ 
+        // using bloomfilters in this worker is measureably slower 
         if !active_tiles.contains(&tile_key(*k)) {
             let (mx, my) = Grid::mod_tile(*k);
             // Static cell (hot path): grouped neighbor table — one active_tiles check per unique tile
@@ -74,6 +75,7 @@ fn neighbor_count_worker(
         } else {
             // Active cell (cold path): full processing (self +10, neighbors +1)
             // this can create local_nc entries in static areas - filtered out later
+            // optimize this like we do for cells in inactive tiles, is slower
             *local_nc.entry(*k).or_insert(0) += 10;
             for &(dx, dy) in &NEIGHBOR_OFFSETS {
                 let nx = x.wrapping_add(dx as u32);
@@ -98,6 +100,8 @@ impl Grid {
         }
 
         // Filter alive_vec using bloom filter (filled from previous step)
+        // using a second bloomfilter with 20 surrounding cells also works but ends up slower.
+        // One bloomfilter check per cell is measurably faster.
         let t_filter = Instant::now();
         //let bloom = &self.expanded_bloom;
         let active_bloom = &self.active_bloom;
@@ -113,6 +117,7 @@ impl Grid {
                 .collect())
             .collect();
         self.alive_vec.clear();
+        // keeping alive shuffled helps though it can make benchmarking a more unstable
         fastrand::shuffle(&mut chunks);
         for chunk in chunks {
             self.alive_vec.extend(chunk);
