@@ -166,6 +166,7 @@ impl Grid {
         grid.births_buf.clear();
         grid.deaths_buf.clear();
 
+        // numerious attempts to parallelize this have failed (slower)
         let t_scan = Instant::now();
         for (&k, &c) in nc_dict {
             if c < 10 {
@@ -205,9 +206,29 @@ impl Grid {
                 let alive_index = unsafe { &mut *(alive_index_ptr as *mut LifeHashMap<u64, usize>) };
                 let deaths = unsafe { &*(deaths_ptr as *const Vec<u64>) };
                 let births = unsafe { &*(births_ptr as *const Vec<u64>) };
-                // Remove deaths (swap-remove)
-                for &k in deaths {
-                    let idx = alive_index.remove(&k).unwrap();
+
+                // Parallel lookup — read-only HashMap (indices valid before any mutations)
+                let death_indices: Vec<(u64, usize)> = deaths.par_iter()
+                    .filter_map(|&k| alive_index.get(&k).copied().map(|idx| (k, idx)))
+                    .collect();
+
+                // Pair births with deaths — overwrite dying cell's slot (no index changes)
+                let paired = births.len().min(death_indices.len());
+                for i in 0..paired {
+                    let (d, idx) = death_indices[i];
+                    alive[idx] = births[i];
+                    alive_index.remove(&d);
+                    alive_index.insert(births[i], idx);
+                }
+                let remaining_births = &births[paired..];
+
+                // Remaining deaths — swap-remove (lookup indices fresh)
+                // NOTE: sort approach (sort descending by index, use pre-computed idx) was slower for this pattern
+                // let mut remaining = death_indices[paired..].to_vec();
+                // remaining.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+                // for &(d, idx) in &remaining { ... }
+                for &(d, _) in &death_indices[paired..] {
+                    let idx = alive_index.remove(&d).unwrap();
                     let last = alive.len() - 1;
                     if idx != last {
                         let swapped = alive[last];
@@ -216,11 +237,14 @@ impl Grid {
                     }
                     alive.pop();
                 }
-                // Add births
-                for &k in births {
-                    alive.push(k);
-                    alive_index.insert(k, alive.len() - 1);
+
+                // Remaining births — bulk extend + single HashMap loop
+                let alive_start = alive.len();
+                alive.extend_from_slice(remaining_births);
+                for (i, &b) in remaining_births.iter().enumerate() {
+                    alive_index.insert(b, alive_start + i);
                 }
+
                 t.elapsed().as_micros()
             },
             || {
