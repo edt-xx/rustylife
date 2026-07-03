@@ -189,6 +189,12 @@ fn handle_action(
                 }
             }
         }
+        "toggle-hashlife" => {
+            let mut g = grid.lock().unwrap();
+            g.hashlife_mode = !g.hashlife_mode;
+            let mode = if g.hashlife_mode { "HashLife" } else { "conventional" };
+            println!("HashLife mode: {}", mode);
+        }
         "randomize" => {
             let cx = json.get("cx").and_then(|v| v.as_i64()).unwrap_or(200);
             let cy = json.get("cy").and_then(|v| v.as_i64()).unwrap_or(150);
