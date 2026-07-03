@@ -171,13 +171,22 @@ fn handle_action(
 
     match action {
         "step" => {
-            grid.lock().unwrap().step();
+            let mut g = grid.lock().unwrap();
+            if g.hashlife_mode {
+                g.step_hashlife();
+            } else {
+                g.step();
+            }
         }
         "batch-step" => {
             let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut g = grid.lock().unwrap();
             for _ in 0..count {
-                g.step();
+                if g.hashlife_mode {
+                    g.step_hashlife();
+                } else {
+                    g.step();
+                }
             }
         }
         "randomize" => {

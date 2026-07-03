@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::grid::Coord;
+
 /// Tile: quadtree node representing a cell or uniform region
 #[derive(Clone, Debug)]
 pub struct Tile(pub Arc<Node>);
@@ -39,6 +41,7 @@ type LUT = HashMap<[u8; 9], [u8; 9]>;
 pub struct HashLife {
     grid: Tile,
     lut: LUT,
+    alive_data: Vec<u64>,
 }
 
 impl HashLife {
@@ -46,6 +49,7 @@ impl HashLife {
         let mut hf = HashLife {
             grid: Tile(Arc::new(Node::Leaf(0))),
             lut: HashMap::with_capacity(512),
+            alive_data: Vec::new(),
         };
         hf.build_lut();
         hf
@@ -190,5 +194,17 @@ impl HashLife {
     pub fn from_flat(data: &[u64]) -> Tile {
         // For now, return empty leaf
         Tile(Arc::new(Node::Leaf(0)))
+    }
+
+    /// Process a flat array of alive cells
+    pub fn process_from_flat(&mut self, data: &[u64]) {
+        // Store the flat array for later processing
+        self.alive_data = data.to_vec();
+    }
+
+    /// Convert HashLife grid back to alive vec
+    pub fn to_alive_vec(&self) -> Vec<u64> {
+        // For now, return empty vec since we don't have full reconstruction logic
+        vec![]
     }
 }

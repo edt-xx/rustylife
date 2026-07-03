@@ -249,6 +249,8 @@ pub struct Grid {
     // pub(crate) expanded_bloom: BloomFilter,
     // Bloom filter for active tile keys — replaces HashSet.contains for speed
     pub(crate) active_bloom: BloomFilter,
+    /// HashLife mode flag — when true, uses quadtree-based stepping instead of conventional
+    pub hashlife_mode: bool,
 }
 
 impl Grid {
@@ -269,6 +271,7 @@ impl Grid {
             deaths_buf: Vec::with_capacity(256),
             // expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
+            hashlife_mode: false,
         }
     }
 
