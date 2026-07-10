@@ -39,6 +39,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="loadBtn">Load .lif</button>
   <input type="file" id="fileInput" accept=".lif,.txt,.rle" style="display:none"/>
   <button id="tracksBtn">Tracks</button>
+  <button id="hashlifeBtn">HashLife</button>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
 </div>
 <button id="timingBtn" style="position:absolute;right:24px;bottom:12px;background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px;z-index:11">Timing</button>
@@ -50,7 +51,7 @@ const step = [1,2,3,4,5,9,17,27,53,81,161,243];
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
-var camX = 1000000000, camY = 1000000000;         // top-left of viewport in grid coords
+var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
 
 // Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
 function calcFrameSize() {
@@ -652,6 +653,10 @@ document.addEventListener('DOMContentLoaded', async function() {
         this.textContent = tracksEnabled ? 'Active' : 'Tracks';
         imgData = null; // force full redraw
         zoomRefresh();
+    });
+    document.getElementById('hashlifeBtn').addEventListener('click', async function() {
+        await call({action:'toggle-hashlife'});
+        this.textContent = this.textContent === 'HashLife' ? 'Conventional' : 'HashLife';
     });
     document.getElementById('timingBtn').addEventListener('click', async function() {
         await fetch('/toggle-timing', {method:'POST', headers:{'Content-Type':'application/json'}});

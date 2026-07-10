@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 use crate::grid::*;
-use crate::hashlife::HashLife;
 
 /// Runtime toggle for per-generation timing output to stderr
 static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -321,17 +320,23 @@ impl Grid {
     }
 
     pub fn step_hashlife(&mut self) {
-        // Convert Grid to flat array for HashLife processing
-        let flat = self.alive.clone();
-        
-        // Create HashLife instance and process
-        let mut hf = HashLife::new();
-        hf.process_from_flat(&flat);
+        if self.alive.is_empty() {
+            return;
+        }
+
+        self.init_hashlife();
+        let hf = self.hashlife.as_mut().unwrap();
+        let before = hf.to_flat();
+        eprintln!("HASHLIFE step gen={}, center={:?}, before_cells={}",
+            self.generation, hf.center(), before.len());
+        let hf = self.hashlife.as_mut().unwrap();
         hf.step();
-        
-        // Rebuild grid from HashLife results
-        let next_alive = hf.to_alive_vec();
-        self.alive = next_alive;
+        let after = hf.to_flat();
+        eprintln!("HASHLIFE after_cells={}, center={:?}",
+            after.len(), hf.center());
         self.generation += 1;
+        self.births = 0;
+        self.deaths = 0;
+        self.active_count = 0;
     }
 }

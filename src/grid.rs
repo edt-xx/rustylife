@@ -251,6 +251,8 @@ pub struct Grid {
     pub(crate) active_bloom: BloomFilter,
     /// HashLife mode flag — when true, uses quadtree-based stepping instead of conventional
     pub hashlife_mode: bool,
+    /// Persistent HashLife instance (source of truth when hashlife_mode is true)
+    pub hashlife: Option<game_of_life::hashlife::HashLife>,
 }
 
 impl Grid {
@@ -272,6 +274,7 @@ impl Grid {
             // expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             hashlife_mode: false,
+            hashlife: None,
         }
     }
 
@@ -468,5 +471,17 @@ impl Grid {
         }
         // Sync bloom filters when transitioning from empty/stopped to running
         self.init_active();
+    }
+
+    /// Build HashLife from current alive set if not already present.
+    pub fn init_hashlife(&mut self) {
+        if self.hashlife.is_none() {
+            self.hashlife = Some(game_of_life::hashlife::HashLife::from_flat(&self.alive));
+        }
+    }
+
+    /// Invalidate HashLife instance (call after toggle, clear, randomize, load_pattern).
+    pub fn invalidate_hashlife(&mut self) {
+        self.hashlife = None;
     }
 }

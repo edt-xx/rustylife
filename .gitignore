@@ -2,3 +2,5 @@
 Cargo.lock
 *.rs.bak
 *.orig
+/golde-ref/
+/golde-guide/

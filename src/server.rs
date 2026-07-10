@@ -101,37 +101,55 @@ fn serve_state(
 
     // Lock grid for snapshot
     let g = grid.lock().unwrap();
-    let alive_count = g.alive.len() as u32;
-
     let bits_len = (vw as usize * vh as usize + 7) / 8;
 
     // Bits: bit-packed alive cells in viewport
     let mut bits = vec![0u8; bits_len];
-    for &k in &g.alive {
-        let (ax, ay) = Coord::unpack(k);
-        if ax >= vx && ay >= vy {
-            let rx = ax - vx;
-            let ry = ay - vy;
-            if rx < vw && ry < vh {
-                let idx = ry as usize * vw as usize + rx as usize;
-                bits[idx >> 3] |= 1 << (idx & 7);
+
+    let alive_count = if g.hashlife_mode {
+        // HashLife mode: populate viewport from quadtree
+        if let Some(ref hf) = g.hashlife {
+            let (cx, cy) = hf.center();
+            eprintln!("STATE hashlife: vx={} vy={} vw={} vh={} center=({},{})",
+                vx, vy, vw, vh, cx, cy);
+            hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+            // Count set bits for debugging
+            let set_bits: usize = bits.iter().map(|b| b.count_ones() as usize).sum();
+            eprintln!("STATE hashlife: set_bits={}", set_bits);
+        }
+        if let Some(ref hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
+    } else {
+        // Conventional mode: scan flat alive array
+        let ac = g.alive.len() as u32;
+        for &k in &g.alive {
+            let (ax, ay) = Coord::unpack(k);
+            if ax >= vx && ay >= vy {
+                let rx = ax - vx;
+                let ry = ay - vy;
+                if rx < vw && ry < vh {
+                    let idx = ry as usize * vw as usize + rx as usize;
+                    bits[idx >> 3] |= 1 << (idx & 7);
+                }
             }
         }
-    }
+        ac
+    };
 
-    // Overlay: mark cells in active tiles within viewport (STATIC_SIZE×STATIC_SIZE blocks)
+    // Overlay: only meaningful in conventional mode (active tiles)
     let ss = crate::grid::STATIC_SIZE;
     let mut overlay = vec![0u8; bits_len];
-    for &tkey in &g.active_tiles {
-        let (tx, ty) = Coord::unpack(tkey);
-        for row in ty..(ty + ss) {
-            if row < vy || row >= vy + vh { continue; }
-            let ry = row - vy;
-            for col in tx..(tx + ss) {
-                if col >= vx && col < vx + vw {
-                    let rx = col - vx;
-                    let idx = ry as usize * vw as usize + rx as usize;
-                    overlay[idx >> 3] |= 1 << (idx & 7);
+    if !g.hashlife_mode {
+        for &tkey in &g.active_tiles {
+            let (tx, ty) = Coord::unpack(tkey);
+            for row in ty..(ty + ss) {
+                if row < vy || row >= vy + vh { continue; }
+                let ry = row - vy;
+                for col in tx..(tx + ss) {
+                    if col >= vx && col < vx + vw {
+                        let rx = col - vx;
+                        let idx = ry as usize * vw as usize + rx as usize;
+                        overlay[idx >> 3] |= 1 << (idx & 7);
+                    }
                 }
             }
         }
@@ -172,6 +190,7 @@ fn handle_action(
     match action {
         "step" => {
             let mut g = grid.lock().unwrap();
+            eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife();
             } else {
@@ -181,6 +200,7 @@ fn handle_action(
         "batch-step" => {
             let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut g = grid.lock().unwrap();
+            eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
             for _ in 0..count {
                 if g.hashlife_mode {
                     g.step_hashlife();
@@ -192,18 +212,25 @@ fn handle_action(
         "toggle-hashlife" => {
             let mut g = grid.lock().unwrap();
             g.hashlife_mode = !g.hashlife_mode;
-            let mode = if g.hashlife_mode { "HashLife" } else { "conventional" };
-            println!("HashLife mode: {}", mode);
+            if g.hashlife_mode {
+                g.init_hashlife();
+            }
+            eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
+                g.hashlife_mode, g.alive.len(), g.hashlife.is_some());
         }
         "randomize" => {
             let cx = json.get("cx").and_then(|v| v.as_i64()).unwrap_or(200);
             let cy = json.get("cy").and_then(|v| v.as_i64()).unwrap_or(150);
             let size = json.get("size").and_then(|v| v.as_i64()).unwrap_or(100);
             let density = json.get("density").and_then(|v| v.as_f64()).unwrap_or(0.3);
-            grid.lock().unwrap().randomize(cx, cy, size, density);
+            let mut g = grid.lock().unwrap();
+            g.randomize(cx, cy, size, density);
+            g.invalidate_hashlife();
         }
      "clear" => {
-            grid.lock().unwrap().clear();
+            let mut g = grid.lock().unwrap();
+            g.clear();
+            g.invalidate_hashlife();
         }
         "quit" => {
             println!("Quit requested, shutting down...");
@@ -228,7 +255,9 @@ fn handle_toggle(
     let y = json.get("y").and_then(|v| v.as_f64()).map(|f| f as i64);
 
     if let (Some(x), Some(y)) = (x, y) {
-        grid.lock().unwrap().toggle(x, y);
+        let mut g = grid.lock().unwrap();
+        g.toggle(x, y);
+        g.invalidate_hashlife();
     }
 
     serve_json(r#"{"ok":true}"#)
@@ -261,7 +290,9 @@ fn handle_load_pattern(
                 }
             })
             .collect();
-        grid.lock().unwrap().load_pattern(&cell_list, anchor_x, anchor_y);
+        let mut g = grid.lock().unwrap();
+        g.load_pattern(&cell_list, anchor_x, anchor_y);
+        g.invalidate_hashlife();
     }
 
     serve_json(r#"{"ok":true}"#)

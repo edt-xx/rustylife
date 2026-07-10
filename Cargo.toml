@@ -3,6 +3,10 @@ name = "game_of_life"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "game_of_life"
+path = "src/lib.rs"
+
 [[bin]]
 name = "game_of_life"
 path = "src/main.rs"
@@ -15,6 +19,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 jemallocator = "0.5.4"
+ahash = "0.8"
 
 [build]
 rustflags = ["-C", "target-cpu=native"]

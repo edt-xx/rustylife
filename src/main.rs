@@ -1,6 +1,5 @@
 mod frontend;
 mod grid;
-mod hashlife;
 mod server;
 mod step;
 
