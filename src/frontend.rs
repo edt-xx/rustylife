@@ -691,9 +691,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 
     // Init
-    camX = 1000000000; camY = 1000000000;
+    camX = 2000000000; camY = 2000000000;
     var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
-    cx += 1000000000; cy += 1000000000;
+    cx += 2000000000; cy += 2000000000;
     await call({action:'randomize', cx: cx, cy: cy});
     zoomRefresh();
     setInterval(function() { if (!running) refresh(); }, 2000);
