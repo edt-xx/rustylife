@@ -643,11 +643,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('stepBtn').addEventListener('click', async function() {
         stopAnim();
         var stepCount = step[+document.getElementById('stepSlider').value];
-        if (hashlifeMode) {
-            await call({action:'batch-step', count: stepCount});
-        } else {
-            await call({action:'step'});
-        }
+        await call({action:'batch-step', count: stepCount});
         zoomRefresh();
     });
 
