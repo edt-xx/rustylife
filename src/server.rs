@@ -201,10 +201,10 @@ fn handle_action(
             let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut g = grid.lock().unwrap();
             eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
-            for _ in 0..count {
-                if g.hashlife_mode {
-                    g.step_hashlife();
-                } else {
+            if g.hashlife_mode {
+                g.step_hashlife_n(count as u32);
+            } else {
+                for _ in 0..count {
                     g.step();
                 }
             }

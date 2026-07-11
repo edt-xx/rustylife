@@ -339,4 +339,18 @@ impl Grid {
         self.deaths = 0;
         self.active_count = 0;
     }
+
+    pub fn step_hashlife_n(&mut self, n: u32) {
+        if self.alive.is_empty() || n == 0 {
+            return;
+        }
+
+        self.init_hashlife();
+        let hf = self.hashlife.as_mut().unwrap();
+        hf.step_n(n);
+        self.generation += n;
+        self.births = 0;
+        self.deaths = 0;
+        self.active_count = 0;
+    }
 }

@@ -46,7 +46,7 @@ input[type=range]{width:100px;vertical-align:middle}
 <script>
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
-const step = [1,2,3,4,5,9,17,27,53,81,161,243];
+const step = [1,2,3,5,9,17,33,65,129,257,513,1025];
 
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
