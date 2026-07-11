@@ -104,9 +104,12 @@ impl HashLifeCache {
 
     /// Find existing canonical node or create new one in arena.
     pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
-        // Fast path: all children same → collapse
-        if nw == ne && ne == sw && sw == se {
-            return nw;
+        // Keep FALSE_NODE and TRUE_NODE as sentinels
+        if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
+            return FALSE_NODE;
+        }
+        if nw == TRUE_NODE && ne == TRUE_NODE && sw == TRUE_NODE && se == TRUE_NODE {
+            return TRUE_NODE;
         }
 
         let hash = compute_hash(nw, ne, sw, se);
