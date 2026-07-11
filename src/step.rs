@@ -326,14 +326,7 @@ impl Grid {
 
         self.init_hashlife();
         let hf = self.hashlife.as_mut().unwrap();
-        let before = hf.to_flat();
-        eprintln!("HASHLIFE step gen={}, center={:?}, before_cells={}",
-            self.generation, hf.center(), before.len());
-        let hf = self.hashlife.as_mut().unwrap();
         hf.step();
-        let after = hf.to_flat();
-        eprintln!("HASHLIFE after_cells={}, center={:?}",
-            after.len(), hf.center());
         self.generation += 1;
         self.births = 0;
         self.deaths = 0;

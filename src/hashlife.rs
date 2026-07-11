@@ -910,9 +910,13 @@ pub struct HashLife {
     /// GOLDE-style slow cache: (node_idx, level, advance_depth) → result_node
     /// Persists across step_n iterations to avoid recomputing overlapping sub-trees.
     pub slow_cache: HashMap<(usize, u32, u32), usize>,
-    /// Cache hit/miss counters (reset each step_n)
+    /// Cache hit/miss counters (reset each step)
     pub slow_cache_hits: u64,
     pub slow_cache_misses: u64,
+    /// Last step's cache stats for display
+    pub last_cache_size: u32,
+    /// Last step's cache hit rate * 10 (e.g., 45.2% → 452)
+    pub last_cache_hit_rate: u32,
 }
 
 impl HashLife {
@@ -926,6 +930,8 @@ impl HashLife {
             slow_cache: HashMap::new(),
             slow_cache_hits: 0,
             slow_cache_misses: 0,
+            last_cache_size: 0,
+            last_cache_hit_rate: 0,
         }
     }
 
@@ -993,6 +999,8 @@ impl HashLife {
             slow_cache: HashMap::new(),
             slow_cache_hits: 0,
             slow_cache_misses: 0,
+            last_cache_size: 0,
+            last_cache_hit_rate: 0,
         }
     }
 
@@ -1056,13 +1064,14 @@ impl HashLife {
         self.root = advance_slow(&mut self.cache, &mut self.slow_cache, self.root, self.depth, false,
                                   &mut self.slow_cache_hits, &mut self.slow_cache_misses);
         self.depth -= 1;
-        // Print cache stats once per step
+        // Store cache stats for display (don't print, don't clear cache)
         let total = self.slow_cache_hits + self.slow_cache_misses;
         if total > 0 {
-            let hit_rate = (self.slow_cache_hits as f64 / total as f64) * 100.0;
-            eprintln!("slow_cache: hits={} misses={} rate={:.1}% size={}",
-                      self.slow_cache_hits, self.slow_cache_misses, hit_rate,
-                      self.slow_cache.len());
+            self.last_cache_size = self.slow_cache.len() as u32;
+            self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
+        } else {
+            self.last_cache_size = 0;
+            self.last_cache_hit_rate = 0;
         }
         self.slow_cache.clear();
         self.slow_cache_hits = 0;

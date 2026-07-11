@@ -156,6 +156,7 @@ fn serve_state(
     }
 
     // Header: gen(u32), vw(u16), vh(u16), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
+    // In hashlife mode: heap=cache_size, active_tiles=cache_hit_rate*10
     // Big-endian from Python's struct.pack(">IHHIIIIIII", ...)
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
@@ -166,8 +167,14 @@ fn serve_state(
     data.extend((overlay.len() as u32).to_be_bytes());
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
-    data.extend(g.heap.to_be_bytes());
-    data.extend((g.active_tiles.len() as u32).to_be_bytes());
+    if g.hashlife_mode {
+        let hf = g.hashlife.as_ref().unwrap();
+        data.extend(hf.last_cache_size.to_be_bytes());
+        data.extend(hf.last_cache_hit_rate.to_be_bytes());
+    } else {
+        data.extend(g.heap.to_be_bytes());
+        data.extend((g.active_tiles.len() as u32).to_be_bytes());
+    }
 
     data.extend(bits);
     data.extend(overlay);
@@ -190,7 +197,7 @@ fn handle_action(
     match action {
         "step" => {
             let mut g = grid.lock().unwrap();
-            eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
+            // eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife();
             } else {
@@ -200,7 +207,7 @@ fn handle_action(
         "batch-step" => {
             let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
             let mut g = grid.lock().unwrap();
-            eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
+            // eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife_n(count as u32);
             } else {
@@ -215,8 +222,8 @@ fn handle_action(
             if g.hashlife_mode {
                 g.init_hashlife();
             }
-            eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
-                g.hashlife_mode, g.alive.len(), g.hashlife.is_some());
+            // eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
+            //     g.hashlife_mode, g.alive.len(), g.hashlife.is_some());
         }
         "randomize" => {
             let cx = json.get("cx").and_then(|v| v.as_i64()).unwrap_or(200);

@@ -136,6 +136,7 @@ var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0;
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var tracksEnabled = false; // disabled by default, hide active overlay when on
+var hashlifeMode = false; // tracks hashlife mode toggle
 
 function drawGrid(data) {
     var hdr  = new DataView(data, 0, 36);
@@ -395,7 +396,12 @@ function updateLabels(vw, vh) {
         l1.children[2].textContent = 'Births: ' + lblBirths;
         l1.children[3].textContent = 'Deaths: ' + lblDeaths;
         l1.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
-        l1.children[5].textContent = 'Heap: ' + lblHeap + ' (' + lblTiles + ')';
+        if (hashlifeMode) {
+            var rate = (lblTiles / 10.0).toFixed(1) + '%';
+            l1.children[5].textContent = 'Cache: ' + lblHeap + ' (' + rate + ')';
+        } else {
+            l1.children[5].textContent = 'Heap: ' + lblHeap + ' (' + lblTiles + ')';
+        }
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
@@ -635,7 +641,14 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
 
     document.getElementById('stepBtn').addEventListener('click', async function() {
- stopAnim(); await call({action:'step'}); zoomRefresh();
+        stopAnim();
+        var stepCount = step[+document.getElementById('stepSlider').value];
+        if (hashlifeMode) {
+            await call({action:'batch-step', count: stepCount});
+        } else {
+            await call({action:'step'});
+        }
+        zoomRefresh();
     });
 
     document.getElementById('randBtn').addEventListener('click', async function() {
@@ -655,8 +668,9 @@ document.addEventListener('DOMContentLoaded', async function() {
         zoomRefresh();
     });
     document.getElementById('hashlifeBtn').addEventListener('click', async function() {
+        hashlifeMode = !hashlifeMode;
         await call({action:'toggle-hashlife'});
-        this.textContent = this.textContent === 'HashLife' ? 'Conventional' : 'HashLife';
+        this.textContent = hashlifeMode ? 'Conventional' : 'HashLife';
     });
     document.getElementById('timingBtn').addEventListener('click', async function() {
         await fetch('/toggle-timing', {method:'POST', headers:{'Content-Type':'application/json'}});
