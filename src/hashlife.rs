@@ -398,6 +398,8 @@ fn assemble_centered_6x6(r_nw: u16, r_n: u16, r_ne: u16, r_w: u16, r_c: u16, r_e
         | (r_se as u32) >> 5) as u16
 }
 
+/// Decode 16-bit value into a level-2 node (4x4 grid).
+/// Used by advance_base_one_gen (single-gen advance at level 3).
 fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> usize {
     let bit_to_cell = |b: u16, pos: u32| -> usize {
         if ((b >> pos) & 1) != 0 { TRUE_NODE } else { FALSE_NODE }
@@ -419,6 +421,23 @@ fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> usize {
         bit_to_cell(bits, 1), bit_to_cell(bits, 0),
     );
     cache.find_or_create(q_nw, q_ne, q_sw, q_se)
+}
+
+/// Decode 16-bit value into a level-1 node (2x2 grid).
+/// GOLDE's DecodeLevel2 does this — creates 4 leaf children from
+/// the center 2x2 of the 4x4 result. Used by advance_base_two_gen.
+fn decode_level1(cache: &mut HashLifeCache, bits: u16) -> usize {
+    // Center 2x2 of the 4x4 result:
+    // NW quadrant: bits 15,14,11,10 → SE corner is bit 10
+    // NE quadrant: bits 13,12,9,8 → SW corner is bit 9
+    // SW quadrant: bits 7,6,3,2 → NE corner is bit 6
+    // SE quadrant: bits 5,4,1,0 → NW corner is bit 5
+    cache.find_or_create(
+        if ((bits >> 10) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
+        if ((bits >> 9) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
+        if ((bits >> 6) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
+        if ((bits >> 5) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
+    )
 }
 
 // ============================================================================
@@ -496,15 +515,44 @@ fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
     decode_level2(cache, result_bits)
 }
 
-fn advance_fast(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>,
+/// GOLDE-style dispatcher: choose advance_fast or advance_slow based on target_depth.
+/// If `level - 2 > target_depth` → use advance_slow (recursive, drops 1 level).
+/// Otherwise → use advance_fast (logarithmic, drops 1 level).
+/// Both drop exactly 1 level, so they can be mixed safely in the same recursion tree.
+fn advance_node(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>,
+                 node_idx: usize, level: u32, target_depth: u32,
+                 hits: &mut u64, misses: &mut u64) -> usize {
+    if node_idx == FALSE_NODE { return FALSE_NODE; }
+    if node_idx == TRUE_NODE { return TRUE_NODE; }
+    if level < 3 { return node_idx; }
+
+    if level - 2 > target_depth {
+        advance_slow(cache, slow_cache, node_idx, level, target_depth, hits, misses)
+    } else {
+        advance_fast(cache, slow_cache, node_idx, level)
+    }
+}
+
+/// GOLDE AdvanceFast: classic 9-subnode centered approach.
+/// Advances 2^(level-2) generations. Calls ITSELF recursively (like GOLDE).
+/// The dispatcher (advance_node) routes TO this function but it recurses directly.
+fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize>,
                  node_idx: usize, level: u32) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
+    // GOLDE-style fast cache: check advance_result on the node itself.
+    let node = cache.get_node(node_idx);
+    if node.advance_result != NO_FAST_CACHE {
+        return node.advance_result;
+    }
+
     // Base case: level 3 → advance 2 generations using 8x8 rule table
     if level == 3 {
-        return advance_base_two_gen(cache, node_idx);
+        let result = advance_base_two_gen(cache, node_idx);
+        cache.nodes[node_idx].advance_result = result;
+        return result;
     }
 
     // Recursive case: classic 9-subnode approach.
@@ -516,29 +564,31 @@ fn advance_fast(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
     let cv_ne_se = centered_vertical(cache, node.north_east, node.south_east);
     let ch_sw_se = centered_horizontal(cache, node.south_west, node.south_east);
 
-    // Advance all 9 sub-nodes at level-(L-1)
-    let n00 = advance_fast(cache, slow_cache, node.north_west, level - 1);
-    let n01 = advance_fast(cache, slow_cache, ch_nw_ne, level - 1);
-    let n02 = advance_fast(cache, slow_cache, node.north_east, level - 1);
-    let n10 = advance_fast(cache, slow_cache, cv_nw_sw, level - 1);
-    let n11 = advance_fast(cache, slow_cache, cs_node, level - 1);
-    let n12 = advance_fast(cache, slow_cache, cv_ne_se, level - 1);
-    let n20 = advance_fast(cache, slow_cache, node.south_west, level - 1);
-    let n21 = advance_fast(cache, slow_cache, ch_sw_se, level - 1);
-    let n22 = advance_fast(cache, slow_cache, node.south_east, level - 1);
+    // Advance all 9 sub-nodes at level-(L-1) — call advance_fast directly
+    let n00 = advance_fast(cache, &mut AHashMap::new(), node.north_west, level - 1);
+    let n01 = advance_fast(cache, &mut AHashMap::new(), ch_nw_ne, level - 1);
+    let n02 = advance_fast(cache, &mut AHashMap::new(), node.north_east, level - 1);
+    let n10 = advance_fast(cache, &mut AHashMap::new(), cv_nw_sw, level - 1);
+    let n11 = advance_fast(cache, &mut AHashMap::new(), cs_node, level - 1);
+    let n12 = advance_fast(cache, &mut AHashMap::new(), cv_ne_se, level - 1);
+    let n20 = advance_fast(cache, &mut AHashMap::new(), node.south_west, level - 1);
+    let n21 = advance_fast(cache, &mut AHashMap::new(), ch_sw_se, level - 1);
+    let n22 = advance_fast(cache, &mut AHashMap::new(), node.south_east, level - 1);
 
-    // Build 4 windows and advance each
+    // Build 4 windows and advance each — call advance_fast directly
     let tl = cache.find_or_create(n00, n01, n10, n11);
     let tr = cache.find_or_create(n01, n02, n11, n12);
     let bl = cache.find_or_create(n10, n11, n20, n21);
     let br = cache.find_or_create(n11, n12, n21, n22);
 
-    let topLeft = advance_fast(cache, slow_cache, tl, level - 1);
-    let topRight = advance_fast(cache, slow_cache, tr, level - 1);
-    let bottomLeft = advance_fast(cache, slow_cache, bl, level - 1);
-    let bottomRight = advance_fast(cache, slow_cache, br, level - 1);
+    let topLeft = advance_fast(cache, &mut AHashMap::new(), tl, level - 1);
+    let topRight = advance_fast(cache, &mut AHashMap::new(), tr, level - 1);
+    let bottomLeft = advance_fast(cache, &mut AHashMap::new(), bl, level - 1);
+    let bottomRight = advance_fast(cache, &mut AHashMap::new(), br, level - 1);
 
-    cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight)
+    let result = cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight);
+    cache.nodes[node_idx].advance_result = result;
+    result
 }
 
 /// CenteredHorizontal: extract inner 2x2 from west+east nodes
@@ -566,6 +616,7 @@ fn centered_subnode(cache: &mut HashLifeCache, node_idx: usize) -> usize {
 }
 
 /// Advance 2 generations at level 3 (8x8 base case)
+/// Returns a level-2 node (4x4 grid) — drops 1 level, matching GOLDE's AdvanceBase.
 fn advance_base_two_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
     let q = encode_level3(cache, node_idx);
     let table = rule_table();
@@ -602,82 +653,62 @@ fn combine_2x2(tl: u16, tr: u16, bl: u16, br: u16) -> u16 {
 }
 
 fn advance_slow(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>,
-                 node_idx: usize, level: u32, two_gen: bool,
+                 node_idx: usize, level: u32, target_depth: u32,
                  hits: &mut u64, misses: &mut u64) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
+    if level < 3 { return node_idx; }
 
-    // GOLDE-style fast cache: check advance_result on the node itself.
-    // This catches repeated nodes within a single step — no hashing needed.
-    let node = cache.get_node(node_idx);
-    if node.advance_result != NO_FAST_CACHE {
-        return node.advance_result;
-    }
+    // NOTE: advance_slow must NOT read/write advance_result.
+    // That field is exclusively for advance_fast (multi-gen cache).
+    // advance_slow only uses slow_cache (persistent, cross-step).
 
-    // Check slow cache — packed u64 key: node_idx in high 32 bits, level in low 32 bits.
-    let key = ((node_idx as u64) << 32) | (level as u64);
+    // Check slow cache — packed u64 key: node_idx in high 32 bits,
+    // (level << 8 | target_depth) in low 32 bits.
+    // GOLDE keys slow cache by {node, m_StepAdvanceDepth}.
+    let key = ((node_idx as u64) << 32) | (((level as u64) << 8) | (target_depth as u64));
     if let Some(&cached) = slow_cache.get(&key) {
         *hits += 1;
-        if cached >= cache.nodes.len() {
-            eprintln!("SLOW_CACHE STALE: key=({},{}) result={} arena_len={}",
-                      node_idx, level, cached, cache.nodes.len());
-        }
         return cached;
     }
     *misses += 1;
 
-    // Base case: level <= 3 → advance 1 or 2 generations
+    // Base case: level <= 3 → advance 1 generation (or 2 if target_depth >= 1)
     if level <= 3 {
-        let result = if two_gen {
+        let result = if target_depth >= 1 {
             advance_base_two_gen(cache, node_idx)
         } else {
             advance_base_one_gen(cache, node_idx)
         };
         slow_cache.insert(key, result);
-        cache.nodes[node_idx].advance_result = result;
         return result;
     }
 
-    let result = if two_gen {
-        // Two-gen mode: just two single-gen advances.
-        // Compounding via level-dropping windows is complex and error-prone.
-        // Two single-gen advances is correct and the cache helps within each call.
-        let r1 = advance_slow(cache, slow_cache, node_idx, level, false, hits, misses);
-        advance_slow(cache, slow_cache, r1, level, false, hits, misses)
-    } else {
-        // Single-gen mode: build windows at level-(L-1), advance to level-(L-1),
-        // combine to return level-(L-1).
-        // Fetch 64 sub-segments (8x8 grid) — matches GOLDE fetchSegment
-        let segments = fetch_segments(cache, node_idx);
+    // Build 8x8 windows at level-(L-1)
+    let segments = fetch_segments(cache, node_idx);
 
-        // Build only the 9 sub-nodes needed for the 4 windows
-        let s = |sx: usize, sy: usize| segments[sy * 8 + sx];
-        let mut c2x2 = |sx: usize, sy: usize| {
-            cache.find_or_create(s(sx,sy), s(sx+1,sy), s(sx,sy+1), s(sx+1,sy+1))
-        };
-        let c_11 = c2x2(1,1); let c_13 = c2x2(3,1); let c_15 = c2x2(5,1);
-        let c_31 = c2x2(1,3); let c_33 = c2x2(3,3); let c_35 = c2x2(5,3);
-        let c_51 = c2x2(1,5); let c_53 = c2x2(3,5); let c_55 = c2x2(5,5);
-
-        // Build 4 windows at positions (1,1), (3,1), (1,3), (3,3) — matches GOLDE buildWindow
-        let window00 = cache.find_or_create(c_11, c_13, c_31, c_33);
-        let window01 = cache.find_or_create(c_13, c_15, c_33, c_35);
-        let window10 = cache.find_or_create(c_31, c_33, c_51, c_53);
-        let window11 = cache.find_or_create(c_33, c_35, c_53, c_55);
-
-        // Recursively advance each window at level-1 (single-gen)
-        let r00 = advance_slow(cache, slow_cache, window00, level - 1, false, hits, misses);
-        let r01 = advance_slow(cache, slow_cache, window01, level - 1, false, hits, misses);
-        let r10 = advance_slow(cache, slow_cache, window10, level - 1, false, hits, misses);
-        let r11 = advance_slow(cache, slow_cache, window11, level - 1, false, hits, misses);
-
-        let combined = cache.find_or_create(r00, r01, r10, r11);
-        slow_cache.insert(key, combined);
-        combined
+    let s = |sx: usize, sy: usize| segments[sy * 8 + sx];
+    let mut c2x2 = |sx: usize, sy: usize| {
+        cache.find_or_create(s(sx,sy), s(sx+1,sy), s(sx,sy+1), s(sx+1,sy+1))
     };
+    let c_11 = c2x2(1,1); let c_13 = c2x2(3,1); let c_15 = c2x2(5,1);
+    let c_31 = c2x2(1,3); let c_33 = c2x2(3,3); let c_35 = c2x2(5,3);
+    let c_51 = c2x2(1,5); let c_53 = c2x2(3,5); let c_55 = c2x2(5,5);
 
-    // GOLDE-style fast cache: store result on the node for next step
-    cache.nodes[node_idx].advance_result = result;
+    let window00 = cache.find_or_create(c_11, c_13, c_31, c_33);
+    let window01 = cache.find_or_create(c_13, c_15, c_33, c_35);
+    let window10 = cache.find_or_create(c_31, c_33, c_51, c_53);
+    let window11 = cache.find_or_create(c_33, c_35, c_53, c_55);
+
+    // GOLDE: AdvanceSlow calls AdvanceNode (dispatcher) recursively,
+    // NOT AdvanceSlow. This allows routing to AdvanceFast when level-2 <= target_depth.
+    let r00 = advance_node(cache, slow_cache, window00, level - 1, target_depth, hits, misses);
+    let r01 = advance_node(cache, slow_cache, window01, level - 1, target_depth, hits, misses);
+    let r10 = advance_node(cache, slow_cache, window10, level - 1, target_depth, hits, misses);
+    let r11 = advance_node(cache, slow_cache, window11, level - 1, target_depth, hits, misses);
+
+    let result = cache.find_or_create(r00, r01, r10, r11);
+    slow_cache.insert(key, result);
     result
 }
 
@@ -1086,10 +1117,12 @@ impl HashLife {
             self.root = expand_node(&mut self.cache, self.root, self.depth);
             self.depth += 1;
         }
-        // advance_slow advances exactly 1 generation, returns level-1 node
+        // Clear fast cache — advance_result is only valid within a single step
+        self.cache.clear_advance_results();
+        // advance_node with target_depth=0 → always uses advance_slow (single-gen)
         eprintln!("STEP arena_len={} slow_cache_size={} root={} depth={}",
                   self.cache.nodes.len(), self.slow_cache.len(), self.root, self.depth);
-        self.root = advance_slow(&mut self.cache, &mut self.slow_cache, self.root, self.depth, false,
+        self.root = advance_node(&mut self.cache, &mut self.slow_cache, self.root, self.depth, 0,
                                   &mut self.slow_cache_hits, &mut self.slow_cache_misses);
         self.depth -= 1;
         eprintln!("POST-STEP arena_len={} root={} depth={}",
@@ -1114,9 +1147,78 @@ impl HashLife {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        // advance_fast is broken (classic 9-subnode approach produces wrong results).
-        // Just use step() for now. Cache is cleared each step but helps within each call.
-        for _ in 0..n {
+        eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
+
+        // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
+        // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
+        // GOLDE: expand tree, call AdvanceNode, result is at depth-1.
+        // Falls back to single-gen steps for the remainder.
+        let mut remaining = n;
+
+        while remaining > 0 {
+            // Find largest power of 2 that fits in remaining: 2^k <= remaining
+            let k = remaining.ilog2();
+            let advance_gens = 1u32 << k;
+
+            // If advance_gens is too small (1 gen), just use single-gen steps for remainder
+            if advance_gens < 2 {
+                break;
+            }
+
+            // GOLDE: expand until depth - 2 >= k (m_StepAdvanceDepth)
+            // We need depth >= k + 2 for advance_fast to work at root.
+            let needed_depth = k + 2;
+            while self.depth < needed_depth {
+                self.root = expand_node(&mut self.cache, self.root, self.depth);
+                self.depth += 1;
+            }
+            // Also expand for pattern boundary
+            while needs_expansion(&self.cache, self.root, self.depth) {
+                self.root = expand_node(&mut self.cache, self.root, self.depth);
+                self.depth += 1;
+            }
+
+            // Clear fast cache for this multi-gen advance
+            self.cache.clear_advance_results();
+
+            let cells_before = self.alive_count();
+            let target_depth = k;
+            eprintln!("MULTI-GEN(advance_node): depth={} root={} cells={} advancing {} gens target_depth={} (remaining={})",
+                      self.depth, self.root, cells_before, advance_gens, target_depth, remaining);
+
+            self.root = advance_node(&mut self.cache, &mut self.slow_cache,
+                                      self.root, self.depth, target_depth,
+                                      &mut self.slow_cache_hits, &mut self.slow_cache_misses);
+            // GOLDE always drops 1 level per DoOneJump, regardless of advance depth.
+            // advance_fast returns a node at (level - 1), not (level - 2).
+            self.depth -= 1;
+
+            let cells_after = self.alive_count();
+            eprintln!("MULTI-GEN(advance_node) AFTER: depth={} root={} cells={} (delta={:+})",
+                      self.depth, self.root, cells_after, cells_after as i64 - cells_before as i64);
+
+            remaining -= advance_gens;
+
+            // Store cache stats
+            let total = self.slow_cache_hits + self.slow_cache_misses;
+            if total > 0 {
+                self.last_cache_size = self.slow_cache.len() as u32;
+                self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
+            }
+            self.slow_cache_hits = 0;
+            self.slow_cache_misses = 0;
+
+            // Expand after shrinking
+            while needs_expansion(&self.cache, self.root, self.depth) {
+                self.root = expand_node(&mut self.cache, self.root, self.depth);
+                self.depth += 1;
+            }
+        }
+
+        // Fall back to single-gen steps for remainder
+        // Clear fast cache — advance_result from multi-gen advances are stale
+        self.cache.clear_advance_results();
+        for _ in 0..remaining {
             self.step();
         }
     }
@@ -1324,7 +1426,7 @@ mod tests {
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 16, 16);
 
         // Advance with advance_slow at level 4
-        let result = advance_slow(&mut cache, &mut AHashMap::new(), tree, 4, false, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), tree, 4, 0, &mut 0, &mut 0);
 
         // Result should be a level-3 node (8x8), centered
         // The center 8x8 covers cells (4,4) to (11,11) in the 16x16 grid
@@ -1382,7 +1484,7 @@ mod tests {
         }
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 32, 32);
 
-        let result = advance_slow(&mut cache, &mut AHashMap::new(), tree, 5, false, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), tree, 5, 0, &mut 0, &mut 0);
 
         // Result is level-4 (16x16), centered at (8,8) of the 32x32
         // Covers cells (8,8) to (23,23)
@@ -1446,7 +1548,7 @@ mod tests {
         }
 
         // Advance with advance_slow
-        let result = advance_slow(&mut cache, &mut AHashMap::new(), root, depth, false, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), root, depth, 0, &mut 0, &mut 0);
 
         // Result is at level depth-1
         let result_depth = depth - 1;
@@ -1781,7 +1883,7 @@ mod tests {
 
             // advance_slow at level 4 recurses to level 3 base case.
             // The result is a level-3 node (8×8) representing (ax+4 .. ax+11, ay+4 .. ay+11).
-            let result_idx = advance_slow(&mut test_cache, &mut AHashMap::new(), copied, 4, false, &mut 0, &mut 0);
+            let result_idx = advance_node(&mut test_cache, &mut AHashMap::new(), copied, 4, 0, &mut 0, &mut 0);
             let result_cells = collect_alive_helper(&test_cache, result_idx, 3);
 
             // Expected: cells in the flat_next grid at (ax+4 .. ax+11, ay+4 .. ay+11)
@@ -1876,5 +1978,55 @@ mod tests {
         }
         println!("After step: {} set bits", set_bits2);
         assert!(set_bits2 >= 7, "Expected at least 7 set bits after step, got {}", set_bits2);
+    }
+
+    #[test]
+    fn test_multi_gen_advance() {
+        // Test that multi-gen advance matches single-gen steps
+        let pattern = [
+            (100, 100), (101, 100), (102, 100),
+            (100, 101), (102, 101),
+            (100, 102), (101, 102),
+        ];
+        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+
+        // Advance using single-gen steps
+        let mut hf1 = HashLife::from_flat(&cells);
+        for _ in 0..8 {
+            hf1.step();
+        }
+        let cells1 = hf1.to_flat();
+
+        // Advance using multi-gen (step_n with advance_depth=1)
+        let mut hf2 = HashLife::from_flat(&cells);
+        hf2.step_n(8);
+        let cells2 = hf2.to_flat();
+
+        assert_eq!(cells1, cells2, "Multi-gen advance doesn't match single-gen steps");
+    }
+
+    #[test]
+    fn test_multi_gen_heptamino() {
+        // Test multi-gen advance on pi heptamino
+        let pattern = [
+            (100, 100), (101, 100),
+            (100, 101), (101, 101), (102, 101),
+            (100, 102), (101, 102),
+        ];
+        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+
+        // Advance 16 gens using single-gen steps
+        let mut hf1 = HashLife::from_flat(&cells);
+        for _ in 0..16 {
+            hf1.step();
+        }
+        let cells1 = hf1.to_flat();
+
+        // Advance 16 gens using multi-gen
+        let mut hf2 = HashLife::from_flat(&cells);
+        hf2.step_n(16);
+        let cells2 = hf2.to_flat();
+
+        assert_eq!(cells1, cells2, "Multi-gen heptamino doesn't match single-gen steps");
     }
 }

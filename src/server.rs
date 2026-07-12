@@ -168,9 +168,13 @@ fn serve_state(
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
     if g.hashlife_mode {
-        let hf = g.hashlife.as_ref().unwrap();
-        data.extend(hf.last_cache_size.to_be_bytes());
-        data.extend(hf.last_cache_hit_rate.to_be_bytes());
+        if let Some(ref hf) = g.hashlife {
+            data.extend(hf.last_cache_size.to_be_bytes());
+            data.extend(hf.last_cache_hit_rate.to_be_bytes());
+        } else {
+            data.extend(0u32.to_be_bytes());
+            data.extend(0u32.to_be_bytes());
+        }
     } else {
         data.extend(g.heap.to_be_bytes());
         data.extend((g.active_tiles.len() as u32).to_be_bytes());
