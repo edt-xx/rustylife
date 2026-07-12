@@ -476,6 +476,7 @@ impl Grid {
     /// Build HashLife from current alive set if not already present.
     pub fn init_hashlife(&mut self) {
         if self.hashlife.is_none() {
+            eprintln!("INIT_HASHLIFE: creating new instance from {} cells", self.alive.len());
             self.hashlife = Some(game_of_life::hashlife::HashLife::from_flat(&self.alive));
         }
     }

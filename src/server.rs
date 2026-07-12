@@ -109,13 +109,13 @@ fn serve_state(
     let alive_count = if g.hashlife_mode {
         // HashLife mode: populate viewport from quadtree
         if let Some(ref hf) = g.hashlife {
-            let (cx, cy) = hf.center();
-            eprintln!("STATE hashlife: vx={} vy={} vw={} vh={} center=({},{})",
-                vx, vy, vw, vh, cx, cy);
+            // let (cx, cy) = hf.center();
+            // eprintln!("STATE hashlife: vx={} vy={} vw={} vh={} center=({},{})",
+            //     vx, vy, vw, vh, cx, cy);
             hf.populate_viewport(vx, vy, vw, vh, &mut bits);
-            // Count set bits for debugging
-            let set_bits: usize = bits.iter().map(|b| b.count_ones() as usize).sum();
-            eprintln!("STATE hashlife: set_bits={}", set_bits);
+            // // Count set bits for debugging
+            // let set_bits: usize = bits.iter().map(|b| b.count_ones() as usize).sum();
+            // eprintln!("STATE hashlife: set_bits={}", set_bits);
         }
         if let Some(ref hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
     } else {
@@ -221,6 +221,8 @@ fn handle_action(
             g.hashlife_mode = !g.hashlife_mode;
             if g.hashlife_mode {
                 g.init_hashlife();
+            } else {
+                g.invalidate_hashlife();
             }
             // eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
             //     g.hashlife_mode, g.alive.len(), g.hashlife.is_some());
