@@ -13,7 +13,6 @@
 //! - AdvanceSlow: recursive exact-gen advance (8x8 grid of segments)
 
 use ahash::AHashMap;
-use std::hash::{Hash, Hasher};
 
 // Coord pack/unpack (inline to avoid grid dependency in lib context)
 fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
@@ -48,29 +47,8 @@ pub struct LifeNode {
     pub north_east: usize,
     pub south_west: usize,
     pub south_east: usize,
-    pub hash: u64,
     pub is_empty: bool,
-    /// GOLDE-style fast cache: cached advance result for this node.
-    /// NO_FAST_CACHE means no cached result. Cleared at start of each step.
-    pub advance_result: usize,
 }
-
-impl Hash for LifeNode {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(self.hash);
-    }
-}
-
-impl PartialEq for LifeNode {
-    fn eq(&self, other: &Self) -> bool {
-        self.north_west == other.north_west
-            && self.north_east == other.north_east
-            && self.south_west == other.south_west
-            && self.south_east == other.south_east
-    }
-}
-
-impl Eq for LifeNode {}
 
 // ============================================================================
 // Arena + Cache
@@ -80,28 +58,32 @@ impl Eq for LifeNode {}
 pub struct HashLifeCache {
     /// Arena of nodes. Index 0 = FALSE_NODE, index 1 = TRUE_NODE.
     pub nodes: Vec<LifeNode>,
-    /// Canonicalization map: (hash, [nw,ne,sw,se]) → arena index
-    node_map: ahash::AHashMap<(u64, [usize; 4]), usize>,
+    /// Canonicalization map: [nw,ne,sw,se] → arena index
+    /// GOLDE-style: no pre-computed hash, no linear collision scan.
+    node_map: ahash::AHashMap<[usize; 4], usize>,
+    /// Fast cache: (node_idx, level) → advanced result.
+    /// Keyed by level because same canonical node at different levels
+    /// advances different numbers of generations.
+    fast_cache: ahash::AHashMap<(usize, u32), usize>,
 }
 
 impl HashLifeCache {
     pub fn new() -> Self {
         let mut nodes = Vec::with_capacity(65536);
-        let false_hash = compute_hash(0, 0, 0, 0);
         // Index 0 = FALSE_NODE
         nodes.push(LifeNode {
             north_west: 0, north_east: 0, south_west: 0, south_east: 0,
-            hash: false_hash, is_empty: true, advance_result: NO_FAST_CACHE,
+            is_empty: true,
         });
         // Index 1 = TRUE_NODE (static alive leaf, children all TRUE_NODE)
-        // Use unique hash to avoid collision with FALSE_NODE
         nodes.push(LifeNode {
             north_west: 1, north_east: 1, south_west: 1, south_east: 1,
-            hash: 0xFFFFFFFFFFFFFFFF, is_empty: false, advance_result: NO_FAST_CACHE,
+            is_empty: false,
         });
         Self {
             nodes,
             node_map: ahash::AHashMap::with_capacity(65536),
+            fast_cache: ahash::AHashMap::new(),
         }
     }
 
@@ -109,14 +91,13 @@ impl HashLifeCache {
         &self.nodes[idx]
     }
 
-    /// Clear all advance_result fields. Called at start of each step.
+    /// Clear fast cache. Called at start of each step.
     pub fn clear_advance_results(&mut self) {
-        for node in self.nodes.iter_mut() {
-            node.advance_result = NO_FAST_CACHE;
-        }
+        self.fast_cache.clear();
     }
 
     /// Find existing canonical node or create new one in arena.
+    /// GOLDE-style: direct [nw,ne,sw,se] lookup, no pre-computed hash.
     pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
         if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
@@ -126,35 +107,16 @@ impl HashLifeCache {
             return TRUE_NODE;
         }
 
-        let hash = compute_hash(nw, ne, sw, se);
-        let key = (hash, [nw, ne, sw, se]);
+        let key = [nw, ne, sw, se];
 
         if let Some(&idx) = self.node_map.get(&key) {
-            // Verify cached node matches (debug)
-            let cached = &self.nodes[idx];
-            debug_assert!(cached.north_west == nw && cached.north_east == ne
-                && cached.south_west == sw && cached.south_east == se,
-                "CACHE CORRUPTION: key=({},{},{},{}) cached=({},{},{},{}) idx={}",
-                nw, ne, sw, se, cached.north_west, cached.north_east, cached.south_west, cached.south_east, idx);
             return idx;
-        }
-
-        // Hash collision fallback: scan all nodes for exact match
-        for (i, node) in self.nodes.iter().enumerate() {
-            if node.hash == hash {
-                if node.north_west == nw && node.north_east == ne
-                    && node.south_west == sw && node.south_east == se {
-                    return i;
-                }
-            }
         }
 
         let is_empty = {
             let is_e = |i: usize| -> bool {
                 if i == FALSE_NODE { true }
                 else if i >= self.nodes.len() {
-                    // eprintln!("FIND_OR_CREATE OOB: idx={} arena_len={} children=({},{},{},{})",
-                    //           i, self.nodes.len(), nw, ne, sw, se);
                     true
                 } else { self.nodes[i].is_empty }
             };
@@ -166,37 +128,13 @@ impl HashLifeCache {
             north_east: ne,
             south_west: sw,
             south_east: se,
-            hash,
             is_empty,
-            advance_result: NO_FAST_CACHE,
         };
         let idx = self.nodes.len();
         self.nodes.push(node);
         self.node_map.insert(key, idx);
         idx
     }
-}
-
-// ============================================================================
-// Hash computation
-// ============================================================================
-
-fn compute_hash(nw: usize, ne: usize, sw: usize, se: usize) -> u64 {
-    let mut h: u64 = 0x9E3779B97F4A7C15;
-    h = mix64(h.wrapping_add(nw as u64));
-    h = mix64(h.wrapping_add(ne as u64));
-    h = mix64(h.wrapping_add(sw as u64));
-    h = mix64(h.wrapping_add(se as u64));
-    h
-}
-
-fn mix64(mut z: u64) -> u64 {
-    z ^= z >> 33;
-    z = z.wrapping_mul(0xff51afd7ed558ccd);
-    z ^= z >> 33;
-    z = z.wrapping_mul(0xc4ceb9fe1a85ec53);
-    z ^= z >> 33;
-    z
 }
 
 // ============================================================================
@@ -536,22 +474,24 @@ fn advance_node(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
 /// GOLDE AdvanceFast: classic 9-subnode centered approach.
 /// Advances 2^(level-2) generations. Calls ITSELF recursively (like GOLDE).
 /// The dispatcher (advance_node) routes TO this function but it recurses directly.
+/// Fast cache keyed by (node_idx, level) — same canonical node at different
+/// levels advances different numbers of generations.
 fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize>,
                  node_idx: usize, level: u32) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
-    // GOLDE-style fast cache: check advance_result on the node itself.
-    let node = cache.get_node(node_idx);
-    if node.advance_result != NO_FAST_CACHE {
-        return node.advance_result;
+    // Fast cache: keyed by (node_idx, level)
+    let fkey = (node_idx, level);
+    if let Some(&cached) = cache.fast_cache.get(&fkey) {
+        return cached;
     }
 
     // Base case: level 3 → advance 2 generations using 8x8 rule table
     if level == 3 {
         let result = advance_base_two_gen(cache, node_idx);
-        cache.nodes[node_idx].advance_result = result;
+        cache.fast_cache.insert(fkey, result);
         return result;
     }
 
@@ -587,7 +527,7 @@ fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize
     let bottomRight = advance_fast(cache, &mut AHashMap::new(), br, level - 1);
 
     let result = cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight);
-    cache.nodes[node_idx].advance_result = result;
+    cache.fast_cache.insert(fkey, result);
     result
 }
 
