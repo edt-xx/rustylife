@@ -153,8 +153,8 @@ impl HashLifeCache {
             let is_e = |i: usize| -> bool {
                 if i == FALSE_NODE { true }
                 else if i >= self.nodes.len() {
-                    eprintln!("FIND_OR_CREATE OOB: idx={} arena_len={} children=({},{},{},{})",
-                              i, self.nodes.len(), nw, ne, sw, se);
+                    // eprintln!("FIND_OR_CREATE OOB: idx={} arena_len={} children=({},{},{},{})",
+                    //           i, self.nodes.len(), nw, ne, sw, se);
                     true
                 } else { self.nodes[i].is_empty }
             };
@@ -1120,13 +1120,13 @@ impl HashLife {
         // Clear fast cache — advance_result is only valid within a single step
         self.cache.clear_advance_results();
         // advance_node with target_depth=0 → always uses advance_slow (single-gen)
-        eprintln!("STEP arena_len={} slow_cache_size={} root={} depth={}",
-                  self.cache.nodes.len(), self.slow_cache.len(), self.root, self.depth);
+        // eprintln!("STEP arena_len={} slow_cache_size={} root={} depth={}",
+        //           self.cache.nodes.len(), self.slow_cache.len(), self.root, self.depth);
         self.root = advance_node(&mut self.cache, &mut self.slow_cache, self.root, self.depth, 0,
                                   &mut self.slow_cache_hits, &mut self.slow_cache_misses);
         self.depth -= 1;
-        eprintln!("POST-STEP arena_len={} root={} depth={}",
-                  self.cache.nodes.len(), self.root, self.depth);
+        // eprintln!("POST-STEP arena_len={} root={} depth={}",
+        //           self.cache.nodes.len(), self.root, self.depth);
         // Store cache stats for display
         let total = self.slow_cache_hits + self.slow_cache_misses;
         if total > 0 {
@@ -1147,7 +1147,7 @@ impl HashLife {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
+        // eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
 
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
@@ -1181,10 +1181,10 @@ impl HashLife {
             // Clear fast cache for this multi-gen advance
             self.cache.clear_advance_results();
 
-            let cells_before = self.alive_count();
+            let _cells_before = self.alive_count();
             let target_depth = k;
-            eprintln!("MULTI-GEN(advance_node): depth={} root={} cells={} advancing {} gens target_depth={} (remaining={})",
-                      self.depth, self.root, cells_before, advance_gens, target_depth, remaining);
+            // eprintln!("MULTI-GEN(advance_node): depth={} root={} cells={} advancing {} gens target_depth={} (remaining={})",
+            //           self.depth, self.root, _cells_before, advance_gens, target_depth, remaining);
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache,
                                       self.root, self.depth, target_depth,
@@ -1193,9 +1193,9 @@ impl HashLife {
             // advance_fast returns a node at (level - 1), not (level - 2).
             self.depth -= 1;
 
-            let cells_after = self.alive_count();
-            eprintln!("MULTI-GEN(advance_node) AFTER: depth={} root={} cells={} (delta={:+})",
-                      self.depth, self.root, cells_after, cells_after as i64 - cells_before as i64);
+            let _cells_after = self.alive_count();
+            // eprintln!("MULTI-GEN(advance_node) AFTER: depth={} root={} cells={} (delta={:+})",
+            //           self.depth, self.root, _cells_after, _cells_after as i64 - _cells_before as i64);
 
             remaining -= advance_gens;
 
