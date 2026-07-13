@@ -65,6 +65,10 @@ pub struct HashLifeCache {
     pub nodes: ahash::AHashMap<u32, LifeNode>,
     /// Fast cache: (node_idx, level) → advanced result.
     pub fast_cache: ahash::AHashMap<(u32, u32), u32>,
+    /// Count cache: (node_idx, depth) → alive cell count.
+    /// Memoizes count_cells — same canonical node at same depth always has same count.
+    /// Cleared on arena GC (deleted nodes leave stale entries).
+    pub count_cache: ahash::AHashMap<(u32, u32), usize>,
     /// Next available index (incremented on each new node)
     next_idx: u32,
 }
@@ -83,6 +87,7 @@ impl HashLifeCache {
             arena,
             nodes,
             fast_cache: ahash::AHashMap::new(),
+            count_cache: ahash::AHashMap::new(),
             next_idx: 2,
         }
     }
@@ -171,6 +176,7 @@ impl HashLifeCache {
         }
         self.nodes.retain(|idx, _| live.contains(idx));
         self.arena.retain(|_, idx| live.contains(idx));
+        self.count_cache.clear();
         // Re-insert sentinels (they're always live)
         self.arena.entry([0,0,0,0]).or_insert(0);
         self.arena.entry([1,1,1,1]).or_insert(1);
@@ -773,15 +779,21 @@ fn build_quadtree(cache: &mut HashLifeCache, grid: &[Vec<u8>], x0: usize, y0: us
     }
 }
 
-fn count_cells(cache: &HashLifeCache, node_idx: u32, depth: u32) -> usize {
+fn count_cells(cache: &mut HashLifeCache, node_idx: u32, depth: u32) -> usize {
     if node_idx == FALSE_NODE { return 0; }
     if node_idx == TRUE_NODE { return 1usize << depth; }
     if depth == 0 { return 1; }
+    // Check memoization cache
+    if let Some(&c) = cache.count_cache.get(&(node_idx, depth)) {
+        return c;
+    }
     let node = cache.get_node(node_idx);
-    count_cells(cache, node.north_west, depth - 1)
+    let count = count_cells(cache, node.north_west, depth - 1)
         + count_cells(cache, node.north_east, depth - 1)
         + count_cells(cache, node.south_west, depth - 1)
-        + count_cells(cache, node.south_east, depth - 1)
+        + count_cells(cache, node.south_east, depth - 1);
+    cache.count_cache.insert((node_idx, depth), count);
+    count
 }
 
 /// Collect alive cells from a node (relative coordinates, no packing)
@@ -1009,12 +1021,12 @@ impl HashLife {
         self.center
     }
 
-    pub fn cell_count(&self) -> usize {
-        count_cells(&self.cache, self.root, self.depth)
+    pub fn cell_count(&mut self) -> usize {
+        count_cells(&mut self.cache, self.root, self.depth)
     }
 
-    pub fn alive_count(&self) -> usize {
-        count_cells(&self.cache, self.root, self.depth)
+    pub fn alive_count(&mut self) -> usize {
+        count_cells(&mut self.cache, self.root, self.depth)
     }
 
     pub fn from_flat(data: &[u64]) -> Self {

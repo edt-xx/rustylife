@@ -100,7 +100,7 @@ fn serve_state(
     let vh: u32 = params.get("vh").and_then(|s| s.parse().ok()).unwrap_or(300);
 
     // Lock grid for snapshot
-    let g = grid.lock().unwrap();
+    let mut g = grid.lock().unwrap();
     let bits_len = (vw as usize * vh as usize + 7) / 8;
 
     // Bits: bit-packed alive cells in viewport
@@ -117,7 +117,7 @@ fn serve_state(
             // let set_bits: usize = bits.iter().map(|b| b.count_ones() as usize).sum();
             // eprintln!("STATE hashlife: set_bits={}", set_bits);
         }
-        if let Some(ref hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
+        if let Some(ref mut hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
     } else {
         // Conventional mode: scan flat alive array
         let ac = g.alive.len() as u32;
