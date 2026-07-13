@@ -156,14 +156,22 @@ fn serve_state(
     }
 
     // Header: gen(u32), vw(u16), vh(u16), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
-    // In hashlife mode: heap=cache_size, active_tiles=cache_hit_rate*10
+    // In hashlife mode: active=n1_cache_size, heap=total_cache_size, active_tiles=cache_hit_rate*10
     // Big-endian from Python's struct.pack(">IHHIIIIIII", ...)
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
     data.extend((vw as u16).to_be_bytes());
     data.extend((vh as u16).to_be_bytes());
     data.extend(alive_count.to_be_bytes());
-    data.extend(g.active_count.to_be_bytes());
+    if g.hashlife_mode {
+        if let Some(ref hf) = g.hashlife {
+            data.extend((hf.cache.node_map_n1.len() as u32).to_be_bytes());
+        } else {
+            data.extend(0u32.to_be_bytes());
+        }
+    } else {
+        data.extend(g.active_count.to_be_bytes());
+    }
     data.extend((overlay.len() as u32).to_be_bytes());
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
@@ -204,6 +212,9 @@ fn handle_action(
             // eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife();
+                if let Some(ref mut hf) = g.hashlife {
+                    hf.rotate_caches(1);
+                }
             } else {
                 g.step();
             }
@@ -214,6 +225,9 @@ fn handle_action(
             // eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife_n(count as u32);
+                if let Some(ref mut hf) = g.hashlife {
+                    hf.rotate_caches(count as u32);
+                }
             } else {
                 for _ in 0..count {
                     g.step();

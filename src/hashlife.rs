@@ -58,9 +58,11 @@ pub struct LifeNode {
 pub struct HashLifeCache {
     /// Arena of nodes. Index 0 = FALSE_NODE, index 1 = TRUE_NODE.
     pub nodes: Vec<LifeNode>,
-    /// Canonicalization map: [nw,ne,sw,se] → arena index
-    /// GOLDE-style: no pre-computed hash, no linear collision scan.
-    node_map: ahash::AHashMap<[usize; 4], usize>,
+    /// Two-tier canonicalization map: generational eviction.
+    /// Same pattern as slow_cache — promotes on hit, rotates periodically.
+    /// Evicting entries is safe: worst case is a duplicate arena entry.
+    node_map_n: ahash::AHashMap<[usize; 4], usize>,
+    node_map_n1: ahash::AHashMap<[usize; 4], usize>,
     /// Fast cache: (node_idx, level) → advanced result.
     /// Keyed by level because same canonical node at different levels
     /// advances different numbers of generations.
@@ -82,7 +84,8 @@ impl HashLifeCache {
         });
         Self {
             nodes,
-            node_map: ahash::AHashMap::with_capacity(65536),
+            node_map_n: ahash::AHashMap::with_capacity(65536),
+            node_map_n1: ahash::AHashMap::new(),
             fast_cache: ahash::AHashMap::new(),
         }
     }
@@ -96,8 +99,18 @@ impl HashLifeCache {
         self.fast_cache.clear();
     }
 
+    /// Rotate node_map tiers: drop old, promote current.
+    pub fn rotate_node_map(&mut self) {
+        self.node_map_n.clear();
+        self.node_map_n.shrink_to_fit();
+        std::mem::swap(&mut self.node_map_n, &mut self.node_map_n1);
+        self.node_map_n1.clear();
+        self.node_map_n1.shrink_to_fit();
+    }
+
     /// Find existing canonical node or create new one in arena.
     /// GOLDE-style: direct [nw,ne,sw,se] lookup, no pre-computed hash.
+    /// Two-tier: check n1 first, then n. Hit in n → promote to n1.
     pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
         if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
@@ -109,7 +122,11 @@ impl HashLifeCache {
 
         let key = [nw, ne, sw, se];
 
-        if let Some(&idx) = self.node_map.get(&key) {
+        if let Some(&idx) = self.node_map_n1.get(&key) {
+            return idx;
+        }
+        if let Some(&idx) = self.node_map_n.get(&key) {
+            self.node_map_n1.insert(key, idx); // promote
             return idx;
         }
 
@@ -132,7 +149,7 @@ impl HashLifeCache {
         };
         let idx = self.nodes.len();
         self.nodes.push(node);
-        self.node_map.insert(key, idx);
+        self.node_map_n1.insert(key, idx);
         idx
     }
 }
@@ -457,7 +474,8 @@ fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
 /// If `level - 2 > target_depth` → use advance_slow (recursive, drops 1 level).
 /// Otherwise → use advance_fast (logarithmic, drops 1 level).
 /// Both drop exactly 1 level, so they can be mixed safely in the same recursion tree.
-fn advance_node(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>,
+fn advance_node(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usize>,
+                 slow_cache_n1: &mut AHashMap<u64, usize>,
                  node_idx: usize, level: u32, target_depth: u32,
                  hits: &mut u64, misses: &mut u64) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
@@ -465,9 +483,9 @@ fn advance_node(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
     if level < 3 { return node_idx; }
 
     if level - 2 > target_depth {
-        advance_slow(cache, slow_cache, node_idx, level, target_depth, hits, misses)
+        advance_slow(cache, slow_cache_n, slow_cache_n1, node_idx, level, target_depth, hits, misses)
     } else {
-        advance_fast(cache, slow_cache, node_idx, level)
+        advance_fast(cache, node_idx, level)
     }
 }
 
@@ -476,7 +494,7 @@ fn advance_node(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
 /// The dispatcher (advance_node) routes TO this function but it recurses directly.
 /// Fast cache keyed by (node_idx, level) — same canonical node at different
 /// levels advances different numbers of generations.
-fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize>,
+fn advance_fast(cache: &mut HashLifeCache,
                  node_idx: usize, level: u32) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
@@ -505,15 +523,15 @@ fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize
     let ch_sw_se = centered_horizontal(cache, node.south_west, node.south_east);
 
     // Advance all 9 sub-nodes at level-(L-1) — call advance_fast directly
-    let n00 = advance_fast(cache, &mut AHashMap::new(), node.north_west, level - 1);
-    let n01 = advance_fast(cache, &mut AHashMap::new(), ch_nw_ne, level - 1);
-    let n02 = advance_fast(cache, &mut AHashMap::new(), node.north_east, level - 1);
-    let n10 = advance_fast(cache, &mut AHashMap::new(), cv_nw_sw, level - 1);
-    let n11 = advance_fast(cache, &mut AHashMap::new(), cs_node, level - 1);
-    let n12 = advance_fast(cache, &mut AHashMap::new(), cv_ne_se, level - 1);
-    let n20 = advance_fast(cache, &mut AHashMap::new(), node.south_west, level - 1);
-    let n21 = advance_fast(cache, &mut AHashMap::new(), ch_sw_se, level - 1);
-    let n22 = advance_fast(cache, &mut AHashMap::new(), node.south_east, level - 1);
+    let n00 = advance_fast(cache, node.north_west, level - 1);
+    let n01 = advance_fast(cache, ch_nw_ne, level - 1);
+    let n02 = advance_fast(cache, node.north_east, level - 1);
+    let n10 = advance_fast(cache, cv_nw_sw, level - 1);
+    let n11 = advance_fast(cache, cs_node, level - 1);
+    let n12 = advance_fast(cache, cv_ne_se, level - 1);
+    let n20 = advance_fast(cache, node.south_west, level - 1);
+    let n21 = advance_fast(cache, ch_sw_se, level - 1);
+    let n22 = advance_fast(cache, node.south_east, level - 1);
 
     // Build 4 windows and advance each — call advance_fast directly
     let tl = cache.find_or_create(n00, n01, n10, n11);
@@ -521,10 +539,10 @@ fn advance_fast(cache: &mut HashLifeCache, _slow_cache: &mut AHashMap<u64, usize
     let bl = cache.find_or_create(n10, n11, n20, n21);
     let br = cache.find_or_create(n11, n12, n21, n22);
 
-    let topLeft = advance_fast(cache, &mut AHashMap::new(), tl, level - 1);
-    let topRight = advance_fast(cache, &mut AHashMap::new(), tr, level - 1);
-    let bottomLeft = advance_fast(cache, &mut AHashMap::new(), bl, level - 1);
-    let bottomRight = advance_fast(cache, &mut AHashMap::new(), br, level - 1);
+    let topLeft = advance_fast(cache, tl, level - 1);
+    let topRight = advance_fast(cache, tr, level - 1);
+    let bottomLeft = advance_fast(cache, bl, level - 1);
+    let bottomRight = advance_fast(cache, br, level - 1);
 
     let result = cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight);
     cache.fast_cache.insert(fkey, result);
@@ -592,7 +610,8 @@ fn combine_2x2(tl: u16, tr: u16, bl: u16, br: u16) -> u16 {
     ((tl as u32) << 10 | (tr as u32) << 8 | (bl as u32) << 2 | br as u32) as u16
 }
 
-fn advance_slow(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>,
+fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usize>,
+                 slow_cache_n1: &mut AHashMap<u64, usize>,
                  node_idx: usize, level: u32, target_depth: u32,
                  hits: &mut u64, misses: &mut u64) -> usize {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
@@ -607,8 +626,15 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
     // (level << 8 | target_depth) in low 32 bits.
     // GOLDE keys slow cache by {node, m_StepAdvanceDepth}.
     let key = ((node_idx as u64) << 32) | (((level as u64) << 8) | (target_depth as u64));
-    if let Some(&cached) = slow_cache.get(&key) {
+
+    // Two-tier lookup: check n1 first, then n (promote on hit)
+    if let Some(&cached) = slow_cache_n1.get(&key) {
         *hits += 1;
+        return cached;
+    }
+    if let Some(&cached) = slow_cache_n.get(&key) {
+        *hits += 1;
+        slow_cache_n1.insert(key, cached); // promote to current tier
         return cached;
     }
     *misses += 1;
@@ -620,7 +646,7 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
         } else {
             advance_base_one_gen(cache, node_idx)
         };
-        slow_cache.insert(key, result);
+        slow_cache_n1.insert(key, result);
         return result;
     }
 
@@ -642,13 +668,13 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache: &mut AHashMap<u64, usize>
 
     // GOLDE: AdvanceSlow calls AdvanceNode (dispatcher) recursively,
     // NOT AdvanceSlow. This allows routing to AdvanceFast when level-2 <= target_depth.
-    let r00 = advance_node(cache, slow_cache, window00, level - 1, target_depth, hits, misses);
-    let r01 = advance_node(cache, slow_cache, window01, level - 1, target_depth, hits, misses);
-    let r10 = advance_node(cache, slow_cache, window10, level - 1, target_depth, hits, misses);
-    let r11 = advance_node(cache, slow_cache, window11, level - 1, target_depth, hits, misses);
+    let r00 = advance_node(cache, slow_cache_n, slow_cache_n1, window00, level - 1, target_depth, hits, misses);
+    let r01 = advance_node(cache, slow_cache_n, slow_cache_n1, window01, level - 1, target_depth, hits, misses);
+    let r10 = advance_node(cache, slow_cache_n, slow_cache_n1, window10, level - 1, target_depth, hits, misses);
+    let r11 = advance_node(cache, slow_cache_n, slow_cache_n1, window11, level - 1, target_depth, hits, misses);
 
     let result = cache.find_or_create(r00, r01, r10, r11);
-    slow_cache.insert(key, result);
+    slow_cache_n1.insert(key, result);
     result
 }
 
@@ -909,9 +935,18 @@ pub struct HashLife {
     root: usize,
     center: (i64, i64),
     depth: u32,
-    /// GOLDE-style slow cache: (node_idx, level, advance_depth) → result_node
-    /// Persists across step_n iterations to avoid recomputing overlapping sub-trees.
-    pub slow_cache: AHashMap<u64, usize>,
+    /// Two-tier slow cache: generational eviction.
+    /// n = old tier (survives one cycle), n1 = current tier.
+    /// On hit in n, promote to n1. New keys go in n1.
+    /// Every cycle_size steps: drop n, n=n1, create new n1.
+    pub slow_cache_n: AHashMap<u64, usize>,
+    pub slow_cache_n1: AHashMap<u64, usize>,
+    /// Steps remaining until slow_cache rotation (decremented per step/step_n).
+    pub slow_cache_cycle: u32,
+    pub slow_cache_cycle_size: u32,
+    /// Steps remaining until node_map rotation.
+    node_map_cycle: u32,
+    pub node_map_cycle_size: u32,
     /// Cache hit/miss counters (reset each step)
     pub slow_cache_hits: u64,
     pub slow_cache_misses: u64,
@@ -929,7 +964,12 @@ impl HashLife {
             root: FALSE_NODE,
             center: (0, 0),
             depth: 0,
-            slow_cache: AHashMap::new(),
+            slow_cache_n: AHashMap::new(),
+            slow_cache_n1: AHashMap::new(),
+            slow_cache_cycle: 20, // steps remaining until rotation
+            slow_cache_cycle_size: 20,
+            node_map_cycle: 1, // steps remaining until rotation
+            node_map_cycle_size: 1, // every step
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -998,7 +1038,12 @@ impl HashLife {
             root: tree,
             center: (origin_x + size as i64 / 2, origin_y + size as i64 / 2),
             depth,
-            slow_cache: AHashMap::new(),
+            slow_cache_n: AHashMap::new(),
+            slow_cache_n1: AHashMap::new(),
+            slow_cache_cycle: 20, // steps remaining until rotation
+            slow_cache_cycle_size: 20,
+            node_map_cycle: 1, // steps remaining until rotation
+            node_map_cycle_size: 1, // every step
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -1060,17 +1105,16 @@ impl HashLife {
         // Clear fast cache — advance_result is only valid within a single step
         self.cache.clear_advance_results();
         // advance_node with target_depth=0 → always uses advance_slow (single-gen)
-        // eprintln!("STEP arena_len={} slow_cache_size={} root={} depth={}",
-        //           self.cache.nodes.len(), self.slow_cache.len(), self.root, self.depth);
-        self.root = advance_node(&mut self.cache, &mut self.slow_cache, self.root, self.depth, 0,
+        self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
+                                  self.root, self.depth, 0,
                                   &mut self.slow_cache_hits, &mut self.slow_cache_misses);
         self.depth -= 1;
-        // eprintln!("POST-STEP arena_len={} root={} depth={}",
-        //           self.cache.nodes.len(), self.root, self.depth);
+
         // Store cache stats for display
         let total = self.slow_cache_hits + self.slow_cache_misses;
+        let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
         if total > 0 {
-            self.last_cache_size = self.slow_cache.len() as u32;
+            self.last_cache_size = cache_size as u32;
             self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
         } else {
             self.last_cache_size = 0;
@@ -1078,6 +1122,9 @@ impl HashLife {
         }
         self.slow_cache_hits = 0;
         self.slow_cache_misses = 0;
+
+        // Cache rotation handled by server.rs after each GUI step
+
         // After shrinking, pattern may touch rim — expand again if needed
         while needs_expansion(&self.cache, self.root, self.depth) {
             self.root = expand_node(&mut self.cache, self.root, self.depth);
@@ -1126,7 +1173,7 @@ impl HashLife {
             // eprintln!("MULTI-GEN(advance_node): depth={} root={} cells={} advancing {} gens target_depth={} (remaining={})",
             //           self.depth, self.root, _cells_before, advance_gens, target_depth, remaining);
 
-            self.root = advance_node(&mut self.cache, &mut self.slow_cache,
+            self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                       self.root, self.depth, target_depth,
                                       &mut self.slow_cache_hits, &mut self.slow_cache_misses);
             // GOLDE always drops 1 level per DoOneJump, regardless of advance depth.
@@ -1141,8 +1188,9 @@ impl HashLife {
 
             // Store cache stats
             let total = self.slow_cache_hits + self.slow_cache_misses;
+            let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
             if total > 0 {
-                self.last_cache_size = self.slow_cache.len() as u32;
+                self.last_cache_size = cache_size as u32;
                 self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
             }
             self.slow_cache_hits = 0;
@@ -1160,6 +1208,31 @@ impl HashLife {
         self.cache.clear_advance_results();
         for _ in 0..remaining {
             self.step();
+        }
+    }
+
+    /// Rotate caches: decrement counters by n gens. Called from server.rs
+    /// after each GUI step (single or batch).
+    pub fn rotate_caches(&mut self, n: u32) {
+        // Slow cache rotation
+        self.slow_cache_cycle = self.slow_cache_cycle.saturating_sub(n);
+        if self.slow_cache_cycle == 0 || self.slow_cache_cycle < n {
+            let extra = n.saturating_sub(self.slow_cache_cycle);
+            self.slow_cache_cycle = self.slow_cache_cycle_size - (extra % self.slow_cache_cycle_size);
+            if self.slow_cache_cycle == 0 { self.slow_cache_cycle = self.slow_cache_cycle_size; }
+            self.slow_cache_n.clear();
+            self.slow_cache_n.shrink_to_fit();
+            std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
+            self.slow_cache_n1.clear();
+            self.slow_cache_n1.shrink_to_fit();
+        }
+        // Node map rotation
+        self.node_map_cycle = self.node_map_cycle.saturating_sub(n);
+        if self.node_map_cycle == 0 || self.node_map_cycle < n {
+            let extra = n.saturating_sub(self.node_map_cycle);
+            self.node_map_cycle = self.node_map_cycle_size - (extra % self.node_map_cycle_size);
+            if self.node_map_cycle == 0 { self.node_map_cycle = self.node_map_cycle_size; }
+            self.cache.rotate_node_map();
         }
     }
 }
@@ -1366,7 +1439,7 @@ mod tests {
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 16, 16);
 
         // Advance with advance_slow at level 4
-        let result = advance_node(&mut cache, &mut AHashMap::new(), tree, 4, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 4, 0, &mut 0, &mut 0);
 
         // Result should be a level-3 node (8x8), centered
         // The center 8x8 covers cells (4,4) to (11,11) in the 16x16 grid
@@ -1424,7 +1497,7 @@ mod tests {
         }
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 32, 32);
 
-        let result = advance_node(&mut cache, &mut AHashMap::new(), tree, 5, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 5, 0, &mut 0, &mut 0);
 
         // Result is level-4 (16x16), centered at (8,8) of the 32x32
         // Covers cells (8,8) to (23,23)
@@ -1488,7 +1561,7 @@ mod tests {
         }
 
         // Advance with advance_slow
-        let result = advance_node(&mut cache, &mut AHashMap::new(), root, depth, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), root, depth, 0, &mut 0, &mut 0);
 
         // Result is at level depth-1
         let result_depth = depth - 1;
@@ -1823,7 +1896,7 @@ mod tests {
 
             // advance_slow at level 4 recurses to level 3 base case.
             // The result is a level-3 node (8×8) representing (ax+4 .. ax+11, ay+4 .. ay+11).
-            let result_idx = advance_node(&mut test_cache, &mut AHashMap::new(), copied, 4, 0, &mut 0, &mut 0);
+            let result_idx = advance_node(&mut test_cache, &mut AHashMap::new(), &mut AHashMap::new(), copied, 4, 0, &mut 0, &mut 0);
             let result_cells = collect_alive_helper(&test_cache, result_idx, 3);
 
             // Expected: cells in the flat_next grid at (ax+4 .. ax+11, ay+4 .. ay+11)
