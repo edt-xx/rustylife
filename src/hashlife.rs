@@ -2,9 +2,9 @@
 //! GOLDE-style HashLife implementation.
 //!
 //! Core design:
-//! - Node identity = usize index. FALSE_NODE=0, TRUE_NODE=1.
-//! - Arena = HashMap<[usize;4], usize> (children tuple → idx)
-//! - Nodes = HashMap<usize, LifeNode> (idx → node data)
+//! - Node identity = u32 index. FALSE_NODE=0, TRUE_NODE=1.
+//! - Arena = HashMap<[u32;4], u32> (children tuple → idx)
+//! - Nodes = HashMap<u32, LifeNode> (idx → node data)
 //! - Single arena with mark/sweep GC
 //! - Center-based tracking (like GOLDE's m_SeedOffset), NOT origin-based
 //! - 65536-entry rule table: maps 16-bit 4x4 patterns → 4-bit 2x2 center results
@@ -23,13 +23,13 @@ fn coord_unpack(cell: u64) -> (u32, u32) { ((cell & 0xFFFFFFFF) as u32, (cell >>
 // ============================================================================
 
 /// FALSE_NODE = index 0 (all children 0 = empty)
-pub const FALSE_NODE: usize = 0;
+pub const FALSE_NODE: u32 = 0;
 
 /// TRUE_NODE = index 1 (static alive leaf, children all TRUE_NODE)
-pub const TRUE_NODE: usize = 1;
+pub const TRUE_NODE: u32 = 1;
 
 /// Sentinel for advance_result meaning "no cached fast result"
-const NO_FAST_CACHE: usize = usize::MAX;
+const NO_FAST_CACHE: u32 = u32::MAX;
 
 /// Bitmasks for extracting 2x2 quadrants from a 16-bit 4x4 grid.
 const MASK_NW: u16 = 0xCC00;
@@ -43,10 +43,10 @@ const MASK_SE: u16 = 0x0033;
 
 #[derive(Clone, Copy)]
 pub struct LifeNode {
-    pub north_west: usize,
-    pub north_east: usize,
-    pub south_west: usize,
-    pub south_east: usize,
+    pub north_west: u32,
+    pub north_east: u32,
+    pub south_west: u32,
+    pub south_east: u32,
     pub is_empty: bool,
 }
 
@@ -55,18 +55,18 @@ pub struct LifeNode {
 // ============================================================================
 
 /// HashLife arena and canonicalization cache.
-/// Arena = HashMap<[usize;4], usize> (children → idx).
-/// Nodes = HashMap<usize, LifeNode> (idx → node data).
+/// Arena = HashMap<[u32;4], u32> (children → idx).
+/// Nodes = HashMap<u32, LifeNode> (idx → node data).
 /// Single arena with mark/sweep GC.
 pub struct HashLifeCache {
     /// Canonicalization map: children tuple → node index
-    pub arena: ahash::AHashMap<[usize; 4], usize>,
+    pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: idx → LifeNode
-    pub nodes: ahash::AHashMap<usize, LifeNode>,
+    pub nodes: ahash::AHashMap<u32, LifeNode>,
     /// Fast cache: (node_idx, level) → advanced result.
-    pub fast_cache: ahash::AHashMap<(usize, u32), usize>,
+    pub fast_cache: ahash::AHashMap<(u32, u32), u32>,
     /// Next available index (incremented on each new node)
-    next_idx: usize,
+    next_idx: u32,
 }
 
 impl HashLifeCache {
@@ -87,17 +87,17 @@ impl HashLifeCache {
         }
     }
 
-    pub fn get_node(&self, idx: usize) -> LifeNode {
+    pub fn get_node(&self, idx: u32) -> LifeNode {
         *self.nodes.get(&idx).unwrap_or(&LifeNode {
             north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true,
         })
     }
 
-    #[inline] pub fn nw(&self, idx: usize) -> usize { self.get_node(idx).north_west }
-    #[inline] pub fn ne(&self, idx: usize) -> usize { self.get_node(idx).north_east }
-    #[inline] pub fn sw(&self, idx: usize) -> usize { self.get_node(idx).south_west }
-    #[inline] pub fn se(&self, idx: usize) -> usize { self.get_node(idx).south_east }
-    #[inline] pub fn is_empty_check(&self, idx: usize) -> bool { self.get_node(idx).is_empty }
+    #[inline] pub fn nw(&self, idx: u32) -> u32 { self.get_node(idx).north_west }
+    #[inline] pub fn ne(&self, idx: u32) -> u32 { self.get_node(idx).north_east }
+    #[inline] pub fn sw(&self, idx: u32) -> u32 { self.get_node(idx).south_west }
+    #[inline] pub fn se(&self, idx: u32) -> u32 { self.get_node(idx).south_east }
+    #[inline] pub fn is_empty_check(&self, idx: u32) -> bool { self.get_node(idx).is_empty }
 
     /// Clear fast cache. Called at start of each step.
     pub fn clear_advance_results(&mut self) {
@@ -105,7 +105,7 @@ impl HashLifeCache {
     }
 
     /// Find existing canonical node or create new one in arena.
-    pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
+    pub fn find_or_create(&mut self, nw: u32, ne: u32, sw: u32, se: u32) -> u32 {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
         if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
             return FALSE_NODE;
@@ -121,7 +121,7 @@ impl HashLifeCache {
         }
 
         let is_empty = {
-            let is_e = |i: usize| -> bool {
+            let is_e = |i: u32| -> bool {
                 if i == FALSE_NODE { true }
                 else if let Some(node) = self.nodes.get(&i) { node.is_empty }
                 else { true }
@@ -138,7 +138,7 @@ impl HashLifeCache {
     }
 
     /// Collect all reachable node indices from root.
-    pub fn walk_tree(&self, root: usize, live: &mut HashSet<usize>) {
+    pub fn walk_tree(&self, root: u32, live: &mut HashSet<u32>) {
         let mut stack = vec![root];
         while let Some(idx) = stack.pop() {
             if idx == FALSE_NODE || idx == TRUE_NODE {
@@ -159,12 +159,12 @@ impl HashLifeCache {
 
     /// Garbage collect: walk tree from root, retain only live nodes.
     /// Also walks subtrees of slow_cache_n1 referenced nodes to mark them and their children.
-    pub fn gc(&mut self, root: usize, slow_cache_n1: &AHashMap<u64, usize>) -> usize {
+    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
         let mut live = HashSet::new();
         self.walk_tree(root, &mut live);
         // Walk subtrees of slow_cache-referenced nodes (marks node + all descendants)
         for (&key, _) in slow_cache_n1.iter() {
-            let node_idx = (key >> 32) as usize;
+            let node_idx = (key >> 32) as u32;
             if !live.contains(&node_idx) {
                 self.walk_tree(node_idx, &mut live);
             }
@@ -174,7 +174,7 @@ impl HashLifeCache {
         // Re-insert sentinels (they're always live)
         self.arena.entry([0,0,0,0]).or_insert(0);
         self.arena.entry([1,1,1,1]).or_insert(1);
-        live.len()
+        live.len() as u32
     }
 }
 
@@ -182,7 +182,7 @@ impl HashLifeCache {
 // Utility
 // ============================================================================
 
-fn is_alive(cache: &HashLifeCache, idx: usize) -> bool {
+fn is_alive(cache: &HashLifeCache, idx: u32) -> bool {
     if idx == FALSE_NODE { return false; }
     if idx == TRUE_NODE { return true; }
     !cache.is_empty_check(idx)
@@ -254,7 +254,7 @@ struct LeafQuadrants {
     nw: u16, ne: u16, sw: u16, se: u16,
 }
 
-fn encode_quadrant_nw(cache: &HashLifeCache, q: usize) -> u16 {
+fn encode_quadrant_nw(cache: &HashLifeCache, q: u32) -> u16 {
     if q == TRUE_NODE { return 0xCC00; }
     if q == FALSE_NODE { return 0; }
     let node = cache.get_node(q);
@@ -266,7 +266,7 @@ fn encode_quadrant_nw(cache: &HashLifeCache, q: usize) -> u16 {
     bits
 }
 
-fn encode_quadrant_ne(cache: &HashLifeCache, q: usize) -> u16 {
+fn encode_quadrant_ne(cache: &HashLifeCache, q: u32) -> u16 {
     if q == TRUE_NODE { return 0x3300; }
     if q == FALSE_NODE { return 0; }
     let node = cache.get_node(q);
@@ -278,7 +278,7 @@ fn encode_quadrant_ne(cache: &HashLifeCache, q: usize) -> u16 {
     bits
 }
 
-fn encode_quadrant_sw(cache: &HashLifeCache, q: usize) -> u16 {
+fn encode_quadrant_sw(cache: &HashLifeCache, q: u32) -> u16 {
     if q == TRUE_NODE { return 0x00CC; }
     if q == FALSE_NODE { return 0; }
     let node = cache.get_node(q);
@@ -290,7 +290,7 @@ fn encode_quadrant_sw(cache: &HashLifeCache, q: usize) -> u16 {
     bits
 }
 
-fn encode_quadrant_se(cache: &HashLifeCache, q: usize) -> u16 {
+fn encode_quadrant_se(cache: &HashLifeCache, q: u32) -> u16 {
     if q == TRUE_NODE { return 0x0033; }
     if q == FALSE_NODE { return 0; }
     let node = cache.get_node(q);
@@ -303,7 +303,7 @@ fn encode_quadrant_se(cache: &HashLifeCache, q: usize) -> u16 {
 }
 
 // Encodes a level-2 node (4x4 grid of leaf cells) as a 16-bit value.
-fn encode_level2(cache: &HashLifeCache, node_idx: usize) -> u16 {
+fn encode_level2(cache: &HashLifeCache, node_idx: u32) -> u16 {
     if node_idx == FALSE_NODE { return 0; }
     if node_idx == TRUE_NODE { return 0xFFFF; }
     let node = cache.get_node(node_idx);
@@ -317,7 +317,7 @@ fn encode_level2(cache: &HashLifeCache, node_idx: usize) -> u16 {
         | encode_quadrant_se(cache, node.south_east)
 }
 
-fn encode_level3(cache: &HashLifeCache, node_idx: usize) -> LeafQuadrants {
+fn encode_level3(cache: &HashLifeCache, node_idx: u32) -> LeafQuadrants {
     let node = cache.get_node(node_idx);
     LeafQuadrants {
         nw: encode_level2(cache, node.north_west),
@@ -379,8 +379,8 @@ fn assemble_centered_6x6(r_nw: u16, r_n: u16, r_ne: u16, r_w: u16, r_c: u16, r_e
 
 /// Decode 16-bit value into a level-2 node (4x4 grid).
 /// Used by advance_base_one_gen (single-gen advance at level 3).
-fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> usize {
-    let bit_to_cell = |b: u16, pos: u32| -> usize {
+fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> u32 {
+    let bit_to_cell = |b: u16, pos: u32| -> u32 {
         if ((b >> pos) & 1) != 0 { TRUE_NODE } else { FALSE_NODE }
     };
     let q_nw = cache.find_or_create(
@@ -405,7 +405,7 @@ fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> usize {
 /// Decode 16-bit value into a level-1 node (2x2 grid).
 /// GOLDE's DecodeLevel2 does this — creates 4 leaf children from
 /// the center 2x2 of the 4x4 result. Used by advance_base_two_gen.
-fn decode_level1(cache: &mut HashLifeCache, bits: u16) -> usize {
+fn decode_level1(cache: &mut HashLifeCache, bits: u16) -> u32 {
     // Center 2x2 of the 4x4 result:
     // NW quadrant: bits 15,14,11,10 → SE corner is bit 10
     // NE quadrant: bits 13,12,9,8 → SW corner is bit 9
@@ -424,7 +424,7 @@ fn decode_level1(cache: &mut HashLifeCache, bits: u16) -> usize {
 // ============================================================================
 
 /// Ensure a node is at exactly level 1 (2x2 of leaf cells)
-fn ensure_level1(cache: &mut HashLifeCache, idx: usize) -> usize {
+fn ensure_level1(cache: &mut HashLifeCache, idx: u32) -> u32 {
     if idx == FALSE_NODE {
         cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE)
     } else if idx == TRUE_NODE {
@@ -435,7 +435,7 @@ fn ensure_level1(cache: &mut HashLifeCache, idx: usize) -> usize {
 }
 
 /// Ensure a node is at exactly level 2 (4x4 grid)
-fn ensure_level2(cache: &mut HashLifeCache, idx: usize) -> usize {
+fn ensure_level2(cache: &mut HashLifeCache, idx: u32) -> u32 {
     if idx == FALSE_NODE {
         let l1 = cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE);
         cache.find_or_create(l1, l1, l1, l1)
@@ -457,7 +457,7 @@ fn ensure_level2(cache: &mut HashLifeCache, idx: usize) -> usize {
 /// When find_or_create collapses identical children, a node that should be
 /// at level 3 may actually be at a lower level. This function rebuilds the
 /// node to ensure proper level-3 structure.
-fn ensure_level3(cache: &mut HashLifeCache, node_idx: usize) -> usize {
+fn ensure_level3(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
     if node_idx == FALSE_NODE {
         let l1 = cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE);
         let l2 = cache.find_or_create(l1, l1, l1, l1);
@@ -477,7 +477,7 @@ fn ensure_level3(cache: &mut HashLifeCache, node_idx: usize) -> usize {
     cache.find_or_create(nw, ne, sw, se)
 }
 
-fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
+fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
     let q = encode_level3(cache, node_idx);
     let table = rule_table();
     let r_nw = table[q.nw as usize];
@@ -498,10 +498,10 @@ fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
 /// If `level - 2 > target_depth` → use advance_slow (recursive, drops 1 level).
 /// Otherwise → use advance_fast (logarithmic, drops 1 level).
 /// Both drop exactly 1 level, so they can be mixed safely in the same recursion tree.
-fn advance_node(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usize>,
-                 slow_cache_n1: &mut AHashMap<u64, usize>,
-                 node_idx: usize, level: u32, target_depth: u32,
-                 hits: &mut u64, misses: &mut u64) -> usize {
+fn advance_node(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>,
+                 slow_cache_n1: &mut AHashMap<u64, u32>,
+                 node_idx: u32, level: u32, target_depth: u32,
+                 hits: &mut u64, misses: &mut u64) -> u32 {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
@@ -519,7 +519,7 @@ fn advance_node(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usiz
 /// Fast cache keyed by (node_idx, level) — same canonical node at different
 /// levels advances different numbers of generations.
 fn advance_fast(cache: &mut HashLifeCache,
-                 node_idx: usize, level: u32) -> usize {
+                 node_idx: u32, level: u32) -> u32 {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
@@ -574,21 +574,21 @@ fn advance_fast(cache: &mut HashLifeCache,
 }
 
 /// CenteredHorizontal: extract inner 2x2 from west+east nodes
-fn centered_horizontal(cache: &mut HashLifeCache, west: usize, east: usize) -> usize {
+fn centered_horizontal(cache: &mut HashLifeCache, west: u32, east: u32) -> u32 {
     let wn = cache.get_node(west);
     let en = cache.get_node(east);
     cache.find_or_create(wn.north_east, en.north_west, wn.south_east, en.south_west)
 }
 
 /// CenteredVertical: extract inner 2x2 from north+south nodes
-fn centered_vertical(cache: &mut HashLifeCache, north: usize, south: usize) -> usize {
+fn centered_vertical(cache: &mut HashLifeCache, north: u32, south: u32) -> u32 {
     let nn = cache.get_node(north);
     let sn = cache.get_node(south);
     cache.find_or_create(nn.south_west, nn.south_east, sn.north_west, sn.north_east)
 }
 
 /// CenteredSubNode: extract central 2x2 from node's 4 corners
-fn centered_subnode(cache: &mut HashLifeCache, node_idx: usize) -> usize {
+fn centered_subnode(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
     let node = cache.get_node(node_idx);
     let nw_se = cache.se(node.north_west);
     let ne_sw = cache.sw(node.north_east);
@@ -599,7 +599,7 @@ fn centered_subnode(cache: &mut HashLifeCache, node_idx: usize) -> usize {
 
 /// Advance 2 generations at level 3 (8x8 base case)
 /// Returns a level-2 node (4x4 grid) — drops 1 level, matching GOLDE's AdvanceBase.
-fn advance_base_two_gen(cache: &mut HashLifeCache, node_idx: usize) -> usize {
+fn advance_base_two_gen(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
     let q = encode_level3(cache, node_idx);
     let table = rule_table();
     let gen1 = compute_first_generation(table, &q);
@@ -634,10 +634,10 @@ fn combine_2x2(tl: u16, tr: u16, bl: u16, br: u16) -> u16 {
     ((tl as u32) << 10 | (tr as u32) << 8 | (bl as u32) << 2 | br as u32) as u16
 }
 
-fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usize>,
-                 slow_cache_n1: &mut AHashMap<u64, usize>,
-                 node_idx: usize, level: u32, target_depth: u32,
-                 hits: &mut u64, misses: &mut u64) -> usize {
+fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>,
+                 slow_cache_n1: &mut AHashMap<u64, u32>,
+                 node_idx: u32, level: u32, target_depth: u32,
+                 hits: &mut u64, misses: &mut u64) -> u32 {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
@@ -703,9 +703,9 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, usiz
 }
 
 /// Fetch 64 sub-segments (8x8 grid) from a node
-fn fetch_segments(cache: &HashLifeCache, node_idx: usize) -> [usize; 64] {
+fn fetch_segments(cache: &HashLifeCache, node_idx: u32) -> [u32; 64] {
     let mut segments = [FALSE_NODE; 64];
-    let fetch = |x: u32, y: u32| -> usize {
+    let fetch = |x: u32, y: u32| -> u32 {
         let mut current = node_idx;
         for bit in (0..3).rev() {
             if current == FALSE_NODE { break; }
@@ -731,7 +731,7 @@ fn fetch_segments(cache: &HashLifeCache, node_idx: usize) -> [usize; 64] {
 
 // ============================================================================
 // Empty tree at a given level (all FALSE_NODE)
-fn empty_tree(cache: &mut HashLifeCache, level: u32) -> usize {
+fn empty_tree(cache: &mut HashLifeCache, level: u32) -> u32 {
     if level <= 0 { return FALSE_NODE; }
     let child = empty_tree(cache, level - 1);
     cache.find_or_create(child, child, child, child)
@@ -739,7 +739,7 @@ fn empty_tree(cache: &mut HashLifeCache, level: u32) -> usize {
 
 // Expand node — GOLDE-style shift-up.
 // Places each child in a corner with empty padding, creating a node one level deeper.
-fn expand_node(cache: &mut HashLifeCache, node_idx: usize, level: u32) -> usize {
+fn expand_node(cache: &mut HashLifeCache, node_idx: u32, level: u32) -> u32 {
     if node_idx == FALSE_NODE {
         return empty_tree(cache, level + 1);
     }
@@ -759,7 +759,7 @@ fn expand_node(cache: &mut HashLifeCache, node_idx: usize, level: u32) -> usize 
 // Quadtree build / walk helpers
 // ============================================================================
 
-fn build_quadtree(cache: &mut HashLifeCache, grid: &[Vec<u8>], x0: usize, y0: usize, w: usize, h: usize) -> usize {
+fn build_quadtree(cache: &mut HashLifeCache, grid: &[Vec<u8>], x0: usize, y0: usize, w: usize, h: usize) -> u32 {
     if w == 0 || h == 0 { return FALSE_NODE; }
     if w == 1 && h == 1 {
         if grid[y0][x0] == 1 { TRUE_NODE } else { FALSE_NODE }
@@ -773,7 +773,7 @@ fn build_quadtree(cache: &mut HashLifeCache, grid: &[Vec<u8>], x0: usize, y0: us
     }
 }
 
-fn count_cells(cache: &HashLifeCache, node_idx: usize, depth: u32) -> usize {
+fn count_cells(cache: &HashLifeCache, node_idx: u32, depth: u32) -> usize {
     if node_idx == FALSE_NODE { return 0; }
     if node_idx == TRUE_NODE { return 1usize << depth; }
     if depth == 0 { return 1; }
@@ -785,13 +785,13 @@ fn count_cells(cache: &HashLifeCache, node_idx: usize, depth: u32) -> usize {
 }
 
 /// Collect alive cells from a node (relative coordinates, no packing)
-fn collect_alive_helper(cache: &HashLifeCache, node_idx: usize, depth: u32) -> Vec<(u32, u32)> {
+fn collect_alive_helper(cache: &HashLifeCache, node_idx: u32, depth: u32) -> Vec<(u32, u32)> {
     let mut result = Vec::new();
     collect_alive_rel(cache, node_idx, depth, 0, 0, &mut result);
     result
 }
 
-fn collect_alive_rel(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32, oy: u32, result: &mut Vec<(u32, u32)>) {
+fn collect_alive_rel(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, result: &mut Vec<(u32, u32)>) {
     if node_idx == FALSE_NODE { return; }
     if node_idx == TRUE_NODE {
         let size = 1u32 << depth;
@@ -815,7 +815,7 @@ fn collect_alive_rel(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32
 }
 
 /// Rebuild tree in new cache by walking old tree
-fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: usize, old_cache: &HashLifeCache) -> usize {
+fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: u32, old_cache: &HashLifeCache) -> u32 {
     if old_idx == FALSE_NODE { return FALSE_NODE; }
     if old_idx == TRUE_NODE { return TRUE_NODE; }
     let old_node = old_cache.get_node(old_idx);
@@ -826,7 +826,7 @@ fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: usize, old_cache: &HashL
     new_cache.find_or_create(nw, ne, sw, se)
 }
 
-fn collect_alive(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32, oy: u32, result: &mut Vec<u64>) {
+fn collect_alive(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, result: &mut Vec<u64>) {
     if node_idx == FALSE_NODE { return; }
     if node_idx == TRUE_NODE {
         // Uniform block — fill entire region
@@ -851,7 +851,7 @@ fn collect_alive(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32, oy
     collect_alive(cache, node.south_east, depth - 1, ox + half, oy + half, result);
 }
 
-fn get_cell_at(cache: &HashLifeCache, node_idx: usize, depth: u32, x: u32, y: u32) -> bool {
+fn get_cell_at(cache: &HashLifeCache, node_idx: u32, depth: u32, x: u32, y: u32) -> bool {
     if node_idx == FALSE_NODE { return false; }
     if node_idx == TRUE_NODE { return true; }
     if depth == 0 { return true; }
@@ -872,7 +872,7 @@ fn get_cell_at(cache: &HashLifeCache, node_idx: usize, depth: u32, x: u32, y: u3
     }
 }
 
-fn set_cell_at(cache: &mut HashLifeCache, node_idx: usize, depth: u32, x: u32, y: u32, alive: bool) -> usize {
+fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: u32, alive: bool) -> u32 {
     if depth == 0 {
         return if alive { TRUE_NODE } else { FALSE_NODE };
     }
@@ -907,7 +907,7 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: usize, depth: u32, x: u32, y
     cache.find_or_create(nw, ne, sw, se)
 }
 
-fn fill_viewport(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut Vec<u8>) {
+fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut Vec<u8>) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
     // Overlap check: node [ox, ox+size) vs viewport [vx, vx+vw)
@@ -956,15 +956,15 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: usize, depth: u32, ox: u32, oy
 
 pub struct HashLife {
     pub cache: HashLifeCache,
-    root: usize,
+    root: u32,
     center: (i64, i64),
     depth: u32,
     /// Two-tier slow cache: generational eviction.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
     /// Every cycle_size steps: drop n, n=n1, create new n1.
-    pub slow_cache_n: AHashMap<u64, usize>,
-    pub slow_cache_n1: AHashMap<u64, usize>,
+    pub slow_cache_n: AHashMap<u64, u32>,
+    pub slow_cache_n1: AHashMap<u64, u32>,
     /// Steps remaining until slow_cache rotation (decremented per step/step_n).
     pub slow_cache_cycle: i32,
     pub slow_cache_cycle_size: i32,
@@ -1257,12 +1257,12 @@ impl HashLife {
     }
 }
 
-fn needs_expansion(cache: &HashLifeCache, node_idx: usize, level: u32) -> bool {
+fn needs_expansion(cache: &HashLifeCache, node_idx: u32, level: u32) -> bool {
     if node_idx == FALSE_NODE { return false; }
     if node_idx == TRUE_NODE { return false; }
     if level <= 3 { return true; }
 
-    let not_empty = |idx: usize| -> bool {
+    let not_empty = |idx: u32| -> bool {
         idx != FALSE_NODE && !cache.is_empty_check(idx)
     };
 
@@ -1623,11 +1623,11 @@ mod tests {
     /// coordinate of each occurrence.  Returns Vec<(node_idx, abs_x, abs_y)>.
     fn find_level3_nodes(
         cache: &HashLifeCache,
-        node_idx: usize,
+        node_idx: u32,
         depth: u32,
         abs_x: i64,
         abs_y: i64,
-        out: &mut Vec<(usize, i64, i64)>,
+        out: &mut Vec<(u32, i64, i64)>,
     ) {
         if node_idx == FALSE_NODE || node_idx == TRUE_NODE {
             return;
@@ -1647,11 +1647,11 @@ mod tests {
     /// Same as find_level3_nodes but for level-4 nodes (16×16).
     fn find_level4_nodes(
         cache: &HashLifeCache,
-        node_idx: usize,
+        node_idx: u32,
         depth: u32,
         abs_x: i64,
         abs_y: i64,
-        out: &mut Vec<(usize, i64, i64)>,
+        out: &mut Vec<(u32, i64, i64)>,
     ) {
         if node_idx == FALSE_NODE || node_idx == TRUE_NODE {
             return;
@@ -1716,11 +1716,11 @@ mod tests {
         // Find all level-3 nodes in the tree and their absolute positions
         let origin_x = hf.center.0 - (hf.size() as i64 / 2);
         let origin_y = hf.center.1 - (hf.size() as i64 / 2);
-        let mut l3_nodes: Vec<(usize, i64, i64)> = Vec::new();
+        let mut l3_nodes: Vec<(u32, i64, i64)> = Vec::new();
         find_level3_nodes(&hf.cache, hf.root, hf.depth, origin_x, origin_y, &mut l3_nodes);
 
         // Filter to level-3 nodes that contain at least one alive cell (non-empty)
-        let nonempty: Vec<(usize, i64, i64)> = l3_nodes.iter().filter(|(idx, _, _)| {
+        let nonempty: Vec<(u32, i64, i64)> = l3_nodes.iter().filter(|(idx, _, _)| {
             let node = hf.cache.get_node(*idx);
             !node.is_empty
         }).copied().collect();
@@ -1896,9 +1896,9 @@ mod tests {
 
         // Now test level-4 sub-nodes via advance_slow, since the base case is fine.
         // Find all level-4 nodes and verify advance_slow on them matches flat stepping.
-        let mut l4_nodes: Vec<(usize, i64, i64)> = Vec::new();
+        let mut l4_nodes: Vec<(u32, i64, i64)> = Vec::new();
         find_level4_nodes(&hf.cache, hf.root, hf.depth, origin_x, origin_y, &mut l4_nodes);
-        let l4_nonempty: Vec<(usize, i64, i64)> = l4_nodes.iter().filter(|(idx, _, _)| {
+        let l4_nonempty: Vec<(u32, i64, i64)> = l4_nodes.iter().filter(|(idx, _, _)| {
             let node = hf.cache.get_node(*idx);
             !node.is_empty
         }).copied().collect();
