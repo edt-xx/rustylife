@@ -4,9 +4,8 @@
 //! Core design:
 //! - Node identity = usize index. FALSE_NODE=0, TRUE_NODE=1.
 //! - Arena = HashMap<[usize;4], usize> (children tuple → idx)
-//! - Nodes = HashMap<usize, [usize;4]> (idx → children tuple)
-//! - Two-tier: arena_n / arena_n1 with promote-on-hit
-//! - GC: tree walk → retain on both maps. No remapping.
+//! - Nodes = HashMap<usize, LifeNode> (idx → node data)
+//! - Single arena with mark/sweep GC
 //! - Center-based tracking (like GOLDE's m_SeedOffset), NOT origin-based
 //! - 65536-entry rule table: maps 16-bit 4x4 patterns → 4-bit 2x2 center results
 //! - AdvanceFast: recursive multi-gen advance (3x3 grid of overlapping sub-nodes)
@@ -58,11 +57,10 @@ pub struct LifeNode {
 /// HashLife arena and canonicalization cache.
 /// Arena = HashMap<[usize;4], usize> (children → idx).
 /// Nodes = HashMap<usize, LifeNode> (idx → node data).
-/// Two-tier: arena_n / arena_n1 with promote-on-hit.
+/// Single arena with mark/sweep GC.
 pub struct HashLifeCache {
-    /// Two-tier arena: generational eviction.
-    pub arena_n1: ahash::AHashMap<[usize; 4], usize>,
-    pub arena_n: ahash::AHashMap<[usize; 4], usize>,
+    /// Canonicalization map: children tuple → node index
+    pub arena: ahash::AHashMap<[usize; 4], usize>,
     /// Node storage: idx → LifeNode
     pub nodes: ahash::AHashMap<usize, LifeNode>,
     /// Fast cache: (node_idx, level) → advanced result.
@@ -73,17 +71,16 @@ pub struct HashLifeCache {
 
 impl HashLifeCache {
     pub fn new() -> Self {
-        let mut arena_n1 = ahash::AHashMap::with_capacity(65536);
+        let mut arena = ahash::AHashMap::with_capacity(65536);
         let mut nodes = ahash::AHashMap::with_capacity(65536);
         // Index 0 = FALSE_NODE
-        arena_n1.insert([0,0,0,0], 0);
+        arena.insert([0,0,0,0], 0);
         nodes.insert(0, LifeNode { north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true });
         // Index 1 = TRUE_NODE
-        arena_n1.insert([1,1,1,1], 1);
+        arena.insert([1,1,1,1], 1);
         nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
         Self {
-            arena_n1,
-            arena_n: ahash::AHashMap::new(),
+            arena,
             nodes,
             fast_cache: ahash::AHashMap::new(),
             next_idx: 2,
@@ -107,18 +104,7 @@ impl HashLifeCache {
         self.fast_cache.clear();
     }
 
-    /// Rotate arena tiers: clear both (legacy, replaced by gc).
-    pub fn rotate_arena(&mut self) {
-        self.arena_n.clear();
-        self.arena_n.shrink_to_fit();
-        self.arena_n1.clear();
-        self.arena_n1.shrink_to_fit();
-        self.arena_n1.insert([0,0,0,0], 0);
-        self.arena_n1.insert([1,1,1,1], 1);
-    }
-
     /// Find existing canonical node or create new one in arena.
-    /// Two-tier: check n1 first, then n. Hit in n → promote to n1.
     pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
         if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
@@ -130,11 +116,7 @@ impl HashLifeCache {
 
         let key = [nw, ne, sw, se];
 
-        if let Some(&idx) = self.arena_n1.get(&key) {
-            return idx;
-        }
-        if let Some(&idx) = self.arena_n.get(&key) {
-            self.arena_n1.insert(key, idx); // promote
+        if let Some(&idx) = self.arena.get(&key) {
             return idx;
         }
 
@@ -151,7 +133,7 @@ impl HashLifeCache {
         self.next_idx += 1;
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
         self.nodes.insert(idx, node);
-        self.arena_n1.insert(key, idx);
+        self.arena.insert(key, idx);
         idx
     }
 
@@ -176,15 +158,22 @@ impl HashLifeCache {
     }
 
     /// Garbage collect: walk tree from root, retain only live nodes.
-    pub fn gc(&mut self, root: usize) -> usize {
+    /// Also walks subtrees of slow_cache_n1 referenced nodes to mark them and their children.
+    pub fn gc(&mut self, root: usize, slow_cache_n1: &AHashMap<u64, usize>) -> usize {
         let mut live = HashSet::new();
         self.walk_tree(root, &mut live);
+        // Walk subtrees of slow_cache-referenced nodes (marks node + all descendants)
+        for (&key, _) in slow_cache_n1.iter() {
+            let node_idx = (key >> 32) as usize;
+            if !live.contains(&node_idx) {
+                self.walk_tree(node_idx, &mut live);
+            }
+        }
         self.nodes.retain(|idx, _| live.contains(idx));
-        self.arena_n1.retain(|_, idx| live.contains(idx));
-        self.arena_n.retain(|_, idx| live.contains(idx));
-        // Re-insert sentinels in arena_n1 (they're always live)
-        self.arena_n1.entry([0,0,0,0]).or_insert(0);
-        self.arena_n1.entry([1,1,1,1]).or_insert(1);
+        self.arena.retain(|_, idx| live.contains(idx));
+        // Re-insert sentinels (they're always live)
+        self.arena.entry([0,0,0,0]).or_insert(0);
+        self.arena.entry([1,1,1,1]).or_insert(1);
         live.len()
     }
 }
@@ -977,11 +966,11 @@ pub struct HashLife {
     pub slow_cache_n: AHashMap<u64, usize>,
     pub slow_cache_n1: AHashMap<u64, usize>,
     /// Steps remaining until slow_cache rotation (decremented per step/step_n).
-    pub slow_cache_cycle: u32,
-    pub slow_cache_cycle_size: u32,
+    pub slow_cache_cycle: i32,
+    pub slow_cache_cycle_size: i32,
     /// Steps remaining until arena GC.
-    node_map_cycle: u32,
-    pub node_map_cycle_size: u32,
+    node_map_cycle: i32,
+    pub node_map_cycle_size: i32,
     /// Cache hit/miss counters (reset each step)
     pub slow_cache_hits: u64,
     pub slow_cache_misses: u64,
@@ -1001,10 +990,10 @@ impl HashLife {
             depth: 0,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            slow_cache_cycle: 20, // steps remaining until rotation
-            slow_cache_cycle_size: 20,
-            node_map_cycle: 1000, // steps remaining until arena GC
-            node_map_cycle_size: 1000, // GC every 1000 steps
+            slow_cache_cycle: 99999, // steps remaining until rotation
+            slow_cache_cycle_size: 99999,
+            node_map_cycle: 4000, // steps remaining until arena GC
+            node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -1075,10 +1064,10 @@ impl HashLife {
             depth,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            slow_cache_cycle: 20, // steps remaining until rotation
-            slow_cache_cycle_size: 20,
-            node_map_cycle: 1000, // steps remaining until arena GC
-            node_map_cycle_size: 1000, // GC every 1000 steps
+            slow_cache_cycle: 99999, // steps remaining until rotation
+            slow_cache_cycle_size: 99999,
+            node_map_cycle: 4000, // steps remaining until arena GC
+            node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -1249,12 +1238,11 @@ impl HashLife {
     /// Rotate caches: decrement counters by n gens. Called from server.rs
     /// after each GUI step (single or batch).
     pub fn rotate_caches(&mut self, n: u32) {
+        let n = n as i32;
         // Slow cache rotation
-        self.slow_cache_cycle = self.slow_cache_cycle.saturating_sub(n);
-        if self.slow_cache_cycle == 0 || self.slow_cache_cycle < n {
-            let extra = n.saturating_sub(self.slow_cache_cycle);
-            self.slow_cache_cycle = self.slow_cache_cycle_size - (extra % self.slow_cache_cycle_size);
-            if self.slow_cache_cycle == 0 { self.slow_cache_cycle = self.slow_cache_cycle_size; }
+        self.slow_cache_cycle -= n;
+        if self.slow_cache_cycle <= 0 {
+            self.slow_cache_cycle = self.slow_cache_cycle_size;
             self.slow_cache_n.clear();
             self.slow_cache_n.shrink_to_fit();
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
@@ -1262,13 +1250,16 @@ impl HashLife {
             self.slow_cache_n1.shrink_to_fit();
         }
         // Arena GC: walk tree from root, retain only live nodes.
-        // Stale slow_cache entries will self-heal at next rotation.
-        self.node_map_cycle = self.node_map_cycle.saturating_sub(n);
-        if self.node_map_cycle == 0 || self.node_map_cycle < n {
-            let extra = n.saturating_sub(self.node_map_cycle);
-            self.node_map_cycle = self.node_map_cycle_size - (extra % self.node_map_cycle_size);
-            if self.node_map_cycle == 0 { self.node_map_cycle = self.node_map_cycle_size; }
-            self.cache.gc(self.root);
+        // Also marks nodes referenced by slow_cache_n1 as live.
+        self.node_map_cycle -= n;
+        if self.node_map_cycle <= 0 {
+            self.node_map_cycle = self.node_map_cycle_size;
+            self.cache.gc(self.root, &self.slow_cache_n1);
+            // Rotate slow_cache after GC and reset its cycle counter
+            self.slow_cache_cycle = self.slow_cache_cycle_size;
+            std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
+            self.slow_cache_n1.clear();
+            self.slow_cache_n1.shrink_to_fit();
         }
     }
 }
