@@ -1192,10 +1192,7 @@ impl HashLife {
             // Clear fast cache for this multi-gen advance
             self.cache.clear_advance_results();
 
-            let _cells_before = self.alive_count();
             let target_depth = k;
-            // eprintln!("MULTI-GEN(advance_node): depth={} root={} cells={} advancing {} gens target_depth={} (remaining={})",
-            //           self.depth, self.root, _cells_before, advance_gens, target_depth, remaining);
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                       self.root, self.depth, target_depth,
@@ -1203,10 +1200,6 @@ impl HashLife {
             // GOLDE always drops 1 level per DoOneJump, regardless of advance depth.
             // advance_fast returns a node at (level - 1), not (level - 2).
             self.depth -= 1;
-
-            let _cells_after = self.alive_count();
-            // eprintln!("MULTI-GEN(advance_node) AFTER: depth={} root={} cells={} (delta={:+})",
-            //           self.depth, self.root, _cells_after, _cells_after as i64 - _cells_before as i64);
 
             remaining -= advance_gens;
 
