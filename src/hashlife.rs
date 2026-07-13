@@ -1,18 +1,19 @@
 #![allow(dead_code)]
 //! GOLDE-style HashLife implementation.
 //!
-//! Core design (matching GOLDE):
-//! - LifeNode: arena-indexed struct with 4 child pointers + pre-computed hash
-//! - FALSE_NODE = index 0 (all children 0 = empty)
-//! - TRUE_NODE = index 1 (static alive leaf, children all TRUE_NODE)
-//! - Arena: bump allocator — indices never invalidate
-//! - FindOrCreate: canonicalization via hash table + arena
+//! Core design:
+//! - Node identity = usize index. FALSE_NODE=0, TRUE_NODE=1.
+//! - Arena = HashMap<[usize;4], usize> (children tuple → idx)
+//! - Nodes = HashMap<usize, [usize;4]> (idx → children tuple)
+//! - Two-tier: arena_n / arena_n1 with promote-on-hit
+//! - GC: tree walk → retain on both maps. No remapping.
 //! - Center-based tracking (like GOLDE's m_SeedOffset), NOT origin-based
 //! - 65536-entry rule table: maps 16-bit 4x4 patterns → 4-bit 2x2 center results
 //! - AdvanceFast: recursive multi-gen advance (3x3 grid of overlapping sub-nodes)
 //! - AdvanceSlow: recursive exact-gen advance (8x8 grid of segments)
 
 use ahash::AHashMap;
+use std::collections::HashSet;
 
 // Coord pack/unpack (inline to avoid grid dependency in lib context)
 fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
@@ -38,7 +39,7 @@ const MASK_SW: u16 = 0x00CC;
 const MASK_SE: u16 = 0x0033;
 
 // ============================================================================
-// LifeNode
+// LifeNode (value type, returned by get_node)
 // ============================================================================
 
 #[derive(Clone, Copy)]
@@ -55,61 +56,68 @@ pub struct LifeNode {
 // ============================================================================
 
 /// HashLife arena and canonicalization cache.
+/// Arena = HashMap<[usize;4], usize> (children → idx).
+/// Nodes = HashMap<usize, LifeNode> (idx → node data).
+/// Two-tier: arena_n / arena_n1 with promote-on-hit.
 pub struct HashLifeCache {
-    /// Arena of nodes. Index 0 = FALSE_NODE, index 1 = TRUE_NODE.
-    pub nodes: Vec<LifeNode>,
-    /// Two-tier canonicalization map: generational eviction.
-    /// Same pattern as slow_cache — promotes on hit, rotates periodically.
-    /// Evicting entries is safe: worst case is a duplicate arena entry.
-    node_map_n: ahash::AHashMap<[usize; 4], usize>,
-    node_map_n1: ahash::AHashMap<[usize; 4], usize>,
+    /// Two-tier arena: generational eviction.
+    pub arena_n1: ahash::AHashMap<[usize; 4], usize>,
+    pub arena_n: ahash::AHashMap<[usize; 4], usize>,
+    /// Node storage: idx → LifeNode
+    pub nodes: ahash::AHashMap<usize, LifeNode>,
     /// Fast cache: (node_idx, level) → advanced result.
-    /// Keyed by level because same canonical node at different levels
-    /// advances different numbers of generations.
-    fast_cache: ahash::AHashMap<(usize, u32), usize>,
+    pub fast_cache: ahash::AHashMap<(usize, u32), usize>,
+    /// Next available index (incremented on each new node)
+    next_idx: usize,
 }
 
 impl HashLifeCache {
     pub fn new() -> Self {
-        let mut nodes = Vec::with_capacity(65536);
+        let mut arena_n1 = ahash::AHashMap::with_capacity(65536);
+        let mut nodes = ahash::AHashMap::with_capacity(65536);
         // Index 0 = FALSE_NODE
-        nodes.push(LifeNode {
-            north_west: 0, north_east: 0, south_west: 0, south_east: 0,
-            is_empty: true,
-        });
-        // Index 1 = TRUE_NODE (static alive leaf, children all TRUE_NODE)
-        nodes.push(LifeNode {
-            north_west: 1, north_east: 1, south_west: 1, south_east: 1,
-            is_empty: false,
-        });
+        arena_n1.insert([0,0,0,0], 0);
+        nodes.insert(0, LifeNode { north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true });
+        // Index 1 = TRUE_NODE
+        arena_n1.insert([1,1,1,1], 1);
+        nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
         Self {
+            arena_n1,
+            arena_n: ahash::AHashMap::new(),
             nodes,
-            node_map_n: ahash::AHashMap::with_capacity(65536),
-            node_map_n1: ahash::AHashMap::new(),
             fast_cache: ahash::AHashMap::new(),
+            next_idx: 2,
         }
     }
 
-    pub fn get_node(&self, idx: usize) -> &LifeNode {
-        &self.nodes[idx]
+    pub fn get_node(&self, idx: usize) -> LifeNode {
+        *self.nodes.get(&idx).unwrap_or(&LifeNode {
+            north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true,
+        })
     }
+
+    #[inline] pub fn nw(&self, idx: usize) -> usize { self.get_node(idx).north_west }
+    #[inline] pub fn ne(&self, idx: usize) -> usize { self.get_node(idx).north_east }
+    #[inline] pub fn sw(&self, idx: usize) -> usize { self.get_node(idx).south_west }
+    #[inline] pub fn se(&self, idx: usize) -> usize { self.get_node(idx).south_east }
+    #[inline] pub fn is_empty_check(&self, idx: usize) -> bool { self.get_node(idx).is_empty }
 
     /// Clear fast cache. Called at start of each step.
     pub fn clear_advance_results(&mut self) {
         self.fast_cache.clear();
     }
 
-    /// Rotate node_map tiers: drop old, promote current.
-    pub fn rotate_node_map(&mut self) {
-        self.node_map_n.clear();
-        self.node_map_n.shrink_to_fit();
-        std::mem::swap(&mut self.node_map_n, &mut self.node_map_n1);
-        self.node_map_n1.clear();
-        self.node_map_n1.shrink_to_fit();
+    /// Rotate arena tiers: clear both (legacy, replaced by gc).
+    pub fn rotate_arena(&mut self) {
+        self.arena_n.clear();
+        self.arena_n.shrink_to_fit();
+        self.arena_n1.clear();
+        self.arena_n1.shrink_to_fit();
+        self.arena_n1.insert([0,0,0,0], 0);
+        self.arena_n1.insert([1,1,1,1], 1);
     }
 
     /// Find existing canonical node or create new one in arena.
-    /// GOLDE-style: direct [nw,ne,sw,se] lookup, no pre-computed hash.
     /// Two-tier: check n1 first, then n. Hit in n → promote to n1.
     pub fn find_or_create(&mut self, nw: usize, ne: usize, sw: usize, se: usize) -> usize {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
@@ -122,35 +130,62 @@ impl HashLifeCache {
 
         let key = [nw, ne, sw, se];
 
-        if let Some(&idx) = self.node_map_n1.get(&key) {
+        if let Some(&idx) = self.arena_n1.get(&key) {
             return idx;
         }
-        if let Some(&idx) = self.node_map_n.get(&key) {
-            self.node_map_n1.insert(key, idx); // promote
+        if let Some(&idx) = self.arena_n.get(&key) {
+            self.arena_n1.insert(key, idx); // promote
             return idx;
         }
 
         let is_empty = {
             let is_e = |i: usize| -> bool {
                 if i == FALSE_NODE { true }
-                else if i >= self.nodes.len() {
-                    true
-                } else { self.nodes[i].is_empty }
+                else if let Some(node) = self.nodes.get(&i) { node.is_empty }
+                else { true }
             };
             is_e(nw) && is_e(ne) && is_e(sw) && is_e(se)
         };
 
-        let node = LifeNode {
-            north_west: nw,
-            north_east: ne,
-            south_west: sw,
-            south_east: se,
-            is_empty,
-        };
-        let idx = self.nodes.len();
-        self.nodes.push(node);
-        self.node_map_n1.insert(key, idx);
+        let idx = self.next_idx;
+        self.next_idx += 1;
+        let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
+        self.nodes.insert(idx, node);
+        self.arena_n1.insert(key, idx);
         idx
+    }
+
+    /// Collect all reachable node indices from root.
+    pub fn walk_tree(&self, root: usize, live: &mut HashSet<usize>) {
+        let mut stack = vec![root];
+        while let Some(idx) = stack.pop() {
+            if idx == FALSE_NODE || idx == TRUE_NODE {
+                live.insert(idx);
+                continue;
+            }
+            if live.contains(&idx) { continue; }
+            live.insert(idx);
+            if let Some(node) = self.nodes.get(&idx) {
+                for &child in &[node.north_west, node.north_east, node.south_west, node.south_east] {
+                    if !live.contains(&child) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Garbage collect: walk tree from root, retain only live nodes.
+    pub fn gc(&mut self, root: usize) -> usize {
+        let mut live = HashSet::new();
+        self.walk_tree(root, &mut live);
+        self.nodes.retain(|idx, _| live.contains(idx));
+        self.arena_n1.retain(|_, idx| live.contains(idx));
+        self.arena_n.retain(|_, idx| live.contains(idx));
+        // Re-insert sentinels in arena_n1 (they're always live)
+        self.arena_n1.entry([0,0,0,0]).or_insert(0);
+        self.arena_n1.entry([1,1,1,1]).or_insert(1);
+        live.len()
     }
 }
 
@@ -161,7 +196,7 @@ impl HashLifeCache {
 fn is_alive(cache: &HashLifeCache, idx: usize) -> bool {
     if idx == FALSE_NODE { return false; }
     if idx == TRUE_NODE { return true; }
-    !cache.get_node(idx).is_empty
+    !cache.is_empty_check(idx)
 }
 
 fn next_power_of2(n: usize) -> usize {
@@ -420,7 +455,7 @@ fn ensure_level2(cache: &mut HashLifeCache, idx: usize) -> usize {
         cache.find_or_create(l1, l1, l1, l1)
     } else {
         // Check if grandchildren are at level 1
-        let c = *cache.get_node(idx);
+        let c = cache.get_node(idx);
         let nw = ensure_level1(cache, c.north_west);
         let ne = ensure_level1(cache, c.north_east);
         let sw = ensure_level1(cache, c.south_west);
@@ -445,7 +480,7 @@ fn ensure_level3(cache: &mut HashLifeCache, node_idx: usize) -> usize {
         return cache.find_or_create(l2, l2, l2, l2);
     }
 
-    let node = *cache.get_node(node_idx);
+    let node = cache.get_node(node_idx);
     let nw = ensure_level2(cache, node.north_west);
     let ne = ensure_level2(cache, node.north_east);
     let sw = ensure_level2(cache, node.south_west);
@@ -514,7 +549,7 @@ fn advance_fast(cache: &mut HashLifeCache,
     }
 
     // Recursive case: classic 9-subnode approach.
-    let node = *cache.get_node(node_idx);
+    let node = cache.get_node(node_idx);
 
     let ch_nw_ne = centered_horizontal(cache, node.north_west, node.north_east);
     let cv_nw_sw = centered_vertical(cache, node.north_west, node.south_west);
@@ -566,10 +601,10 @@ fn centered_vertical(cache: &mut HashLifeCache, north: usize, south: usize) -> u
 /// CenteredSubNode: extract central 2x2 from node's 4 corners
 fn centered_subnode(cache: &mut HashLifeCache, node_idx: usize) -> usize {
     let node = cache.get_node(node_idx);
-    let nw_se = cache.get_node(node.north_west).south_east;
-    let ne_sw = cache.get_node(node.north_east).south_west;
-    let sw_ne = cache.get_node(node.south_west).north_east;
-    let se_nw = cache.get_node(node.south_east).north_west;
+    let nw_se = cache.se(node.north_west);
+    let ne_sw = cache.sw(node.north_east);
+    let sw_ne = cache.ne(node.south_west);
+    let se_nw = cache.nw(node.south_east);
     cache.find_or_create(nw_se, ne_sw, sw_ne, se_nw)
 }
 
@@ -723,7 +758,7 @@ fn expand_node(cache: &mut HashLifeCache, node_idx: usize, level: u32) -> usize 
         return cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, TRUE_NODE);
     }
     let empty = if level > 0 { empty_tree(cache, level - 1) } else { FALSE_NODE };
-    let node = *cache.get_node(node_idx);
+    let node = cache.get_node(node_idx);
     let expanded_nw = cache.find_or_create(empty, empty, empty, node.north_west);
     let expanded_ne = cache.find_or_create(empty, empty, node.north_east, empty);
     let expanded_sw = cache.find_or_create(empty, node.south_west, empty, empty);
@@ -852,7 +887,7 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: usize, depth: u32, x: u32, y
     if depth == 0 {
         return if alive { TRUE_NODE } else { FALSE_NODE };
     }
-    let node = *cache.get_node(node_idx);
+    let node = cache.get_node(node_idx);
     let half = 1u32 << (depth - 1);
     let (nw, ne, sw, se);
     if x < half {
@@ -944,7 +979,7 @@ pub struct HashLife {
     /// Steps remaining until slow_cache rotation (decremented per step/step_n).
     pub slow_cache_cycle: u32,
     pub slow_cache_cycle_size: u32,
-    /// Steps remaining until node_map rotation.
+    /// Steps remaining until arena GC.
     node_map_cycle: u32,
     pub node_map_cycle_size: u32,
     /// Cache hit/miss counters (reset each step)
@@ -968,8 +1003,8 @@ impl HashLife {
             slow_cache_n1: AHashMap::new(),
             slow_cache_cycle: 20, // steps remaining until rotation
             slow_cache_cycle_size: 20,
-            node_map_cycle: 1, // steps remaining until rotation
-            node_map_cycle_size: 1, // every step
+            node_map_cycle: 1000, // steps remaining until arena GC
+            node_map_cycle_size: 1000, // GC every 1000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -1042,8 +1077,8 @@ impl HashLife {
             slow_cache_n1: AHashMap::new(),
             slow_cache_cycle: 20, // steps remaining until rotation
             slow_cache_cycle_size: 20,
-            node_map_cycle: 1, // steps remaining until rotation
-            node_map_cycle_size: 1, // every step
+            node_map_cycle: 1000, // steps remaining until arena GC
+            node_map_cycle_size: 1000, // GC every 1000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
@@ -1226,13 +1261,14 @@ impl HashLife {
             self.slow_cache_n1.clear();
             self.slow_cache_n1.shrink_to_fit();
         }
-        // Node map rotation
+        // Arena GC: walk tree from root, retain only live nodes.
+        // Stale slow_cache entries will self-heal at next rotation.
         self.node_map_cycle = self.node_map_cycle.saturating_sub(n);
         if self.node_map_cycle == 0 || self.node_map_cycle < n {
             let extra = n.saturating_sub(self.node_map_cycle);
             self.node_map_cycle = self.node_map_cycle_size - (extra % self.node_map_cycle_size);
             if self.node_map_cycle == 0 { self.node_map_cycle = self.node_map_cycle_size; }
-            self.cache.rotate_node_map();
+            self.cache.gc(self.root);
         }
     }
 }
@@ -1243,7 +1279,7 @@ fn needs_expansion(cache: &HashLifeCache, node_idx: usize, level: u32) -> bool {
     if level <= 3 { return true; }
 
     let not_empty = |idx: usize| -> bool {
-        idx != FALSE_NODE && !cache.get_node(idx).is_empty
+        idx != FALSE_NODE && !cache.is_empty_check(idx)
     };
 
     let node = cache.get_node(node_idx);
