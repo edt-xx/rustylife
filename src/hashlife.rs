@@ -185,11 +185,14 @@ impl HashLifeCache {
         self.fast_cache_n1.retain(|(_, _), ridx| live.contains(ridx));
 
         self.nodes.retain(|idx, _| live.contains(idx));
+        self.nodes.shrink_to_fit();
         self.arena.retain(|_, idx| live.contains(idx));
-        self.count_cache.clear();
         // Re-insert sentinels (they're always live)
         self.arena.entry([0,0,0,0]).or_insert(0);
         self.arena.entry([1,1,1,1]).or_insert(1);
+        self.arena.shrink_to_fit();
+
+        self.count_cache.clear();
 
         live.len() as u32
     }
@@ -1256,10 +1259,10 @@ impl HashLife {
             // Rotate both caches after GC
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
-            //self.slow_cache_n1.shrink_to_fit();
+            self.slow_cache_n1.shrink_to_fit();
             std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
             self.cache.fast_cache_n1.clear();
-            //self.cache.fast_cache_n1.shrink_to_fit();
+            self.cache.fast_cache_n1.shrink_to_fit();
         }
     }
 }
