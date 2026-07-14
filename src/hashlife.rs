@@ -75,6 +75,8 @@ pub struct HashLifeCache {
     pub count_cache: ahash::AHashMap<(u32, u32), usize>,
     /// Next available index (incremented on each new node)
     next_idx: u32,
+    /// Freed indices from last GC (reused before incrementing next_idx)
+    freed: Vec<u32>,
 }
 
 impl HashLifeCache {
@@ -94,6 +96,7 @@ impl HashLifeCache {
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
             next_idx: 2,
+            freed: Vec::new(),
         }
     }
 
@@ -134,8 +137,14 @@ impl HashLifeCache {
             is_e(nw) && is_e(ne) && is_e(sw) && is_e(se)
         };
 
-        let idx = self.next_idx;
-        self.next_idx += 1;
+        let idx = match self.freed.pop() {
+            Some(f) => f,
+            None => {
+                let i = self.next_idx;
+                self.next_idx += 1;
+                i
+            }
+        };
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
         self.nodes.insert(idx, node);
         self.arena.insert(key, idx);
@@ -176,16 +185,18 @@ impl HashLifeCache {
         }
         //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
 
-        // Walk subtrees of fast_cache-referenced nodes (result indices)
-        //for (&(_nidx, _lvl), &ridx) in self.fast_cache_n1.iter() {
-        //    if !live.contains(&ridx) {
-        //        self.walk_tree(ridx, &mut live);
-        //    }
-        //}
-        self.fast_cache_n1.retain(|(_, _), ridx| live.contains(ridx));
-
-        self.nodes.retain(|idx, _| live.contains(idx));
+        // Collect freed node indices
+        let mut freed: Vec<u32> = self.nodes.extract_if(|idx, _| !live.contains(idx))
+            .map(|(idx, _)| idx)
+            .collect();
+        self.freed.append(&mut freed);
         self.nodes.shrink_to_fit();
+
+        // Remove fast_cache_n1 entries where key node_idx OR result was freed 
+        // the nodes keys are identical to live and they are smaller than freed
+        self.fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
+        self.fast_cache_n1.shrink_to_fit();
+
         self.arena.retain(|_, idx| live.contains(idx));
         // Re-insert sentinels (they're always live)
         self.arena.entry([0,0,0,0]).or_insert(0);
@@ -2071,5 +2082,32 @@ mod tests {
         let cells2 = hf2.to_flat();
 
         assert_eq!(cells1, cells2, "Multi-gen heptamino doesn't match single-gen steps");
+    }
+
+    #[test]
+    fn test_freelist_gc() {
+        // Test that freelist doesn't corrupt patterns across GC boundaries
+        let pattern = [
+            (100, 100), (101, 100),
+            (100, 101), (101, 101), (102, 101),
+            (100, 102), (101, 102),
+        ];
+        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+
+        // Advance 5000 gens (triggers GC at 4000)
+        let mut hf1 = HashLife::from_flat(&cells);
+        hf1.node_map_cycle_size = 4000;
+        hf1.step_n(5000);
+        let cells1 = hf1.to_flat();
+
+        // Advance 5000 gens using single steps
+        let mut hf2 = HashLife::from_flat(&cells);
+        hf2.node_map_cycle_size = 4000;
+        for _ in 0..5000 {
+            hf2.step();
+        }
+        let cells2 = hf2.to_flat();
+
+        assert_eq!(cells1, cells2, "Freelist GC corruption");
     }
 }
