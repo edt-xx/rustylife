@@ -551,7 +551,7 @@ fn advance_fast(cache: &mut HashLifeCache,
     }
     if let Some(&cached) = cache.fast_cache_n.get(&fkey) {
         cache.fast_cache_n1.insert(fkey, cached); // promote
-        cache.fast_cache_n.remove(&fkey);
+        //cache.fast_cache_n.remove(&fkey);
         return cached;
     }
 
@@ -684,7 +684,7 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     if let Some(&cached) = slow_cache_n.get(&key) {
         *hits += 1;
         slow_cache_n1.insert(key, cached); // promote to current tier
-        slow_cache_n.remove(&key);          // remove from old tier
+        //slow_cache_n.remove(&key);          // remove from old tier
         return cached;
     }
     *misses += 1;
