@@ -63,8 +63,12 @@ pub struct HashLifeCache {
     pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: idx → LifeNode
     pub nodes: ahash::AHashMap<u32, LifeNode>,
-    /// Fast cache: (node_idx, level) → advanced result.
-    pub fast_cache: ahash::AHashMap<(u32, u32), u32>,
+    /// Fast cache: two-tier generational for advance_fast results.
+    /// n = old tier (survives one cycle), n1 = current tier.
+    /// On hit in n, promote to n1. New keys go in n1.
+    /// Rotated with arena GC.
+    pub fast_cache_n: ahash::AHashMap<(u32, u32), u32>,
+    pub fast_cache_n1: ahash::AHashMap<(u32, u32), u32>,
     /// Count cache: (node_idx, depth) → alive cell count.
     /// Memoizes count_cells — same canonical node at same depth always has same count.
     /// Cleared on arena GC (deleted nodes leave stale entries).
@@ -86,7 +90,8 @@ impl HashLifeCache {
         Self {
             arena,
             nodes,
-            fast_cache: ahash::AHashMap::new(),
+            fast_cache_n: ahash::AHashMap::new(),
+            fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
             next_idx: 2,
         }
@@ -103,11 +108,6 @@ impl HashLifeCache {
     #[inline] pub fn sw(&self, idx: u32) -> u32 { self.get_node(idx).south_west }
     #[inline] pub fn se(&self, idx: u32) -> u32 { self.get_node(idx).south_east }
     #[inline] pub fn is_empty_check(&self, idx: u32) -> bool { self.get_node(idx).is_empty }
-
-    /// Clear fast cache. Called at start of each step.
-    pub fn clear_advance_results(&mut self) {
-        self.fast_cache.clear();
-    }
 
     /// Find existing canonical node or create new one in arena.
     pub fn find_or_create(&mut self, nw: u32, ne: u32, sw: u32, se: u32) -> u32 {
@@ -163,7 +163,7 @@ impl HashLifeCache {
     }
 
     /// Garbage collect: walk tree from root, retain only live nodes.
-    /// Also walks subtrees of slow_cache_n1 referenced nodes to mark them and their children.
+    /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
         let mut live = HashSet::new();
         self.walk_tree(root, &mut live);
@@ -174,12 +174,23 @@ impl HashLifeCache {
                 self.walk_tree(node_idx, &mut live);
             }
         }
+        //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
+
+        // Walk subtrees of fast_cache-referenced nodes (result indices)
+        //for (&(_nidx, _lvl), &ridx) in self.fast_cache_n1.iter() {
+        //    if !live.contains(&ridx) {
+        //        self.walk_tree(ridx, &mut live);
+        //    }
+        //}
+        self.fast_cache_n1.retain(|(_, _), ridx| live.contains(ridx));
+
         self.nodes.retain(|idx, _| live.contains(idx));
         self.arena.retain(|_, idx| live.contains(idx));
         self.count_cache.clear();
         // Re-insert sentinels (they're always live)
         self.arena.entry([0,0,0,0]).or_insert(0);
         self.arena.entry([1,1,1,1]).or_insert(1);
+
         live.len() as u32
     }
 }
@@ -530,16 +541,21 @@ fn advance_fast(cache: &mut HashLifeCache,
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
-    // Fast cache: keyed by (node_idx, level)
+    // Fast cache: two-tier lookup (n1 first, then n with promotion)
     let fkey = (node_idx, level);
-    if let Some(&cached) = cache.fast_cache.get(&fkey) {
+    if let Some(&cached) = cache.fast_cache_n1.get(&fkey) {
+        return cached;
+    }
+    if let Some(&cached) = cache.fast_cache_n.get(&fkey) {
+        cache.fast_cache_n1.insert(fkey, cached); // promote
+        cache.fast_cache_n.remove(&fkey);
         return cached;
     }
 
     // Base case: level 3 → advance 2 generations using 8x8 rule table
     if level == 3 {
         let result = advance_base_two_gen(cache, node_idx);
-        cache.fast_cache.insert(fkey, result);
+        cache.fast_cache_n1.insert(fkey, result);
         return result;
     }
 
@@ -575,7 +591,7 @@ fn advance_fast(cache: &mut HashLifeCache,
     let bottomRight = advance_fast(cache, br, level - 1);
 
     let result = cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight);
-    cache.fast_cache.insert(fkey, result);
+    cache.fast_cache_n1.insert(fkey, result);
     result
 }
 
@@ -665,6 +681,7 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     if let Some(&cached) = slow_cache_n.get(&key) {
         *hits += 1;
         slow_cache_n1.insert(key, cached); // promote to current tier
+        slow_cache_n.remove(&key);          // remove from old tier
         return cached;
     }
     *misses += 1;
@@ -974,13 +991,10 @@ pub struct HashLife {
     /// Two-tier slow cache: generational eviction.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
-    /// Every cycle_size steps: drop n, n=n1, create new n1.
+    /// Rotated with arena GC.
     pub slow_cache_n: AHashMap<u64, u32>,
     pub slow_cache_n1: AHashMap<u64, u32>,
-    /// Steps remaining until slow_cache rotation (decremented per step/step_n).
-    pub slow_cache_cycle: i32,
-    pub slow_cache_cycle_size: i32,
-    /// Steps remaining until arena GC.
+    /// Steps remaining until arena GC (triggers GC + both cache rotations).
     node_map_cycle: i32,
     pub node_map_cycle_size: i32,
     /// Cache hit/miss counters (reset each step)
@@ -1002,8 +1016,6 @@ impl HashLife {
             depth: 0,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            slow_cache_cycle: 99999, // steps remaining until rotation
-            slow_cache_cycle_size: 99999,
             node_map_cycle: 4000, // steps remaining until arena GC
             node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
@@ -1076,8 +1088,6 @@ impl HashLife {
             depth,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            slow_cache_cycle: 99999, // steps remaining until rotation
-            slow_cache_cycle_size: 99999,
             node_map_cycle: 4000, // steps remaining until arena GC
             node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
@@ -1130,16 +1140,14 @@ impl HashLife {
         if self.is_empty() { return; }
         // Arena is append-only — nodes are immutable, no rebuild needed.
         // Slow_cache persists across steps for GOLDE-style performance.
-        // Clear fast cache (advance_result) at start of each step.
-        self.cache.clear_advance_results();
+        // Fast_cache also persists — same canonical node at same level always
+        // advances to the same result. Cleared on GC only.
 
         // Expand until tree is large enough for advance_slow base case
         while needs_expansion(&self.cache, self.root, self.depth) || self.depth < 3 {
             self.root = expand_node(&mut self.cache, self.root, self.depth);
             self.depth += 1;
         }
-        // Clear fast cache — advance_result is only valid within a single step
-        self.cache.clear_advance_results();
         // advance_node with target_depth=0 → always uses advance_slow (single-gen)
         self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                   self.root, self.depth, 0,
@@ -1201,9 +1209,6 @@ impl HashLife {
                 self.depth += 1;
             }
 
-            // Clear fast cache for this multi-gen advance
-            self.cache.clear_advance_results();
-
             let target_depth = k;
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
@@ -1233,8 +1238,6 @@ impl HashLife {
         }
 
         // Fall back to single-gen steps for remainder
-        // Clear fast cache — advance_result from multi-gen advances are stale
-        self.cache.clear_advance_results();
         for _ in 0..remaining {
             self.step();
         }
@@ -1244,27 +1247,19 @@ impl HashLife {
     /// after each GUI step (single or batch).
     pub fn rotate_caches(&mut self, n: u32) {
         let n = n as i32;
-        // Slow cache rotation
-        self.slow_cache_cycle -= n;
-        if self.slow_cache_cycle <= 0 {
-            self.slow_cache_cycle = self.slow_cache_cycle_size;
-            self.slow_cache_n.clear();
-            self.slow_cache_n.shrink_to_fit();
-            std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
-            self.slow_cache_n1.clear();
-            self.slow_cache_n1.shrink_to_fit();
-        }
         // Arena GC: walk tree from root, retain only live nodes.
-        // Also marks nodes referenced by slow_cache_n1 as live.
+        // Also marks nodes referenced by both cache tiers as live.
         self.node_map_cycle -= n;
         if self.node_map_cycle <= 0 {
             self.node_map_cycle = self.node_map_cycle_size;
             self.cache.gc(self.root, &self.slow_cache_n1);
-            // Rotate slow_cache after GC and reset its cycle counter
-            self.slow_cache_cycle = self.slow_cache_cycle_size;
+            // Rotate both caches after GC
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
-            self.slow_cache_n1.shrink_to_fit();
+            //self.slow_cache_n1.shrink_to_fit();
+            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+            self.cache.fast_cache_n1.clear();
+            //self.cache.fast_cache_n1.shrink_to_fit();
         }
     }
 }
