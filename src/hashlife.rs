@@ -62,7 +62,7 @@ pub struct HashLifeCache {
     /// Canonicalization map: children tuple → node index
     pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: idx → LifeNode
-    pub nodes: ahash::AHashMap<u32, LifeNode>,
+    pub nodes: std::collections::HashMap<u32, LifeNode>,
     /// Fast cache: two-tier generational for advance_fast results.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
@@ -82,21 +82,23 @@ pub struct HashLifeCache {
 impl HashLifeCache {
     pub fn new() -> Self {
         let mut arena = ahash::AHashMap::with_capacity(65536);
-        let mut nodes = ahash::AHashMap::with_capacity(65536);
+        let mut nodes = std::collections::HashMap::with_capacity(65536);
         // Index 0 = FALSE_NODE
         arena.insert([0,0,0,0], 0);
         nodes.insert(0, LifeNode { north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true });
         // Index 1 = TRUE_NODE
         arena.insert([1,1,1,1], 1);
         nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
+        // Pre-allocate freelist buffer (10M indices)
+        let freed: Vec<u32> = (0..10_000_000).collect();
         Self {
             arena,
             nodes,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
-            next_idx: 2,
-            freed: Vec::new(),
+            next_idx: 10_000_001,
+            freed,
         }
     }
 
@@ -137,14 +139,7 @@ impl HashLifeCache {
             is_e(nw) && is_e(ne) && is_e(sw) && is_e(se)
         };
 
-        let idx = match self.freed.pop() {
-            Some(f) => f,
-            None => {
-                let i = self.next_idx;
-                self.next_idx += 1;
-                i
-            }
-        };
+        let idx = self.freed.pop().unwrap();
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
         self.nodes.insert(idx, node);
         self.arena.insert(key, idx);
@@ -186,16 +181,29 @@ impl HashLifeCache {
         //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
 
         // Collect freed node indices
-        let mut freed: Vec<u32> = self.nodes.extract_if(|idx, _| !live.contains(idx))
-            .map(|(idx, _)| idx)
-            .collect();
-        self.freed.append(&mut freed);
+        let mut freed: Vec<u32> = Vec::new();
+        self.nodes.retain(|idx, _| {
+            let live = live.contains(idx);
+            if !live { freed.push(*idx); }
+            live
+        });
         self.nodes.shrink_to_fit();
 
-        // Remove fast_cache_n1 entries where key node_idx OR result was freed 
+        // Remove fast_cache_n1 entries where key node_idx OR result was freed
         // the nodes keys are identical to live and they are smaller than freed
         self.fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
         self.fast_cache_n1.shrink_to_fit();
+
+        // Append freed to global freelist
+        self.freed.append(&mut freed);
+        // Maintain freelist buffer of at least 10M entries
+        const FREELIST_MIN: usize = 10_000_000;
+        if self.freed.len() < FREELIST_MIN {
+            let needed = FREELIST_MIN - self.freed.len();
+            let start = self.next_idx;
+            self.next_idx += needed as u32;
+            self.freed.extend(start..self.next_idx);
+        }
 
         self.arena.retain(|_, idx| live.contains(idx));
         // Re-insert sentinels (they're always live)
