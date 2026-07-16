@@ -62,7 +62,8 @@ pub struct HashLifeCache {
     /// Canonicalization map: children tuple → node index
     pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: idx → LifeNode
-    pub nodes: std::collections::HashMap<u32, LifeNode>,
+    pub nodes: ahash::AHashMap<u32, LifeNode>,
+    pub nodes_limit: usize,
     /// Fast cache: two-tier generational for advance_fast results.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
@@ -82,7 +83,7 @@ pub struct HashLifeCache {
 impl HashLifeCache {
     pub fn new() -> Self {
         let mut arena = ahash::AHashMap::with_capacity(65536);
-        let mut nodes = std::collections::HashMap::with_capacity(65536);
+        let mut nodes = ahash::AHashMap::with_capacity(65536);
         // Index 0 = FALSE_NODE
         arena.insert([0,0,0,0], 0);
         nodes.insert(0, LifeNode { north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true });
@@ -94,6 +95,7 @@ impl HashLifeCache {
         Self {
             arena,
             nodes,
+            nodes_limit: 100000,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
@@ -147,7 +149,7 @@ impl HashLifeCache {
     }
 
     /// Collect all reachable node indices from root.
-    pub fn walk_tree(&self, root: u32, live: &mut HashSet<u32>) {
+    pub fn walk_tree(&self, root: u32, live: &mut ahash::AHashSet<u32>) {
         let mut stack = vec![root];
         while let Some(idx) = stack.pop() {
             if idx == FALSE_NODE || idx == TRUE_NODE {
@@ -169,7 +171,7 @@ impl HashLifeCache {
     /// Garbage collect: walk tree from root, retain only live nodes.
     /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
-        let mut live = HashSet::new();
+        let mut live = ahash::AHashSet::new();
         self.walk_tree(root, &mut live);
         // Walk subtrees of slow_cache-referenced nodes (marks node + all descendants)
         for (&key, _) in slow_cache_n1.iter() {
@@ -178,15 +180,14 @@ impl HashLifeCache {
                 self.walk_tree(node_idx, &mut live);
             }
         }
+        self.nodes_limit = live.len()*8;
         //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
 
         // Collect freed node indices
-        let mut freed: Vec<u32> = Vec::new();
-        self.nodes.retain(|idx, _| {
-            let live = live.contains(idx);
-            if !live { freed.push(*idx); }
-            live
-        });
+        let mut freed: Vec<u32> = self.nodes.extract_if(|idx, _| !live.contains(idx))
+           .map(|(idx, _)| idx)
+           .collect();
+
         self.nodes.shrink_to_fit();
 
         // Remove fast_cache_n1 entries where key node_idx OR result was freed
@@ -1200,7 +1201,7 @@ impl HashLife {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        // eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
+        // cache.eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
 
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
@@ -1272,7 +1273,7 @@ impl HashLife {
         // Arena GC: walk tree from root, retain only live nodes.
         // Also marks nodes referenced by both cache tiers as live.
         self.node_map_cycle -= n;
-        if self.node_map_cycle <= 0 {
+        if self.node_map_cycle <=0 || self.cache.nodes.len() > self.cache.nodes_limit {
             self.node_map_cycle = self.node_map_cycle_size;
             self.cache.gc(self.root, &self.slow_cache_n1);
             // Rotate both caches after GC
