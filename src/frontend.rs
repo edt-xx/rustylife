@@ -33,6 +33,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="stepBtn">Step</button>
   <label>Speed <input type="range" id="speedSlider" min="1" max="50" value="25"></label>
   <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
+  <button id="stepPlusBtn">Step+1</button>
 
   <button id="randBtn">Randomize</button>
   <button id="clearBtn">Clear</button>
@@ -46,7 +47,7 @@ input[type=range]{width:100px;vertical-align:middle}
 <script>
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
-const step = [1,2,3,5,9,17,33,65,129,257,513,1025];
+const step = [1,2,4,16,32,64,256,512,1024,4096,16384,65536];
 
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
@@ -137,6 +138,7 @@ var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTil
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var tracksEnabled = false; // disabled by default, hide active overlay when on
 var hashlifeMode = false; // tracks hashlife mode toggle
+var stepCountVal = 1; // current step count (slider value + manual adjustments)
 
 function drawGrid(data) {
     var hdr  = new DataView(data, 0, 36);
@@ -464,7 +466,7 @@ async function animLoop() {
     var stepEl = document.getElementById('stepSlider');
     if (!running || animLoopPending) return; // block while still processing previous step
 
-    var stepCount = step[+stepEl.value];
+    var stepCount = stepCountVal;
     var startTime = performance.now();
 
     animLoopPending = true; // block new dispatches until this iteration completes
@@ -633,6 +635,7 @@ window.addEventListener('resize', function() { refresh(); });
 
 // ---- Controls ----
 document.addEventListener('DOMContentLoaded', async function() {
+    stepCountVal = step[0]; // init to first step size
     var playBtn = document.getElementById('playBtn');
 
     playBtn.addEventListener('click', function() {
@@ -642,9 +645,20 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     document.getElementById('stepBtn').addEventListener('click', async function() {
         stopAnim();
-        var stepCount = step[+document.getElementById('stepSlider').value];
-        await call({action:'batch-step', count: stepCount});
+        await call({action:'batch-step', count: stepCountVal});
         zoomRefresh();
+    });
+
+    stepPlusBtn = document.getElementById('stepPlusBtn');
+    stepPlusBtn.addEventListener('click', function() {
+        if (stepPlusBtn.textContent === 'Step+1') {
+            stepCountVal += 1;
+            stepPlusBtn.textContent = 'Step-1';
+        } else {
+            stepCountVal = Math.max(1, stepCountVal - 1);
+            stepPlusBtn.textContent = 'Step+1';
+        }
+        document.getElementById('stepVal').textContent = stepCountVal;
     });
 
     document.getElementById('randBtn').addEventListener('click', async function() {
@@ -697,7 +711,9 @@ document.addEventListener('DOMContentLoaded', async function() {
 
  // Update step value display when slider changes
     document.getElementById('stepSlider').addEventListener('input', function() {
-        document.getElementById('stepVal').textContent = step[+this.value];
+        stepCountVal = step[+this.value];
+        document.getElementById('stepVal').textContent = stepCountVal;
+        stepPlusBtn.textContent = 'Step+1';
     });
 
     // Init

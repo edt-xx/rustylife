@@ -170,7 +170,7 @@ impl HashLifeCache {
 
     /// Garbage collect: walk tree from root, retain only live nodes.
     /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
-    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
+    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, combined_step_size: u32) -> u32 {
         let mut live = ahash::AHashSet::new();
         self.walk_tree(root, &mut live);
         // Walk subtrees of slow_cache-referenced nodes (marks node + all descendants)
@@ -180,7 +180,10 @@ impl HashLifeCache {
                 self.walk_tree(node_idx, &mut live);
             }
         }
-        self.nodes_limit = live.len()*8;
+        let log2_val = (combined_step_size-1).ilog2();
+        let multiplier = 2.max(log2_val);
+        self.nodes_limit = (live.len() * multiplier as usize).max(4000000);
+        eprintln!("gc: live={}, step_size={}, log2={}, multiplier={}", live.len(), combined_step_size, log2_val, multiplier);
         //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
 
         // Collect freed node indices
@@ -1274,8 +1277,8 @@ impl HashLife {
         // Also marks nodes referenced by both cache tiers as live.
         self.node_map_cycle -= n;
         if self.node_map_cycle <=0 || self.cache.nodes.len() > self.cache.nodes_limit {
-            self.node_map_cycle = self.node_map_cycle_size;
-            self.cache.gc(self.root, &self.slow_cache_n1);
+            self.node_map_cycle = self.node_map_cycle_size.max(n*4);
+            self.cache.gc(self.root, &self.slow_cache_n1, n as u32);
             // Rotate both caches after GC
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
@@ -2105,7 +2108,7 @@ mod tests {
 
         // Advance 5000 gens (triggers GC at 4000)
         let mut hf1 = HashLife::from_flat(&cells);
-        hf1.node_map_cycle_size = 4000;
+        hf1.node_map_cycle_size = 8;
         hf1.step_n(5000);
         let cells1 = hf1.to_flat();
 
