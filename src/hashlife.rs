@@ -180,10 +180,11 @@ impl HashLifeCache {
                 self.walk_tree(node_idx, &mut live);
             }
         }
-        let log2_val = (combined_step_size-1).ilog2();
+        // so we don't do ilog2(0) at stepsize 1
+        let log2_val = (combined_step_size+1).ilog2()-1;
         let multiplier = 2.max(log2_val);
         self.nodes_limit = (live.len() * multiplier as usize).max(4000000);
-        eprintln!("gc: live={}, step_size={}, log2={}, multiplier={}", live.len(), combined_step_size, log2_val, multiplier);
+        //eprintln!("gc: live={}, step_size={}, log2={}, multiplier={}", live.len(), combined_step_size, log2_val, multiplier);
         //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
 
         // Collect freed node indices
@@ -931,6 +932,11 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: 
     if depth == 0 {
         return if alive { TRUE_NODE } else { FALSE_NODE };
     }
+    // Short-circuit: no-op when setting to current value
+    if node_idx == FALSE_NODE && !alive { return FALSE_NODE; }
+    if node_idx == TRUE_NODE && alive { return TRUE_NODE; }
+    // FALSE_NODE → alive=true: need to split and set
+    // TRUE_NODE → alive=false: need to split and clear
     let node = cache.get_node(node_idx);
     let half = 1u32 << (depth - 1);
     let (nw, ne, sw, se);
@@ -1153,13 +1159,27 @@ impl HashLife {
     }
 
     pub fn set_cell(&mut self, x: u32, y: u32, alive: bool) {
-        let origin_x = self.center.0 - (self.size() as i64 / 2);
-        let origin_y = self.center.1 - (self.size() as i64 / 2);
-        let rel_x = x as i64 - origin_x;
-        let rel_y = y as i64 - origin_y;
-        let size = self.size() as i64;
-        if rel_x < 0 || rel_y < 0 || rel_x >= size || rel_y >= size { return; }
-        self.root = set_cell_at(&mut self.cache, self.root, self.depth, rel_x as u32, rel_y as u32, alive);
+        // Handle empty tree: no-op for clearing, rebuild for setting
+        if self.is_empty() {
+            if !alive { return; }
+            let cell = coord_pack(x, y);
+            *self = HashLife::from_flat(&[cell]);
+            return;
+        }
+        // Expand tree until cell is in bounds and depth >= 3
+        loop {
+            let origin_x = self.center.0 - (self.size() as i64 / 2);
+            let origin_y = self.center.1 - (self.size() as i64 / 2);
+            let rel_x = x as i64 - origin_x;
+            let rel_y = y as i64 - origin_y;
+            let size = self.size() as i64;
+            if rel_x >= 0 && rel_y >= 0 && rel_x < size && rel_y < size && self.depth >= 3 {
+                self.root = set_cell_at(&mut self.cache, self.root, self.depth, rel_x as u32, rel_y as u32, alive);
+                return;
+            }
+            self.root = expand_node(&mut self.cache, self.root, self.depth);
+            self.depth += 1;
+        }
     }
 
     pub fn step(&mut self) {

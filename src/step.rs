@@ -320,7 +320,7 @@ impl Grid {
     }
 
     pub fn step_hashlife(&mut self) {
-        if self.alive.is_empty() {
+        if self.hashlife.as_ref().map_or(true, |hf| hf.is_empty()) {
             return;
         }
 
@@ -334,7 +334,7 @@ impl Grid {
     }
 
     pub fn step_hashlife_n(&mut self, n: u32) {
-        if self.alive.is_empty() || n == 0 {
+        if self.hashlife.as_ref().map_or(true, |hf| hf.is_empty()) || n == 0 {
             return;
         }
 

@@ -252,12 +252,12 @@ fn handle_action(
             let density = json.get("density").and_then(|v| v.as_f64()).unwrap_or(0.3);
             let mut g = grid.lock().unwrap();
             g.randomize(cx, cy, size, density);
-            g.invalidate_hashlife();
+            if g.hashlife_mode { g.rebuild_hashlife(); } else { g.invalidate_hashlife(); }
         }
      "clear" => {
             let mut g = grid.lock().unwrap();
             g.clear();
-            g.invalidate_hashlife();
+            if g.hashlife_mode { g.rebuild_hashlife(); } else { g.invalidate_hashlife(); }
         }
         "quit" => {
             println!("Quit requested, shutting down...");
@@ -283,8 +283,14 @@ fn handle_toggle(
 
     if let (Some(x), Some(y)) = (x, y) {
         let mut g = grid.lock().unwrap();
-        g.toggle(x, y);
-        g.invalidate_hashlife();
+        if g.hashlife_mode {
+            if let Some(ref mut hf) = g.hashlife {
+                let was_alive = hf.get_cell(x as u32, y as u32);
+                hf.set_cell(x as u32, y as u32, !was_alive);
+            }
+        } else {
+            g.toggle(x, y);
+        }
     }
 
     serve_json(r#"{"ok":true}"#)
@@ -318,8 +324,17 @@ fn handle_load_pattern(
             })
             .collect();
         let mut g = grid.lock().unwrap();
-        g.load_pattern(&cell_list, anchor_x, anchor_y);
-        g.invalidate_hashlife();
+        if g.hashlife_mode {
+            if let Some(ref mut hf) = g.hashlife {
+                for &(cx, cy) in &cell_list {
+                    let x = (cx + anchor_x) as u32;
+                    let y = (cy + anchor_y) as u32;
+                    hf.set_cell(x, y, true);
+                }
+            }
+        } else {
+            g.load_pattern(&cell_list, anchor_x, anchor_y);
+        }
     }
 
     serve_json(r#"{"ok":true}"#)
