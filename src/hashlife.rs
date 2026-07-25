@@ -292,13 +292,22 @@ impl HashLifeCache {
             // Thread 1: split nodes into live + freed
             let nodes = &mut self.nodes;
             let freed = &mut self.freed;
+            let next_idx = &mut self.next_idx;
             let live1 = std::sync::Arc::clone(&live_set);
             s.spawn(move || {
                 let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live1.contains(idx))
                     .map(|(idx, _)| idx)
                     .collect();
                 nodes.shrink_to_fit();
+                let target = freed_vec.len() * 2;
                 freed.append(&mut freed_vec);
+                // Ensure freelist has at least 4x the freed count
+                if freed.len() < target {
+                    let needed = target - freed.len();
+                    let start = *next_idx;
+                    *next_idx += needed as u32;
+                    freed.extend(start..*next_idx);
+                }
             });
 
             // Thread 2: remove dead entries from fast_cache_n1
