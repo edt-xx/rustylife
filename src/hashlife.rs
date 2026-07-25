@@ -281,35 +281,48 @@ impl HashLifeCache {
     }
 
     /// Garbage collect: walk tree from root, retain only live nodes.
-    /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
+/// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
         let live = self.walk_tree_threaded(root, slow_cache_n1);
+        let live_set: std::collections::HashSet<u32> = live.into_iter().collect();
+        let live_len = live_set.len();
+        let live_set = std::sync::Arc::new(live_set);
 
-        // Collect freed node indices
-        let mut freed: Vec<u32> = self.nodes.extract_if(|idx, _| !live.contains(idx))
-           .map(|(idx, _)| idx)
-           .collect();
+        std::thread::scope(|s| {
+            // Thread 1: split nodes into live + freed
+            let nodes = &mut self.nodes;
+            let freed = &mut self.freed;
+            let live1 = std::sync::Arc::clone(&live_set);
+            s.spawn(move || {
+                let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live1.contains(idx))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                nodes.shrink_to_fit();
+                freed.append(&mut freed_vec);
+            });
 
-        self.nodes.shrink_to_fit();
+            // Thread 2: remove dead entries from fast_cache_n1
+            let fast_cache_n1 = &mut self.fast_cache_n1;
+            let live2 = std::sync::Arc::clone(&live_set);
+            s.spawn(move || {
+                fast_cache_n1.retain(|&(nidx, _), ridx| live2.contains(&nidx) && live2.contains(ridx));
+                fast_cache_n1.shrink_to_fit();
+            });
 
-        // Remove fast_cache_n1 entries where key node_idx OR result was freed
-        // the nodes keys are identical to live and they are smaller than freed
-        self.fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
-        self.fast_cache_n1.shrink_to_fit();
-
-        // Append freed to global freelist — only recovered nodes, no growth here.
-        // Freelist growth happens after each step based on predicted delta.
-        self.freed.append(&mut freed);
-
-        self.arena.retain(|_, idx| live.contains(idx));
-        // Re-insert sentinels (they're always live)
-        self.arena.entry([0,0,0,0]).or_insert(0);
-        self.arena.entry([1,1,1,1]).or_insert(1);
-        self.arena.shrink_to_fit();
+            // Thread 3: remove dead entries from arena, add sentinels
+            let arena = &mut self.arena;
+            let live3 = std::sync::Arc::clone(&live_set);
+            s.spawn(move || {
+                arena.retain(|_, idx| live3.contains(idx));
+                arena.entry([0,0,0,0]).or_insert(0);
+                arena.entry([1,1,1,1]).or_insert(1);
+                arena.shrink_to_fit();
+            });
+        });
 
         self.count_cache.clear();
 
-        live.len() as u32
+        live_len as u32
     }
 }
 
