@@ -212,9 +212,6 @@ fn handle_action(
             // eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife();
-                if let Some(ref mut hf) = g.hashlife {
-                    hf.rotate_caches(1);
-                }
             } else {
                 g.step();
             }
@@ -225,9 +222,6 @@ fn handle_action(
             // eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife_n(count as u32);
-                if let Some(ref mut hf) = g.hashlife {
-                    hf.rotate_caches(count as u32);
-                }
             } else {
                 for _ in 0..count {
                     g.step();

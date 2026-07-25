@@ -12,7 +12,6 @@
 //! - AdvanceSlow: recursive exact-gen advance (8x8 grid of segments)
 
 use ahash::AHashMap;
-use crate::kalman::KalmanFilter;
 
 // Coord pack/unpack (inline to avoid grid dependency in lib context)
 fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
@@ -63,7 +62,6 @@ pub struct HashLifeCache {
     pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: idx → LifeNode
     pub nodes: ahash::AHashMap<u32, LifeNode>,
-    pub nodes_limit: usize,
     /// Fast cache: two-tier generational for advance_fast results.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
@@ -86,7 +84,7 @@ impl HashLifeCache {
     }
 
     /// Create cache with initial freelist, sized to max(4*population, 4000000).
-    /// The freelist is resized dynamically after each GC using Kalman predictions.
+    /// The freelist is resized dynamically after each GC based on arena growth.
     pub fn new_for_population(population: usize) -> Self {
         Self::new_with_freed((population * 4).max(4000000))
     }
@@ -114,7 +112,6 @@ impl HashLifeCache {
         Self {
             arena,
             nodes,
-            nodes_limit: 100000,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
@@ -187,24 +184,106 @@ impl HashLifeCache {
         }
     }
 
-    /// Garbage collect: walk tree from root, retain only live nodes.
-    /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
-    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, combined_step_size: u32) -> u32 {
+    /// Collect all reachable node indices from root using 5 threads (4 quadrants + slow cache).
+    pub fn walk_tree_threaded(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> ahash::AHashSet<u32> {
+        let root_node = self.get_node(root);
+        let children = [
+            root_node.north_west,
+            root_node.north_east,
+            root_node.south_west,
+            root_node.south_east,
+        ];
+
+        // Collect slow cache roots
+        let slow_roots: Vec<u32> = slow_cache_n1.iter()
+            .map(|(&key, _)| (key >> 32) as u32)
+            .collect();
+
         let mut live = ahash::AHashSet::new();
-        self.walk_tree(root, &mut live);
-        // Walk subtrees of slow_cache-referenced nodes (marks node + all descendants)
-        for (&key, _) in slow_cache_n1.iter() {
-            let node_idx = (key >> 32) as u32;
-            if !live.contains(&node_idx) {
-                self.walk_tree(node_idx, &mut live);
+        live.insert(root);
+
+        let mut results: [std::mem::MaybeUninit<ahash::AHashSet<u32>>; 5] = [
+            std::mem::MaybeUninit::uninit(),
+            std::mem::MaybeUninit::uninit(),
+            std::mem::MaybeUninit::uninit(),
+            std::mem::MaybeUninit::uninit(),
+            std::mem::MaybeUninit::uninit(),
+        ];
+        let results_ptr = results.as_mut_ptr() as usize;
+
+        std::thread::scope(|scope| {
+            // 4 threads for tree quadrants
+            for (i, &child) in children.iter().enumerate() {
+                scope.spawn(move || {
+                    let mut local_live = ahash::AHashSet::new();
+                    let mut stack = vec![child];
+                    while let Some(idx) = stack.pop() {
+                        if idx == FALSE_NODE || idx == TRUE_NODE {
+                            local_live.insert(idx);
+                            continue;
+                        }
+                        if local_live.contains(&idx) { continue; }
+                        local_live.insert(idx);
+                        if let Some(node) = self.nodes.get(&idx) {
+                            for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
+                                if !local_live.contains(&c) {
+                                    stack.push(c);
+                                }
+                            }
+                        }
+                    }
+                    unsafe {
+                        let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
+                        std::ptr::write((*inner).as_mut_ptr(), local_live);
+                    }
+                });
+            }
+
+            // 5th thread for slow cache subtrees
+            scope.spawn(move || {
+                let mut local_live = ahash::AHashSet::new();
+                let mut stack = Vec::new();
+                for &r in &slow_roots {
+                    if !local_live.contains(&r) {
+                        stack.push(r);
+                    }
+                }
+                while let Some(idx) = stack.pop() {
+                    if idx == FALSE_NODE || idx == TRUE_NODE {
+                        local_live.insert(idx);
+                        continue;
+                    }
+                    if local_live.contains(&idx) { continue; }
+                    local_live.insert(idx);
+                    if let Some(node) = self.nodes.get(&idx) {
+                        for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
+                            if !local_live.contains(&c) {
+                                stack.push(c);
+                            }
+                        }
+                    }
+                }
+                unsafe {
+                    let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(4);
+                    std::ptr::write((*inner).as_mut_ptr(), local_live);
+                }
+            });
+        });
+
+        unsafe {
+            for i in 0..5 {
+                let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
+                live.extend(std::ptr::read((*inner).as_ptr()));
             }
         }
-        // so we don't do ilog2(0) at stepsize 1
-        let log2_val = (combined_step_size+1).ilog2()-1;
-        let multiplier = 2.max(log2_val);
-        self.nodes_limit = (live.len() * multiplier as usize).max(4000000);
-        //eprintln!("gc: live={}, step_size={}, log2={}, multiplier={}", live.len(), combined_step_size, log2_val, multiplier);
-        //slow_cache_n1.retain(|_, ridx| live.contains(&ridx));
+
+        live
+    }
+
+    /// Garbage collect: walk tree from root, retain only live nodes.
+    /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
+    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
+        let live = self.walk_tree_threaded(root, slow_cache_n1);
 
         // Collect freed node indices
         let mut freed: Vec<u32> = self.nodes.extract_if(|idx, _| !live.contains(idx))
@@ -1039,24 +1118,13 @@ pub struct HashLife {
     pub slow_cache_n: AHashMap<u64, u32>,
     pub slow_cache_n1: AHashMap<u64, u32>,
     /// Steps remaining until arena GC (triggers GC + both cache rotations).
-    node_map_cycle: i32,
-    pub node_map_cycle_size: i32,
     /// Cache hit/miss counters (reset each step)
     pub slow_cache_hits: u64,
     pub slow_cache_misses: u64,
-    /// Last step's cache stats for display
+/// Last step's cache stats for display
     pub last_cache_size: u32,
     /// Last step's cache hit rate * 10 (e.g., 45.2% → 452)
     pub last_cache_hit_rate: u32,
-    /// Kalman filters for predicting arena growth and performance
-    /// Nodes filter: inputs=(log2_step, population, nodes_before) → output=nodes_delta
-    /// Perf filter: inputs=(log2_step, nodes_len, population) → output=gens_per_sec
-    pub nodes_filter: KalmanFilter,
-    pub perf_filter: KalmanFilter,
-    /// Last step's parameters for Kalman-based GC decision in rotate_caches
-    last_log2_step: f64,
-    last_population: f64,
-    last_remainder: f64,
 }
 
 impl HashLife {
@@ -1069,17 +1137,10 @@ impl HashLife {
             depth: 0,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            node_map_cycle: 4000, // steps remaining until arena GC
-            node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
-            last_cache_size: 0,
+last_cache_size: 0,
             last_cache_hit_rate: 0,
-            nodes_filter: KalmanFilter::new(100.0, 5000.0),
-            perf_filter: KalmanFilter::new(5.0, 100.0),
-            last_log2_step: 0.0,
-            last_population: 0.0,
-            last_remainder: 0.0,
         }
     }
 
@@ -1151,17 +1212,10 @@ impl HashLife {
             depth,
             slow_cache_n: AHashMap::new(),
             slow_cache_n1: AHashMap::new(),
-            node_map_cycle: 4000, // steps remaining until arena GC
-            node_map_cycle_size: 4000, // GC every 4000 steps
             slow_cache_hits: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
-            nodes_filter: KalmanFilter::new(100.0, 5000.0),
-            perf_filter: KalmanFilter::new(5.0, 100.0),
-            last_log2_step: 0.0,
-            last_population: 0.0,
-            last_remainder: 0.0,
         }
     }
 
@@ -1218,17 +1272,12 @@ impl HashLife {
         }
     }
 
-    pub fn step(&mut self) {
+pub fn step(&mut self) {
         if self.is_empty() { return; }
         // Arena is append-only — nodes are immutable, no rebuild needed.
         // Slow_cache persists across steps for GOLDE-style performance.
         // Fast_cache also persists — same canonical node at same level always
         // advances to the same result. Cleared on GC only.
-
-        // Kalman filter instrumentation
-        let nodes_before = self.cache.nodes.len();
-        let population = self.alive_count();
-        let start = std::time::Instant::now();
 
         // Expand until tree is large enough for advance_slow base case
         while needs_expansion(&self.cache, self.root, self.depth) || self.depth < 3 {
@@ -1240,11 +1289,6 @@ impl HashLife {
                                   self.root, self.depth, 0,
                                   &mut self.slow_cache_hits, &mut self.slow_cache_misses);
         self.depth -= 1;
-
-        let elapsed = start.elapsed();
-        let nodes_after = self.cache.nodes.len();
-        let nodes_delta = nodes_after as f64 - nodes_before as f64;
-        let gens_per_sec = if elapsed.as_secs_f64() > 0.0 { 1.0 / elapsed.as_secs_f64() } else { f64::MAX };
 
         // Store cache stats for display
         let total = self.slow_cache_hits + self.slow_cache_misses;
@@ -1259,36 +1303,8 @@ impl HashLife {
         self.slow_cache_hits = 0;
         self.slow_cache_misses = 0;
 
-        // Kalman filter updates (single-gen step: log2_step=0, remainder=0)
-        let inputs_nodes = [0.0, population as f64, nodes_before as f64];
-        let inputs_perf = [0.0, nodes_after as f64, population as f64];
-
-        self.nodes_filter.predict();
-        self.nodes_filter.update(inputs_nodes, nodes_delta);
-        self.perf_filter.predict();
-        self.perf_filter.update(inputs_perf, gens_per_sec);
-
-        // Store for rotate_caches GC decision
-        self.last_log2_step = 0.0;
-        self.last_population = population as f64;
-        self.last_remainder = 0.0;
-
-        // Find optimal arena size (sweep input1 = nodes_len from 10K to 2x current)
-        let (best_arena, best_gens) = self.perf_filter.find_optimal_input1(
-            0.0, population as f64, 10000.0, (nodes_after as f64 * 2.0).max(50000.0), 5000.0
-        );
-
-        // Predict nodes delta for next step
-        let pred_next_delta = self.nodes_filter.predict_output([0.0, population as f64, nodes_after as f64]);
-
-        // Grow freelist based on predicted growth (independent of GC)
-        let freelist_target = (pred_next_delta.max(0.0) * 2.0).max(population as f64 * 4.0) as usize;
-        self.cache.grow_freed(freelist_target);
-
-        eprintln!("KF step: gens/sec={:.0} arena={:.0} best_arena={:.0}(pred_gens={:.0}) next_delta_pred={:.0} freelist={}",
-            gens_per_sec, nodes_after as f64, best_arena, best_gens, pred_next_delta, self.cache.freed.len());
-
-        // Cache rotation handled by server.rs after each GUI step
+        // Compress after every step
+        self.rotate_caches(1);
 
         // After shrinking, pattern may touch rim — expand again if needed
         while needs_expansion(&self.cache, self.root, self.depth) {
@@ -1299,14 +1315,6 @@ impl HashLife {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        // cache.eprintln!("STEP_N requested={} n={} depth={}", self.alive_count(), n, self.depth);
-
-        // Kalman filter instrumentation
-        let nodes_before = self.cache.nodes.len();
-        let population = self.alive_count();
-        let log2_step = n.ilog2() as f64;
-        let start = std::time::Instant::now();
-
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
         // GOLDE: expand tree, call AdvanceNode, result is at depth-1.
@@ -1365,95 +1373,28 @@ impl HashLife {
         }
 
         // Fall back to single-gen steps for remainder (these create many more new nodes)
-        let remainder_count = remaining;
+        // Each self.step() calls rotate_caches(1) internally
         for _ in 0..remaining {
             self.step();
         }
 
-        let elapsed = start.elapsed();
-        let nodes_after = self.cache.nodes.len();
-        let nodes_delta = nodes_after as f64 - nodes_before as f64;
-        let gens_per_sec = if elapsed.as_secs_f64() > 0.0 { n as f64 / elapsed.as_secs_f64() } else { f64::MAX };
-
-        // Kalman filter updates
-        let inputs_nodes = [log2_step, population as f64, remainder_count as f64];
-        let inputs_perf = [log2_step, nodes_after as f64, population as f64];
-
-        self.nodes_filter.predict();
-        self.nodes_filter.update(inputs_nodes, nodes_delta);
-        self.perf_filter.predict();
-        self.perf_filter.update(inputs_perf, gens_per_sec);
-
-        // Store for rotate_caches GC decision
-        self.last_log2_step = log2_step;
-        self.last_population = population as f64;
-        self.last_remainder = remainder_count as f64;
-
-        // Find optimal arena size (sweep input1 = nodes_len)
-        let (best_arena, best_gens) = self.perf_filter.find_optimal_input1(
-            log2_step, population as f64, 10000.0, (nodes_after as f64 * 2.0).max(50000.0), 5000.0
-        );
-
-        // Predict nodes delta for next similar step
-        let pred_next_delta = self.nodes_filter.predict_output([log2_step, population as f64, remainder_count as f64]);
-
-        // Grow freelist based on predicted growth (independent of GC)
-        let freelist_target = (pred_next_delta.max(0.0) * 2.0).max(population as f64 * 4.0) as usize;
-        self.cache.grow_freed(freelist_target);
-
-        eprintln!("KF step_n(n={}): gens/sec={:.0} arena={:.0} best_arena={:.0}(pred_gens={:.0}) next_delta_pred={:.0} remainder={} freelist={}",
-            n, gens_per_sec, nodes_after as f64, best_arena, best_gens, pred_next_delta, remainder_count, self.cache.freed.len());
+        // Compress after step_n
+        self.rotate_caches(n);
     }
 
-    /// Rotate caches: decrement counters by n gens. Called from server.rs
-    /// after each GUI step (single or batch).
-    pub fn rotate_caches(&mut self, n: u32) {
-        let n = n as i32;
+    /// Compress caches: run GC + rotate both caches.
+    /// Called after every step() and step_n().
+    pub fn rotate_caches(&mut self, _n: u32) {
+        // Always run GC
+        self.cache.gc(self.root, &self.slow_cache_n1);
 
-        // Kalman filter-based GC decision:
-        // Project arena size after next step, predict performance at that size.
-        // If projected performance < current performance → run GC.
-        let current_arena = self.cache.nodes.len() as f64;
-        let predicted_delta = self.nodes_filter.predict_output(
-            [self.last_log2_step, self.last_population, current_arena]
-        );
-        let projected_arena = current_arena + predicted_delta.max(0.0);
-
-        let current_gs = self.perf_filter.predict_output(
-            [self.last_log2_step, current_arena, self.last_population]
-        );
-        let projected_gs = self.perf_filter.predict_output(
-            [self.last_log2_step, projected_arena, self.last_population]
-        );
-
-        // Only use Kalman-based GC after filters have converged (~15+ measurements)
-        let converged = self.nodes_filter.update_count() >= 15 && self.perf_filter.update_count() >= 15;
-        let should_gc = converged && projected_gs < current_gs;
-
-        // Cycle-based GC: decrement counter
-        self.node_map_cycle -= n;
-        let cycle_expired = self.node_map_cycle <= 0;
-        // Hard limit: force GC if arena exceeds limit
-        let limit_exceeded = self.cache.nodes.len() > self.cache.nodes_limit;
-        // 4*population limit: force GC if projected arena > 4 * population
-        let pop_limit = self.last_population * 4.0;
-        let pop_limit_exceeded = projected_arena > pop_limit;
-
-        eprintln!("KF GC: current_gs={:.0} projected_gs={:.0} delta={:.0} cycle={} limit={} pop_limit={:.0} should_gc={} pop_exceeded={}",
-            current_gs, projected_gs, predicted_delta,
-            self.node_map_cycle, self.cache.nodes_limit, pop_limit, should_gc, pop_limit_exceeded);
-
-        if cycle_expired || limit_exceeded || should_gc || pop_limit_exceeded {
-            self.node_map_cycle = self.node_map_cycle_size.max(n*4);
-            self.cache.gc(self.root, &self.slow_cache_n1, n as u32);
-            // Rotate both caches after GC
-            std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
-            self.slow_cache_n1.clear();
-            self.slow_cache_n1.shrink_to_fit();
-            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-            self.cache.fast_cache_n1.clear();
-            self.cache.fast_cache_n1.shrink_to_fit();
-        }
+        // Rotate both caches after GC
+        std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
+        self.slow_cache_n1.clear();
+        self.slow_cache_n1.shrink_to_fit();
+        std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+        self.cache.fast_cache_n1.clear();
+        self.cache.fast_cache_n1.shrink_to_fit();
     }
 }
 
@@ -2273,15 +2214,13 @@ mod tests {
         ];
         let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
 
-        // Advance 5000 gens (triggers GC at 4000)
+        // Advance 5000 gens
         let mut hf1 = HashLife::from_flat(&cells);
-        hf1.node_map_cycle_size = 8;
         hf1.step_n(5000);
         let cells1 = hf1.to_flat();
 
         // Advance 5000 gens using single steps
         let mut hf2 = HashLife::from_flat(&cells);
-        hf2.node_map_cycle_size = 4000;
         for _ in 0..5000 {
             hf2.step();
         }
