@@ -61,15 +61,11 @@ function calcFrameSize() {
     return {fw: ww, fh: wh};
 }
 
-// How many cells fit in the frame at given cell size (16:9 aspect ratio)
+// How many cells fit in the frame — fill available space without aspect ratio constraint
 function calcCells(cs) {
     var fs = calcFrameSize();
-    var maxVw = Math.max(2, Math.floor(fs.fw / cs));
-    var maxVh = Math.max(2, Math.floor(fs.fh / cs));
-    // Enforce 16:9 — trim whichever dimension is too large relative to the other
-    var vw, vh;
-    if (maxVw / maxVh > 16 / 9) { vw = Math.floor(maxVh * 16 / 9); vh = maxVh; }
-    else                        { vh = Math.floor(maxVw * 9  / 16); vw = maxVw; }
+    var vw = Math.max(2, Math.floor(fs.fw / cs));
+    var vh = Math.max(2, Math.floor(fs.fh / cs));
     return {vw: vw, vh: vh};
 }
 
