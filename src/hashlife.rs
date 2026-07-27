@@ -238,11 +238,10 @@ impl HashLifeCache {
             scope.spawn(|| {
                 let mut local_live = ahash::AHashSet::new();
                 let mut stack = Vec::new();
-                for (&key, &_) in slow_cache_n1.iter() {
-                    let node_idx = (key >> 32) as u32;
-                    if !local_live.contains(&node_idx) {
-                        stack.push(node_idx);
-                    }
+                for (&key, &output_node) in slow_cache_n1.iter() {
+                    let input_node = (key >> 32) as u32;
+                    stack.push(input_node);
+                    stack.push(output_node);
                 }
                 while let Some(idx) = stack.pop() {
                     if idx == FALSE_NODE || idx == TRUE_NODE {
