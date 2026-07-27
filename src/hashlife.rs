@@ -621,6 +621,39 @@ fn ensure_level2(cache: &mut HashLifeCache, idx: u32) -> u32 {
     }
 }
 
+/// Build quadtree directly from packed cell list (no 2D grid allocation).
+/// Partitions cells into quadrants recursively, creating leaf nodes at 8x8 blocks.
+fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u64], ox: u32, oy: u32, size: u32, depth: u32) -> u32 {
+    if cells.is_empty() {
+        return FALSE_NODE;
+    }
+    // Base case: single cell
+    if size == 1 {
+        let packed = coord_pack(ox, oy);
+        return if cells.contains(&packed) { TRUE_NODE } else { FALSE_NODE };
+    }
+    // Partition into 4 quadrants
+    let half = size / 2;
+    let mut nw_cells = Vec::with_capacity(cells.len() / 4);
+    let mut ne_cells = Vec::with_capacity(cells.len() / 4);
+    let mut sw_cells = Vec::with_capacity(cells.len() / 4);
+    let mut se_cells = Vec::with_capacity(cells.len() / 4);
+    for &cell in cells {
+        let (x, y) = coord_unpack(cell);
+        match (x >= ox + half, y >= oy + half) {
+            (false, false) => nw_cells.push(cell),
+            (true, false) => ne_cells.push(cell),
+            (false, true) => sw_cells.push(cell),
+            (true, true) => se_cells.push(cell),
+        }
+    }
+    let nw = build_quadtree_from_cells(cache, &nw_cells, ox, oy, half, depth - 1);
+    let ne = build_quadtree_from_cells(cache, &ne_cells, ox + half, oy, half, depth - 1);
+    let sw = build_quadtree_from_cells(cache, &sw_cells, ox, oy + half, half, depth - 1);
+    let se = build_quadtree_from_cells(cache, &se_cells, ox + half, oy + half, half, depth - 1);
+    cache.find_or_create(nw, ne, sw, se)
+}
+
 /// Ensure a node is at exactly level 3 (8x8 grid) by expanding collapsed children.
 /// When find_or_create collapses identical children, a node that should be
 /// at level 3 may actually be at a lower level. This function rebuilds the
@@ -1213,26 +1246,28 @@ impl HashLife {
         let span_y = (max_y - min_y + 1) as usize;
         let size = next_power_of2(span_x.max(span_y).max(1));
 
-        // For large spans, grid allocation would OOM. Fall back to incremental building.
+        // For large spans, grid allocation would OOM. Build quadtree directly from cells.
         if size > 4096 {
-            let first = data[0];
-            let (fx, fy) = coord_unpack(first);
-            let mut hf = HashLife::new();
-            // Insert first cell to seed the tree
-            hf.set_cell(fx, fy, true);
-            // Expand to sufficient depth to cover the full span
-            let needed_depth = size.trailing_zeros() + 3;
-            while hf.depth < needed_depth {
-                hf.root = expand_node(&mut hf.cache, hf.root, hf.depth);
-                hf.depth += 1;
-            }
-            // Grow freelist to handle remaining cells
-            hf.cache.grow_freed(data.len() * 4);
-            // Insert remaining cells
-            for &cell in &data[1..] {
-                let (x, y) = coord_unpack(cell);
-                hf.set_cell(x, y, true);
-            }
+            let depth = size.trailing_zeros();
+            let mut cache = HashLifeCache::new_for_population(data.len());
+            let tree = build_quadtree_from_cells(&mut cache, data, min_x, min_y, size as u32, depth);
+            let mut hf = HashLife {
+                cache,
+                root: tree,
+                center: (min_x as i64 + (size as i64 / 2), min_y as i64 + (size as i64 / 2)),
+                depth: depth.max(3),
+                slow_cache_n: AHashMap::new(),
+                slow_cache_n1: AHashMap::new(),
+                slow_cache_hits: 0,
+                slow_cache_misses: 0,
+                last_cache_size: 0,
+                last_cache_hit_rate: 0,
+                last_step_count: 0,
+            };
+            // Grow freelist
+            let arena_size = hf.cache.nodes.len();
+            let freelist_target = (arena_size * 4).max(4000000);
+            hf.cache.grow_freed(freelist_target);
             return hf;
         }
 
