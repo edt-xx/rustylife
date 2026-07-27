@@ -194,11 +194,6 @@ impl HashLifeCache {
             root_node.south_east,
         ];
 
-        // Collect slow cache roots
-        let slow_roots: Vec<u32> = slow_cache_n1.iter()
-            .map(|(&key, _)| (key >> 32) as u32)
-            .collect();
-
         let mut live = ahash::AHashSet::new();
         live.insert(root);
 
@@ -240,12 +235,12 @@ impl HashLifeCache {
             }
 
             // 5th thread for slow cache subtrees
-            scope.spawn(move || {
+            scope.spawn(|| {
                 let mut local_live = ahash::AHashSet::new();
                 let mut stack = Vec::new();
-                for &r in &slow_roots {
-                    if !local_live.contains(&r) {
-                        stack.push(r);
+                for (&_key, &node_idx) in slow_cache_n1.iter() {
+                    if !local_live.contains(&node_idx) {
+                        stack.push(node_idx);
                     }
                 }
                 while let Some(idx) = stack.pop() {
