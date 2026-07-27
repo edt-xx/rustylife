@@ -4,8 +4,8 @@ pub const FRONTEND: &str = r#"<!DOCTYPE html>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{background:#1a1a2e;width:100%;height:100%;font-family:monospace;color:#e94560}
-#viewport{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center}
-canvas#main{border:2px solid #e94560;image-rendering:pixelated;background:#1a1a2e;cursor:crosshair}
+#viewport{position:absolute;top:0;left:0;right:0;bottom:0}
+canvas#main{position:absolute;top:48px;left:16px;right:12px;border:2px solid #e94560;image-rendering:pixelated;background:#1a1a2e;cursor:crosshair;margin-bottom:64px;transform:translate3d(0,0,0);will-change:transform}
 .toolbar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;justify-content:center;padding:6px 14px;background:rgba(22,33,62,.9);border-radius:6px;z-index:10;min-width:95vw}
 button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px}
 button:hover{background:#e94560;color:#1a1a2e}
@@ -56,11 +56,9 @@ var camX = 2000000000, camY = 2000000000;         // top-left of viewport in gri
 
 // Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
 function calcFrameSize() {
-    var ww = window.innerWidth;
-    var wh = window.innerHeight - 60; // leave room for toolbar
-    // Scale to fit within window while maintaining 16:9
-    var scale = Math.min(ww * 0.92 / 16, (wh * 0.90) / 9);
-    return {fw: Math.floor(scale * 16), fh: Math.floor(scale * 9)};
+    var ww = window.innerWidth - 32; // left 16 + right 12 + 4px border
+    var wh = window.innerHeight - 112; // top 48 + bottom 64
+    return {fw: ww, fh: wh};
 }
 
 // How many cells fit in the frame at given cell size (16:9 aspect ratio)
@@ -121,10 +119,13 @@ function ensureCanvasSize() {
     var fs = calcFrameSize();
     if (fs.fw !== canvasW || fs.fh !== canvasH) {
         canvasW = fs.fw; canvasH = fs.fh;
-        canvas.width  = canvasW;
-        canvas.height = canvasH;
+        var dpr = window.devicePixelRatio || 1;
+        canvas.width  = canvasW * dpr;
+        canvas.height = canvasH * dpr;
         canvas.style.width  = canvasW + 'px';
         canvas.style.height = canvasH + 'px';
+        ctx.setTransform(1, 0, 0, 1, 0, 0); // reset any previous scale
+        ctx.scale(dpr, dpr);
     }
 }
 
