@@ -211,17 +211,18 @@ impl HashLifeCache {
             for (i, &child) in children.iter().enumerate() {
                 scope.spawn(move || {
                     let mut local_live = ahash::AHashSet::new();
-                    let mut stack = vec![child];
+                    local_live.insert(FALSE_NODE);
+                    local_live.insert(TRUE_NODE);
+                    let mut stack = Vec::new();
+                    if !local_live.contains(&child) {
+                        local_live.insert(child);
+                        stack.push(child);
+                    }
                     while let Some(idx) = stack.pop() {
-                        if idx == FALSE_NODE || idx == TRUE_NODE {
-                            local_live.insert(idx);
-                            continue;
-                        }
-                        if local_live.contains(&idx) { continue; }
-                        local_live.insert(idx);
                         if let Some(node) = self.nodes.get(&idx) {
                             for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
                                 if !local_live.contains(&c) {
+                                    local_live.insert(c);
                                     stack.push(c);
                                 }
                             }
@@ -237,22 +238,28 @@ impl HashLifeCache {
             // 5th thread for slow cache subtrees
             scope.spawn(|| {
                 let mut local_live = ahash::AHashSet::new();
+                local_live.insert(FALSE_NODE);
+                local_live.insert(TRUE_NODE);
                 let mut stack = Vec::new();
-                for (&key, &output_node) in slow_cache_n1.iter() {
+                // for (&key, &output_node) in slow_cache_n1.iter() {
+                for (&key, _) in slow_cache_n1.iter() {
                     let input_node = (key >> 32) as u32;
-                    stack.push(input_node);
-                    stack.push(output_node);
+                    if !local_live.contains(&input_node) {
+                        local_live.insert(input_node);
+                        stack.push(input_node);
+                    }
+                    // To be in n1 the entry must have been referenced in the last step and
+                    // will be keep by the tree walk above
+                    //if !local_live.contains(&output_node) { 
+                    //    local_live.insert(output_node);
+                    //    stack.push(output_node);
+                    //}
                 }
                 while let Some(idx) = stack.pop() {
-                    if idx == FALSE_NODE || idx == TRUE_NODE {
-                        local_live.insert(idx);
-                        continue;
-                    }
-                    if local_live.contains(&idx) { continue; }
-                    local_live.insert(idx);
                     if let Some(node) = self.nodes.get(&idx) {
                         for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
                             if !local_live.contains(&c) {
+                                local_live.insert(c);
                                 stack.push(c);
                             }
                         }
