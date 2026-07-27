@@ -76,6 +76,9 @@ pub struct HashLifeCache {
     next_idx: u32,
     /// Freed indices from last GC (reused before incrementing next_idx)
     freed: Vec<u32>,
+    /// Number of freed indices recovered during last GC.
+    /// Used by step_n() to pre-grow freelist when step count increases.
+    pub last_gc_freed_len: usize,
 }
 
 impl HashLifeCache {
@@ -117,6 +120,7 @@ impl HashLifeCache {
             count_cache: ahash::AHashMap::new(),
             next_idx: freelist_size as u32 + 2,
             freed,
+            last_gc_freed_len: 0,
         }
     }
 
@@ -303,11 +307,9 @@ impl HashLifeCache {
                 nodes.shrink_to_fit();
                 let target = freed_vec.len() * 2;
                 freed.append(&mut freed_vec);
-                // Ensure freelist has at least 2x the freed count
-                // if step size drasticily increase we may sill have a problem
-                // and will need to put target in self and redo this with the
-                // (delta of power of two from old step to new step) * target
-                // this would have to be in server.rs when step changes
+                // Ensure freelist has at least 2x the freed count.
+                // If step size drastically increases, step_n() pre-grows the freelist
+                // using freed_len * (log2(new_step) - log2(old_step) + 1).
                 if freed.len() < target {
                     let needed = target - freed.len();
                     let start = *next_idx;
@@ -334,6 +336,9 @@ impl HashLifeCache {
                 arena.shrink_to_fit();
             });
         });
+
+        // Store freelist size after GC for step_n() to use when step count increases.
+        self.last_gc_freed_len = self.freed.len();
 
         self.count_cache.clear();
 
@@ -1153,6 +1158,8 @@ pub struct HashLife {
     pub last_cache_size: u32,
     /// Last step's cache hit rate * 10 (e.g., 45.2% → 452)
     pub last_cache_hit_rate: u32,
+    /// Step count used in last step_n() call (for freelist pre-grow scaling)
+    pub last_step_count: u32,
 }
 
 impl HashLife {
@@ -1167,8 +1174,9 @@ impl HashLife {
             slow_cache_n1: AHashMap::new(),
             slow_cache_hits: 0,
             slow_cache_misses: 0,
-last_cache_size: 0,
+            last_cache_size: 0,
             last_cache_hit_rate: 0,
+            last_step_count: 0,
         }
     }
 
@@ -1267,6 +1275,7 @@ last_cache_size: 0,
             slow_cache_misses: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
+            last_step_count: 0,
         }
     }
 
@@ -1366,6 +1375,23 @@ pub fn step(&mut self) {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
+        // Pre-grow freelist if step count increased significantly since last call.
+        // GC recovers N nodes and grows freelist to 2*N. Node churn scales with
+        // tree depth (log2 of step count), so scale freelist by log2(new/old) + 1.
+        if self.last_step_count == 0 {
+            // First step — use max(4M, arena.len() * log2(step_size))
+            let arena_len = self.cache.nodes.len() as u64;
+            let target = (arena_len * (n.ilog2() as u64)).max(4_000_000);
+            self.cache.grow_freed(target as usize);
+        } else if n > self.last_step_count {
+            let freed_len = self.cache.last_gc_freed_len;
+            if freed_len > 0 {
+                let scale = ((n / self.last_step_count).ilog2() + 1) as u64;
+                let target = (freed_len as u64) * scale;
+                self.cache.grow_freed(target as usize);
+            }
+        }
+        self.last_step_count = n;
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
         // GOLDE: expand tree, call AdvanceNode, result is at depth-1.
