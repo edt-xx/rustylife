@@ -320,10 +320,18 @@ fn handle_load_pattern(
         let mut g = grid.lock().unwrap();
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
-                for &(cx, cy) in &cell_list {
-                    let x = (cx + anchor_x) as u32;
-                    let y = (cy + anchor_y) as u32;
-                    hf.set_cell(x, y, true);
+                if hf.is_empty() {
+                    // Load all cells at once via from_flat — avoids per-cell tree expansion
+                    let flat: Vec<u64> = cell_list.iter().map(|&(cx, cy)| {
+                        game_of_life::hashlife::coord_pack((cx + anchor_x) as u32, (cy + anchor_y) as u32)
+                    }).collect();
+                    *hf = game_of_life::hashlife::HashLife::from_flat(&flat);
+                } else {
+                    for &(cx, cy) in &cell_list {
+                        let x = (cx + anchor_x) as u32;
+                        let y = (cy + anchor_y) as u32;
+                        hf.set_cell(x, y, true);
+                    }
                 }
             }
         } else {

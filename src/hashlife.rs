@@ -14,7 +14,7 @@
 use ahash::AHashMap;
 
 // Coord pack/unpack (inline to avoid grid dependency in lib context)
-fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
+pub fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
 fn coord_unpack(cell: u64) -> (u32, u32) { ((cell & 0xFFFFFFFF) as u32, (cell >> 32) as u32) }
 
 // ============================================================================
@@ -1204,6 +1204,29 @@ last_cache_size: 0,
         let span_x = (max_x - min_x + 1) as usize;
         let span_y = (max_y - min_y + 1) as usize;
         let size = next_power_of2(span_x.max(span_y).max(1));
+
+        // For large spans, grid allocation would OOM. Fall back to incremental building.
+        if size > 4096 {
+            let first = data[0];
+            let (fx, fy) = coord_unpack(first);
+            let mut hf = HashLife::new();
+            // Insert first cell to seed the tree
+            hf.set_cell(fx, fy, true);
+            // Expand to sufficient depth to cover the full span
+            let needed_depth = size.trailing_zeros() + 3;
+            while hf.depth < needed_depth {
+                hf.root = expand_node(&mut hf.cache, hf.root, hf.depth);
+                hf.depth += 1;
+            }
+            // Grow freelist to handle remaining cells
+            hf.cache.grow_freed(data.len() * 4);
+            // Insert remaining cells
+            for &cell in &data[1..] {
+                let (x, y) = coord_unpack(cell);
+                hf.set_cell(x, y, true);
+            }
+            return hf;
+        }
 
         // Center the pattern in the grid.
         let ox = (size - span_x) / 2;

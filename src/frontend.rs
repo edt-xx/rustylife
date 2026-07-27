@@ -38,7 +38,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="randBtn">Randomize</button>
   <button id="clearBtn">Clear</button>
   <button id="loadBtn">Load .lif</button>
-  <input type="file" id="fileInput" accept=".lif,.txt,.rle" style="display:none"/>
+  <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
   <button id="tracksBtn">Tracks</button>
   <button id="hashlifeBtn">HashLife</button>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
@@ -109,6 +109,107 @@ function parseRLE(text) {
             break;
         }
     }
+    return cells;
+}
+
+// Macrocell (.mc) parser — Golly HashLife format
+// Child-first quadtree: leaf nodes (8x8 grids) and non-leaf nodes (level nw ne sw se)
+function parseMacrocell(text) {
+    var lines = text.split('\n');
+    if (!lines[0] || !lines[0].startsWith('[M2]')) {
+        return null; // not a macrocell file
+    }
+
+    // Parse header — skip comment lines
+    var lineIdx = 1;
+    while (lineIdx < lines.length) {
+        var line = lines[lineIdx].trim();
+        if (line === '' || line.startsWith('#')) { lineIdx++; continue; }
+        break;
+    }
+
+    // Parse tree — child-first ordering, nodes numbered from 1
+    var nodes = [null]; // 1-based: nodes[1] = first node (null at 0 for empty node)
+    var cells = [];
+
+    while (lineIdx < lines.length) {
+        var line = lines[lineIdx];
+        // Strip trailing \r
+        if (line.length > 0 && line[line.length - 1] === '\r') line = line.slice(0, -1);
+        line = line.trim();
+        if (line === '') { lineIdx++; continue; }
+        lineIdx++;
+
+        var first = line[0];
+
+        if (first === '.' || first === '*' || first === '$') {
+            // Leaf node — parse 8x8 grid
+            var grid = [];
+            var row = 0, col = 0;
+            for (var r = 0; r < 8; r++) grid[r] = [false, false, false, false, false, false, false, false];
+
+            for (var ci = 0; ci < line.length; ci++) {
+                var c = line[ci];
+                if (c === '.') {
+                    if (col < 8) grid[row][col] = false;
+                    col++;
+                } else if (c === '*') {
+                    if (col < 8) grid[row][col] = true;
+                    col++;
+                } else if (c === '$') {
+                    row++;
+                    col = 0;
+                }
+            }
+            nodes.push({type: 'leaf', grid: grid});
+        } else if (first >= '0' && first <= '9') {
+            // Non-leaf node — "level nw ne sw se"
+            var parts = line.split(/\s+/);
+            var level = parseInt(parts[0]);
+            var nw = parseInt(parts[1]);
+            var ne = parseInt(parts[2]);
+            var sw = parseInt(parts[3]);
+            var se = parseInt(parts[4]);
+            nodes.push({type: 'node', level: level, nw: nw, ne: ne, sw: sw, se: se});
+        }
+    }
+
+    // Expand root (last node) to extract live cells
+    // Convention: upper-left of SE child of root is at (0, 1)
+    // We extract all live cells with absolute coordinates
+    function expandNode(nodeNum, originX, originY, size) {
+        if (nodeNum === 0) return; // empty node
+        var node = nodes[nodeNum];
+        if (!node) return;
+
+        if (node.type === 'leaf') {
+            // Leaf is level 3 = 8x8
+            var grid = node.grid;
+            for (var r = 0; r < 8; r++) {
+                for (var c = 0; c < 8; c++) {
+                    if (grid[r][c]) {
+                        cells.push([originX + c, originY + r]);
+                    }
+                }
+            }
+        } else {
+            var halfSize = size / 2;
+            expandNode(node.nw, originX, originY, halfSize);
+            expandNode(node.ne, originX + halfSize, originY, halfSize);
+            expandNode(node.sw, originX, originY + halfSize, halfSize);
+            expandNode(node.se, originX + halfSize, originY + halfSize, halfSize);
+        }
+    }
+
+    var rootNum = nodes.length - 1; // 1-based, null at index 0
+    var rootNode = nodes[rootNum];
+    var rootLevel = rootNode.type === 'leaf' ? 3 : rootNode.level;
+    var rootSize = Math.pow(2, rootLevel);
+    // Convention: SE child upper-left is (0, 1), so NW upper-left is (-rootSize, -rootSize + 1)
+    var originX = -rootSize;
+    var originY = -rootSize + 1;
+    expandNode(rootNum, originX, originY, rootSize);
+
     return cells;
 }
 
@@ -692,7 +793,7 @@ document.addEventListener('DOMContentLoaded', async function() {
        await call({action:'clear'}); imgData = null; prevBits = null; prevOverlay = null; zoomRefresh();
     });
 
-    // Load .lif file: parse RLE, load cells centered on viewport
+    // Load .lif or .mc file: parse and load cells centered on viewport
     document.getElementById('loadBtn').addEventListener('click', function() {
         document.getElementById('fileInput').click();
     });
@@ -702,10 +803,42 @@ document.addEventListener('DOMContentLoaded', async function() {
         stopAnim();
         await call({action:'clear'});  // clear board before loading
         var text = await file.text();
-        var cells = parseRLE(text);
+        var isMc = file.name.endsWith('.mc');
+        var cells;
+        if (isMc) {
+            cells = parseMacrocell(text);
+            // .mc cells have absolute coords (can be negative). Add center of coord space
+            // so server (cx + anchor) as u32 doesn't wrap negative values to huge numbers.
+            var coordCenter = 2000000000;
+            for (var i = 0; i < cells.length; i++) {
+                cells[i][0] += coordCenter;
+                cells[i][1] += coordCenter;
+            }
+        } else {
+            cells = parseRLE(text);
+        }
         var centerX = camX + Math.floor(calcCells(cellSize).vw / 2);
         var centerY = camY + Math.floor(calcCells(cellSize).vh / 2);
-       await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: centerX, anchor_y: centerY})});
+        // For .mc: cells already shifted to ~2B range; compute offset to center on viewport
+        // For .lif: cells are relative (0,0 top-left); anchor = centerX centers them
+        var anchorX, anchorY;
+        if (isMc) {
+            var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (var i = 0; i < cells.length; i++) {
+                if (cells[i][0] < minX) minX = cells[i][0];
+                if (cells[i][0] > maxX) maxX = cells[i][0];
+                if (cells[i][1] < minY) minY = cells[i][1];
+                if (cells[i][1] > maxY) maxY = cells[i][1];
+            }
+            var patCX = Math.floor((minX + maxX) / 2);
+            var patCY = Math.floor((minY + maxY) / 2);
+            anchorX = centerX - patCX;
+            anchorY = centerY - patCY;
+        } else {
+            anchorX = centerX;
+            anchorY = centerY;
+        }
+       await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: anchorX, anchor_y: anchorY})});
         zoomRefresh();
         e.target.value = ''; // allow re-selecting same file
     });
