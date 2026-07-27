@@ -301,7 +301,11 @@ impl HashLifeCache {
                 nodes.shrink_to_fit();
                 let target = freed_vec.len() * 2;
                 freed.append(&mut freed_vec);
-                // Ensure freelist has at least 4x the freed count
+                // Ensure freelist has at least 2x the freed count
+                // if step size drasticily increase we may sill have a problem
+                // and will need to put target in self and redo this with the
+                // (delta of power of two from old step to new step) * target
+                // this would have to be in server.rs when step changes
                 if freed.len() < target {
                     let needed = target - freed.len();
                     let start = *next_idx;
