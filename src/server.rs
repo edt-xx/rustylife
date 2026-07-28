@@ -155,13 +155,12 @@ fn serve_state(
         }
     }
 
-    // Header: gen(u32), vw(u16), vh(u16), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
-    // In hashlife mode: active=n1_cache_size, heap=total_cache_size, active_tiles=cache_hit_rate*10
-    // Big-endian from Python's struct.pack(">IHHIIIIIII", ...)
+    // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
+    // Big-endian
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
-    data.extend((vw as u16).to_be_bytes());
-    data.extend((vh as u16).to_be_bytes());
+    data.extend((vw as u32).to_be_bytes());
+    data.extend((vh as u32).to_be_bytes());
     data.extend(alive_count.to_be_bytes());
     if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {

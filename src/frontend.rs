@@ -49,7 +49,7 @@ const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
 const step = [1,2,4,16,32,64,256,512,1024,4096,16384,65536];
 
-var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125];
+var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.04167]; // 1/24
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
@@ -239,25 +239,25 @@ var hashlifeMode = false; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
 
 function drawGrid(data) {
-    var hdr  = new DataView(data, 0, 36);
+    var hdr  = new DataView(data, 0, 40);
     var gen     = hdr.getUint32(0, false);
-    var vw      = hdr.getUint16(4, false);
-    var vh      = hdr.getUint16(6, false);
-    var pop     = hdr.getUint32(8, false);
-    var active  = hdr.getUint32(12, false);
-    var ol_len  = hdr.getUint32(16, false);
-    var births  = hdr.getUint32(20, false);
-    var deaths  = hdr.getUint32(24, false);
-    var heap    = hdr.getUint32(28, false);
-    var tiles   = hdr.getUint32(32, false);
+    var vw      = hdr.getUint32(4, false);
+    var vh      = hdr.getUint32(8, false);
+    var pop     = hdr.getUint32(12, false);
+    var active  = hdr.getUint32(16, false);
+    var ol_len  = hdr.getUint32(20, false);
+    var births  = hdr.getUint32(24, false);
+    var deaths  = hdr.getUint32(28, false);
+    var heap    = hdr.getUint32(32, false);
+    var tiles   = hdr.getUint32(36, false);
 
     // Set globals for updateLabels()
     lblGen = gen; lblPop = pop; lblActive = active;
     lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
 
     var bitsLen = ((vw * vh + 7) >> 3);
-    var bits = new Uint8Array(data, 36, bitsLen);
-    var overlayOff = 36 + bitsLen;
+    var bits = new Uint8Array(data, 40, bitsLen);
+    var overlayOff = 40 + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
    // Sub-pixel mode: aggregate bits with delta updates
@@ -522,7 +522,7 @@ async function refresh() {
         var r = await fetch(url);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
         if (seq !== refreshSeq) return;   // stale response, discard
-        var hdr = new DataView(data, 0, 36);
+        var hdr = new DataView(data, 0, 40);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen) {
             drawGrid(data);
