@@ -1137,13 +1137,37 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
         let ry = oy.max(vy);
         let rx2 = (ox + size).min(vx + vw);
         let ry2 = (oy + size).min(vy + vh);
+        // Iterate by row, then by byte: skip non-zero bytes, set zero bytes to 0xFF
         for y in ry..ry2 {
-            for x in rx..rx2 {
-                let idx = ((y - vy) * vw + (x - vx)) as usize;
-                let byte = idx / 8;
-                let bit = idx % 8;
-                if byte < bits.len() {
-                    bits[byte] |= 1 << bit;
+            let row_base = ((y - vy) * vw) as usize;
+            let start_idx = row_base + (rx - vx) as usize;
+            let end_idx = row_base + (rx2 - vx) as usize;
+            let start_byte = start_idx >> 3;
+            let end_byte = (end_idx - 1) >> 3;
+            let max_byte = bits.len();
+            let sb = start_byte.min(max_byte - 1);
+            let eb = end_byte.min(max_byte - 1);
+            if sb == eb {
+                for i in start_idx..end_idx {
+                    if i < max_byte * 8 {
+                        bits[i >> 3] |= 1 << (i & 7);
+                    }
+                }
+            } else {
+                for b in (sb + 1)..eb {
+                    if bits[b] == 0 { bits[b] = 0xFF; }
+                }
+                {
+                    let bit = start_idx & 7;
+                    let mask = (!0u8) << bit;
+                    if bits[sb] == 0 { bits[sb] = mask; } else { bits[sb] |= mask; }
+                }
+                {
+                    let bit = end_idx & 7;
+                    if bit > 0 {
+                        let mask = (1u8 << bit) - 1;
+                        if bits[eb] == 0 { bits[eb] = mask; } else { bits[eb] |= mask; }
+                    }
                 }
             }
         }
