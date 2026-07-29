@@ -1189,10 +1189,39 @@ fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox
         let agg_rx2 = agg_rx2.min(agg_w);
         let agg_ry2 = agg_ry2.min(agg_h);
         for aggy in agg_ry..agg_ry2 {
-            for aggx in agg_rx..agg_rx2 {
-                let aidx = (aggy * agg_w + aggx) as usize;
-                if aidx < agg.len() * 8 {
-                    agg[aidx >> 3] |= 1 << (aidx & 7);
+            let row_base = (aggy * agg_w) as usize;
+            let start_idx = row_base + agg_rx as usize;
+            let end_idx = row_base + agg_rx2 as usize;
+            let start_byte = start_idx >> 3;
+            let end_byte = (end_idx - 1) >> 3;
+            let max_byte = agg.len();
+            let sb = start_byte.min(max_byte - 1);
+            let eb = end_byte.min(max_byte - 1);
+            if sb == eb {
+                // Single byte: set individual bits
+                for i in start_idx..end_idx {
+                    if i < max_byte * 8 {
+                        agg[i >> 3] |= 1 << (i & 7);
+                    }
+                }
+            } else {
+                // Full bytes in the middle: skip non-zero, set zero to 0xFF
+                for b in (sb + 1)..eb {
+                    if agg[b] == 0 { agg[b] = 0xFF; }
+                }
+                // Handle start byte
+                {
+                    let bit = start_idx & 7;
+                    let mask = (!0u8) << bit;
+                    if agg[sb] == 0 { agg[sb] = mask; } else { agg[sb] |= mask; }
+                }
+                // Handle end byte
+                {
+                    let bit = end_idx & 7;
+                    if bit > 0 {
+                        let mask = (1u8 << bit) - 1;
+                        if agg[eb] == 0 { agg[eb] = mask; } else { agg[eb] |= mask; }
+                    }
                 }
             }
         }
