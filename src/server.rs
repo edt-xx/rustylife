@@ -90,6 +90,45 @@ fn serve_octet_stream(data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
     )
 }
 
+/// Aggregate a bit-packed bitmap by `scale`×`scale` blocks.
+/// A display pixel is alive if any underlying cell is alive.
+fn aggregate_bitmap(bits: &[u8], vw: u32, vh: u32, scale: u32) -> Vec<u8> {
+    let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
+    let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
+    let agg_len = (agg_w * agg_h + 7) / 8;
+    let mut agg = vec![0u8; agg_len];
+
+    let scale_usize = scale as usize;
+    for aggy in 0..agg_h {
+        let base_y = aggy * scale_usize;
+        if base_y >= vh as usize { break; }
+        for aggx in 0..agg_w {
+            let base_x = aggx * scale_usize;
+            if base_x >= vw as usize { continue; }
+            let mut alive = false;
+            for dy in 0..scale_usize {
+                let ry = base_y + dy as usize;
+                if ry >= vh as usize { break; }
+                for dx in 0..scale_usize {
+                    let rx = base_x + dx as usize;
+                    if rx >= vw as usize { break; }
+                    let idx = ry * vw as usize + rx;
+                    if (bits[idx >> 3] >> (idx & 7)) & 1 != 0 {
+                        alive = true;
+                        break;
+                    }
+                }
+                if alive { break; }
+            }
+            if alive {
+                let aidx = aggy * agg_w + aggx;
+                agg[aidx >> 3] |= 1 << (aidx & 7);
+            }
+        }
+    }
+    agg
+}
+
 fn serve_state(
     grid: &Arc<Mutex<Grid>>,
     params: &HashMap<String, String>,
@@ -98,6 +137,7 @@ fn serve_state(
     let vy: u32 = params.get("vy").and_then(|s| s.parse().ok()).unwrap_or(0);
     let vw: u32 = params.get("vw").and_then(|s| s.parse().ok()).unwrap_or(530);
     let vh: u32 = params.get("vh").and_then(|s| s.parse().ok()).unwrap_or(300);
+    let scale: u32 = params.get("scale").and_then(|s| s.parse().ok()).unwrap_or(1);
 
     // Lock grid for snapshot
     let mut g = grid.lock().unwrap();
@@ -155,12 +195,23 @@ fn serve_state(
         }
     }
 
+    // Aggregate if scale > 1 (sub-pixel rendering)
+    let (final_bits, final_overlay, final_vw, final_vh) = if scale > 1 {
+        let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
+        let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
+        let agg_bits = aggregate_bitmap(&bits, vw, vh, scale);
+        let agg_overlay = aggregate_bitmap(&overlay, vw, vh, scale);
+        (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)
+    } else {
+        (bits, overlay, vw, vh)
+    };
+
     // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
     // Big-endian
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
-    data.extend((vw as u32).to_be_bytes());
-    data.extend((vh as u32).to_be_bytes());
+    data.extend((final_vw as u32).to_be_bytes());
+    data.extend((final_vh as u32).to_be_bytes());
     data.extend(alive_count.to_be_bytes());
     if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {
@@ -171,7 +222,7 @@ fn serve_state(
     } else {
         data.extend(g.active_count.to_be_bytes());
     }
-    data.extend((overlay.len() as u32).to_be_bytes());
+    data.extend((final_overlay.len() as u32).to_be_bytes());
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
     if g.hashlife_mode {
@@ -187,8 +238,8 @@ fn serve_state(
         data.extend((g.active_tiles.len() as u32).to_be_bytes());
     }
 
-    data.extend(bits);
-    data.extend(overlay);
+    data.extend(final_bits);
+    data.extend(final_overlay);
 
     serve_octet_stream(data)
 }

@@ -228,7 +228,6 @@ function ensureCanvasSize() {
 
 // Persistent buffers — reused across frames to avoid reallocation
 var prevBits = null, imgData = null, prevOverlay = null;
-var prevAggBits = null;   // persistent aggregated bitmap for sub-pixel delta rendering
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
@@ -260,119 +259,11 @@ function drawGrid(data) {
     var overlayOff = 40 + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
-   // Sub-pixel mode: aggregate bits with delta updates
-    if (cellSize < 1) {
-        var scale = Math.round(1 / cellSize); // 2, 4, or 8
-        var aggW = Math.ceil(vw / scale);
-        var aggH = Math.ceil(vh / scale);
-        var totalAgg = aggW * aggH;
-        var aggBitsLen = (totalAgg + 7) >> 3;
-
-        // Ensure offCanvas is correct size
-        if (offCanvas.width !== aggW || offCanvas.height !== aggH) {
-            offCanvas.width = aggW;
-            offCanvas.height = aggH;
-        }
-
-        // Full aggregation needed on entry, dimension change, pan, or zoom
-        var viewportChanged = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY);
-        var needFullAggregate = !prevAggBits || prevAggBits.length !== aggBitsLen || viewportChanged;
-        if (needFullAggregate) {
-            prevAggBits = new Uint8Array(aggBitsLen); // automatically zeroes
-        }
-
-        if (needFullAggregate) {
-            for (var aggy = 0; aggy < aggH; aggy++) {
-                var baseY = aggy * scale;
-                if (baseY >= vh) break;
-                for (var aggx = 0; aggx < aggW; aggx++) {
-                    var baseX = aggx * scale;
-                    if (baseX >= vw) continue;
-                    var alive = false;
-                    for (var dy = 0; dy < scale && baseY + dy < vh; dy++)
-                        for (var dx = 0; dx < scale && baseX + dx < vw; dx++) {
-                            var idx = (baseY + dy) * vw + (baseX + dx);
-                            if ((bits[idx >> 3] >> (idx & 7)) & 1) { alive = true; break; }
-                        }
-                    if (alive) { var aIdx = aggy*aggW+aggx; prevAggBits[aIdx>>3] |= 1 << (aIdx&7); }
-                }
-            }
-        } else {
-            // Incremental: diff raw bits, recalculate affected display blocks
-            var numRawBytes = ((vw * vh) + 7) >> 3;
-            if (prevBits && prevBits.length === numRawBytes) {
-                for (var b = 0; b < numRawBytes; b++) {
-                    var diff = bits[b] ^ prevBits[b];
-                    if (diff === 0) continue;
-                    var startPixel = b << 3;
-                    for (var bit = 0; bit < 8; bit++) {
-                        if (!(diff & (1 << bit))) continue;
-                        var rIdx = startPixel + bit;
-                        var aggx = Math.floor((rIdx % vw) / scale);
-                        var aggy = Math.floor(Math.floor(rIdx / vw) / scale);
-                        if (aggx >= aggW || aggy >= aggH) continue;
-                        var baseX = aggx * scale, baseY = aggy * scale;
-                        if (baseX >= vw || baseY >= vh) continue;
-                        // Re-aggregate this block: clear bit first
-                        var aIdx = aggy*aggW+aggx;
-                        prevAggBits[aIdx>>3] &= ~(1 << (aIdx&7));
-                        // Re-check all cells in block
-                        for (var dy = 0; dy < scale && baseY + dy < vh; dy++)
-                            for (var dx = 0; dx < scale && baseX + dx < vw; dx++) {
-                                var idx = (baseY + dy) * vw + (baseX + dx);
-                                if ((bits[idx >> 3] >> (idx & 7)) & 1) {
-                                    prevAggBits[aIdx>>3] |= 1 << (aIdx&7);
-                                    break;
-                                }
-                            }
-                    }
-                }
-            } else {
-                prevAggBits.fill(0); // dimension changed unexpectedly, do full aggregation
-                for (var aggy = 0; aggy < aggH; aggy++) {
-                    var baseY = aggy * scale;
-                    if (baseY >= vh) break;
-                    for (var aggx = 0; aggx < aggW; aggx++) {
-                        var baseX = aggx * scale;
-                        if (baseX >= vw) continue;
-                        var alive = false;
-                        for (var dy = 0; dy < scale && baseY + dy < vh; dy++)
-                            for (var dx = 0; dx < scale && baseX + dx < vw; dx++) {
-                                var idx = (baseY + dy) * vw + (baseX + dx);
-                                if ((bits[idx >> 3] >> (idx & 7)) & 1) { alive = true; break; }
-                            }
-                        if (alive) { var aIdx = aggy*aggW+aggx; prevAggBits[aIdx>>3] |= 1 << (aIdx&7); }
-                    }
-                }
-            }
-        }
-
-        // Render aggregated bitmap to offCanvas at 1:1
-        imgData = offCtx.createImageData(aggW, aggH);
-        var px = imgData.data;
-        for (var i = 0; i < totalAgg; i++) {
-            var p = i * 4;
-            if ((prevAggBits[i>>3]>>(i&7)) & 1) { px[p]=233; px[p+1]=69; px[p+2]=96; }
-            else { px[p]=26; px[p+1]=26; px[p+2]=46; }
-            px[p+3] = 255;
-        }
-        offCtx.putImageData(imgData, 0, 0);
-
-        ctx.fillStyle = '#1a1a2e';
-        ctx.fillRect(0, 0, canvasW, canvasH);
-        ctx.imageSmoothingEnabled = false;
-        var ox = Math.floor((canvasW - aggW) / 2);
-        var oy = Math.floor((canvasH - aggH) / 2);
-        ctx.drawImage(offCanvas, ox, oy);
-
-        prevBits = bits; // update raw prevBits for next frame diff
-        prevVw = vw; prevVh = vh; prevCamX = camX; prevCamY = camY;
-        updateLabels(vw, vh);
-        return; // Skip normal render path
-    }
-
+    // Server-side aggregation: when cellSize < 1, the server sends an already-aggregated bitmap.
+    // vw/vh in the header are the aggregated dimensions. Just render normally.
     // Decide: full redraw (viewport/zoom changed or first call) vs delta update
-    var needsFullRedraw = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
+    // At sub-pixel zoom, server sends aggregated bitmap — always full redraw (small enough)
+    var needsFullRedraw = (cellSize < 1) || (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
 
     // Only resize offCanvas when needed — setting .width/.height clears it!
     if (offCanvas.width !== vw || offCanvas.height !== vh) {
@@ -411,8 +302,10 @@ function drawGrid(data) {
 
         offCtx.putImageData(imgData, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        var cw = vw * cellSize;
-        var ch = vh * cellSize;
+        // When cellSize < 1, server sends aggregated bitmap — vw/vh are display dimensions (1:1)
+        // When cellSize >= 1, vw/vh are raw cell counts — multiply by cellSize for display
+        var cw = cellSize < 1 ? vw : vw * cellSize;
+        var ch = cellSize < 1 ? vh : vh * cellSize;
         var ox = Math.floor((canvasW - cw) / 2);
         var oy = Math.floor((canvasH - ch) / 2);
         ctx.drawImage(offCanvas, ox, oy, cw, ch);
@@ -530,7 +423,8 @@ function updateLabels(vw, vh) {
 async function refresh() {
     ensureCanvasSize();  // only resizes when dimensions actually changed
     var vp = calcCells(cellSize);
-    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh;
+    var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
+    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
     var seq = ++refreshSeq;
 
     // Wait until gen has advanced (avoid getting stale cached state)
@@ -554,7 +448,8 @@ async function refresh() {
 async function zoomRefresh() {
     ensureCanvasSize();
     var vp = calcCells(cellSize);
-    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh;
+    var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
+    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
     var r = await fetch(url);
     var data = await r.arrayBuffer();
     drawGrid(data);
