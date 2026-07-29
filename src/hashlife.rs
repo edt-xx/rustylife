@@ -1125,7 +1125,7 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: 
     cache.find_or_create(nw, ne, sw, se)
 }
 
-fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut Vec<u8>) {
+fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
     // Overlap check: node [ox, ox+size) vs viewport [vx, vx+vw)
@@ -1194,7 +1194,7 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
 
 /// Like fill_viewport but writes directly to an aggregated bitmap.
 /// Each raw cell (x, y) maps to aggregated pixel (aggx, aggy) = ((x-vx)/scale, (y-vy)/scale).
-fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut Vec<u8>) {
+fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
     if ox >= vx + vw || ox + size <= vx || oy >= vy + vh || oy + size <= vy {
@@ -1450,8 +1450,26 @@ impl HashLife {
         if bits.len() < bits_len { bits.resize(bits_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        fill_viewport(&self.cache, self.root, self.depth,
-            origin_x as u32, origin_y as u32, vx, vy, vw, vh, bits);
+        // Parallelize when bitmap > 128KB and depth >= 3
+        if bits_len > 128 * 1024 && self.depth >= 3 {
+            let node = self.cache.get_node(self.root);
+            let half = 1u32 << (self.depth - 1);
+            let bits_ptr = bits.as_mut_ptr() as usize;
+            let bits_len = bits_len;
+            std::thread::scope(|s| {
+                s.spawn(|| fill_viewport(&self.cache, node.north_west, self.depth - 1,
+                    origin_x as u32, origin_y as u32, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                s.spawn(|| fill_viewport(&self.cache, node.north_east, self.depth - 1,
+                    origin_x as u32 + half, origin_y as u32, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                s.spawn(|| fill_viewport(&self.cache, node.south_west, self.depth - 1,
+                    origin_x as u32, origin_y as u32 + half, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                s.spawn(|| fill_viewport(&self.cache, node.south_east, self.depth - 1,
+                    origin_x as u32 + half, origin_y as u32 + half, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+            });
+        } else {
+            fill_viewport(&self.cache, self.root, self.depth,
+                origin_x as u32, origin_y as u32, vx, vy, vw, vh, &mut bits[..]);
+        }
     }
 
     /// Populate an aggregated bitmap directly from the quadtree.
@@ -1463,8 +1481,26 @@ impl HashLife {
         if agg.len() < agg_len { agg.resize(agg_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        fill_aggregated_viewport(&self.cache, self.root, self.depth,
-            origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, agg);
+        // Parallelize when bitmap > 128KB and depth >= 3
+        if agg_len > 128 * 1024 && self.depth >= 3 {
+            let node = self.cache.get_node(self.root);
+            let half = 1u32 << (self.depth - 1);
+            let agg_ptr = agg.as_mut_ptr() as usize;
+            let agg_len = agg_len;
+            std::thread::scope(|s| {
+                s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_west, self.depth - 1,
+                    origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_east, self.depth - 1,
+                    origin_x as u32 + half, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_west, self.depth - 1,
+                    origin_x as u32, origin_y as u32 + half, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_east, self.depth - 1,
+                    origin_x as u32 + half, origin_y as u32 + half, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+            });
+        } else {
+            fill_aggregated_viewport(&self.cache, self.root, self.depth,
+                origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, &mut agg[..]);
+        }
     }
 
     pub fn get_cell(&self, x: u32, y: u32) -> bool {
