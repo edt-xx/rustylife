@@ -4,13 +4,9 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use crate::grid::*;
 
-/// Runtime toggle for per-generation timing output to stderr
+/// Per-generation timing output to stderr (disabled, no UI toggle)
+#[allow(dead_code)]
 static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
-
-pub fn toggle_timing() {
-    let current = TIMING_ENABLED.load(Ordering::Relaxed);
-    TIMING_ENABLED.store(!current, Ordering::Relaxed);
-}
 
 fn timing_on() -> bool {
     TIMING_ENABLED.load(Ordering::Relaxed)

@@ -273,7 +273,7 @@ impl Grid {
             deaths_buf: Vec::with_capacity(256),
             // expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
-            hashlife_mode: false,
+            hashlife_mode: true,
             hashlife: None,
         }
     }
@@ -481,8 +481,23 @@ impl Grid {
         }
     }
 
-    /// Invalidate HashLife instance (call after toggle, clear, randomize, load_pattern).
+    /// Invalidate HashLife instance (call after clear, randomize, load_pattern).
+    /// Does NOT rebuild alive — caller is responsible for that.
     pub fn invalidate_hashlife(&mut self) {
+        self.hashlife = None;
+    }
+
+    /// Switch from HashLife to Classic: rebuild alive from quadtree.
+    pub fn sync_alive_from_hashlife(&mut self) {
+        if let Some(ref hf) = self.hashlife {
+            let alive = hf.collect_alive();
+            self.alive = alive;
+            self.alive_index.clear();
+            for (i, &cell) in self.alive.iter().enumerate() {
+                self.alive_index.insert(cell, i);
+            }
+            eprintln!("SYNC_HASHLIFE->CLASSIC: rebuilt {} cells from quadtree", self.alive.len());
+        }
         self.hashlife = None;
     }
 

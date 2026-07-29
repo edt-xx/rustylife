@@ -37,13 +37,12 @@ input[type=range]{width:100px;vertical-align:middle}
 
   <button id="randBtn">Randomize</button>
   <button id="clearBtn">Clear</button>
-  <button id="loadBtn">Load .lif</button>
+  <button id="loadBtn">Load</button>
   <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
   <button id="tracksBtn">Tracks</button>
-  <button id="hashlifeBtn">HashLife</button>
+  <button id="hashlifeBtn">Classic</button>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
 </div>
-<button id="timingBtn" style="position:absolute;right:24px;bottom:12px;background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px;z-index:11">Timing</button>
 <script>
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
@@ -235,7 +234,7 @@ var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTil
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
 var tracksEnabled = false; // disabled by default, hide active overlay when on
-var hashlifeMode = false; // tracks hashlife mode toggle
+var hashlifeMode = true; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
 
 function drawGrid(data) {
@@ -730,11 +729,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('hashlifeBtn').addEventListener('click', async function() {
         hashlifeMode = !hashlifeMode;
         await call({action:'toggle-hashlife'});
-        this.textContent = hashlifeMode ? 'Conventional' : 'HashLife';
-    });
-    document.getElementById('timingBtn').addEventListener('click', async function() {
-        await fetch('/toggle-timing', {method:'POST', headers:{'Content-Type':'application/json'}});
-        this.textContent = this.textContent === 'NoTiming' ? 'Timing' : 'NoTiming';
+        this.textContent = hashlifeMode ? 'Classic' : 'HashLife';
     });
     document.getElementById('clearBtn').addEventListener('click', async function() {
        stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';

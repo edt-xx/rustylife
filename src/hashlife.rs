@@ -1333,6 +1333,23 @@ impl HashLife {
         count_cells(&mut self.cache, self.root, self.depth)
     }
 
+    /// Collect all alive cells from the quadtree as packed u64 coords.
+    pub fn collect_alive(&self) -> Vec<u64> {
+        let mut alive = Vec::new();
+        collect_alive(&self.cache, self.root, self.depth, 0, 0, &mut alive);
+        // Offset from quadtree-local (0,0) to global coords
+        let cx = self.center.0;
+        let cy = self.center.1;
+        let half = (self.size() as i64 / 2) as u64;
+        for cell in &mut alive {
+            let (x, y) = coord_unpack(*cell);
+            let gx = (x as i64 + cx - half as i64) as u32;
+            let gy = (y as i64 + cy - half as i64) as u32;
+            *cell = coord_pack(gx, gy);
+        }
+        alive
+    }
+
     pub fn from_flat(data: &[u64]) -> Self {
         if data.is_empty() { return Self::new(); }
 

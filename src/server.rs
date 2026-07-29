@@ -33,7 +33,6 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
             ("POST", "/action") => handle_action(&grid, &mut request),
             ("POST", "/toggle") => handle_toggle(&grid, &mut request),
             ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
-            ("POST", "/toggle-timing") => handle_toggle_timing(),
             _ => serve_404(),
         };
 
@@ -327,7 +326,7 @@ fn handle_action(
             if g.hashlife_mode {
                 g.init_hashlife();
             } else {
-                g.invalidate_hashlife();
+                g.sync_alive_from_hashlife();
             }
             // eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
             //     g.hashlife_mode, g.alive.len(), g.hashlife.is_some());
@@ -380,11 +379,6 @@ fn handle_toggle(
         }
     }
 
-    serve_json(r#"{"ok":true}"#)
-}
-
-fn handle_toggle_timing() -> Response<Cursor<Vec<u8>>> {
-    crate::step::toggle_timing();
     serve_json(r#"{"ok":true}"#)
 }
 
