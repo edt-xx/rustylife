@@ -238,7 +238,7 @@ var hashlifeMode = true; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
 
 function drawGrid(data) {
-    var hdr  = new DataView(data, 0, 40);
+    var hdr  = new DataView(data, 0, 44);
     var gen     = hdr.getUint32(0, false);
     var vw      = hdr.getUint32(4, false);
     var vh      = hdr.getUint32(8, false);
@@ -249,17 +249,18 @@ function drawGrid(data) {
     var deaths  = hdr.getUint32(28, false);
     var heap    = hdr.getUint32(32, false);
     var tiles   = hdr.getUint32(36, false);
+    var serverScale = hdr.getUint32(40, false);
 
     // Set globals for updateLabels()
     lblGen = gen; lblPop = pop; lblActive = active;
     lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
 
     var bitsLen = ((vw * vh + 7) >> 3);
-    var bits = new Uint8Array(data, 40, bitsLen);
-    var overlayOff = 40 + bitsLen;
+    var bits = new Uint8Array(data, 44, bitsLen);
+    var overlayOff = 44 + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
-    // Server-side aggregation: when cellSize < 1, the server sends an already-aggregated bitmap.
+    // Server-side aggregation: when serverScale > 1, the server sends an already-aggregated bitmap.
     // vw/vh in the header are the aggregated dimensions. Just render normally.
     // Decide: full redraw (viewport/zoom changed or first call) vs delta update
     // At sub-pixel zoom, server sends aggregated bitmap — delta works fine (1px fillRect)
@@ -302,10 +303,10 @@ function drawGrid(data) {
 
         offCtx.putImageData(imgData, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        // When cellSize < 1, server sends aggregated bitmap — vw/vh are display dimensions (1:1)
-        // When cellSize >= 1, vw/vh are raw cell counts — multiply by cellSize for display
-        var cw = cellSize < 1 ? vw : vw * cellSize;
-        var ch = cellSize < 1 ? vh : vh * cellSize;
+        // When serverScale > 1, server sends aggregated bitmap — vw/vh are display dimensions (1:1)
+        // When serverScale == 1, vw/vh are raw cell counts — multiply by cellSize for display
+        var cw = serverScale > 1 ? vw : vw * cellSize;
+        var ch = serverScale > 1 ? vh : vh * cellSize;
         var ox = Math.floor((canvasW - cw) / 2);
         var oy = Math.floor((canvasH - ch) / 2);
         ctx.drawImage(offCanvas, ox, oy, cw, ch);
@@ -317,7 +318,7 @@ function drawGrid(data) {
         var numBytes = (total + 7) >> 3;
 
         // At sub-pixel zoom, aggregated bitmap — each pixel is 1px on screen
-        var isAggregated = cellSize < 1;
+        var isAggregated = serverScale > 1;
         var dSize = isAggregated ? 1 : cellSize;
         var cw2 = isAggregated ? vw : vw * cellSize;
         var ch2 = isAggregated ? vh : vh * cellSize;
