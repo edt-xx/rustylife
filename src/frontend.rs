@@ -505,7 +505,10 @@ function updateLabels(vw, vh) {
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
-        l2.children[0].textContent = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
+        var zoomTxt = 'Zoom: ' + cellSize + 'px';
+        if (zoomPending > 0) zoomTxt += ' (' + zoomPending + '/' + zoomThreshold() + ')';
+        zoomTxt += ' | ' + vw + '\u00d7' + vh;
+        l2.children[0].textContent = zoomTxt;
         l2.children[1].textContent = 'Cam: ' + camX + ', ' + camY;
     }
 }
@@ -695,6 +698,29 @@ window.addEventListener('mousemove', function(e) {
 });
 
 // ---- Zoom: mouse wheel & keyboard ----
+// Deep zoom levels need multiple clicks to reach (avoid Brave renderD128 errors)
+var zoomPending = 0; // accumulated ticks for deep zoom
+
+function zoomThreshold() {
+    // How many clicks needed to zoom deeper from current position
+    if (zoomIdx < 17) return 1;  // normal: 1 click
+    if (zoomIdx === 17) return 2; // 0.125 -> 0.0625: 2 clicks
+    if (zoomIdx === 18) return 3; // 0.0625 -> 0.04167: 3 clicks
+    return 1; // already at max depth
+}
+
+function tryZoomDeeper() {
+    if (zoomIdx >= ZOOM_LEVELS.length - 1) return false; // max depth
+    var threshold = zoomThreshold();
+    zoomPending++;
+    if (zoomPending >= threshold) {
+        zoomPending = 0;
+        zoomIdx++;
+        return true;
+    }
+    return false;
+}
+
 function doZoom(oldCs) {
     // Keep center of viewport anchored in grid coords
     var vpOld = calcCells(oldCs);
@@ -710,8 +736,14 @@ function doZoom(oldCs) {
 canvas.addEventListener('wheel', function(e) {
     e.preventDefault();
     var oldCs = cellSize;
-    if (e.deltaY < 0) { zoomIdx = Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1); }
-    else { zoomIdx = Math.max(0, zoomIdx - 1); }
+    if (e.deltaY < 0) {
+        // Zoom in (deeper) -- may need multiple clicks
+        tryZoomDeeper();
+    } else {
+        // Zoom out -- always single click, clear pending
+        zoomPending = 0;
+        zoomIdx = Math.max(0, zoomIdx - 1);
+    }
     cellSize = ZOOM_LEVELS[zoomIdx];
     if (cellSize !== oldCs) doZoom(oldCs);
 
@@ -720,9 +752,12 @@ canvas.addEventListener('wheel', function(e) {
 document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
     var oldCs = cellSize;
-    if (e.key === '=' || e.key === '+') { zoomIdx = Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1); }
-    else if (e.key === '-') { zoomIdx = Math.max(0, zoomIdx - 1); }
-    else return;
+    if (e.key === '=' || e.key === '+') {
+        tryZoomDeeper();
+    } else if (e.key === '-') {
+        zoomPending = 0;
+        zoomIdx = Math.max(0, zoomIdx - 1);
+    } else return;
     cellSize = ZOOM_LEVELS[zoomIdx];
     if (cellSize !== oldCs) doZoom(oldCs);
 
