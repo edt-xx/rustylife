@@ -141,68 +141,111 @@ fn serve_state(
 
     // Lock grid for snapshot
     let mut g = grid.lock().unwrap();
-    let bits_len = (vw as usize * vh as usize + 7) / 8;
-
-    // Bits: bit-packed alive cells in viewport
-    let mut bits = vec![0u8; bits_len];
 
     let alive_count = if g.hashlife_mode {
-        // HashLife mode: populate viewport from quadtree
-        if let Some(ref hf) = g.hashlife {
-            // let (cx, cy) = hf.center();
-            // eprintln!("STATE hashlife: vx={} vy={} vw={} vh={} center=({},{})",
-            //     vx, vy, vw, vh, cx, cy);
-            hf.populate_viewport(vx, vy, vw, vh, &mut bits);
-            // // Count set bits for debugging
-            // let set_bits: usize = bits.iter().map(|b| b.count_ones() as usize).sum();
-            // eprintln!("STATE hashlife: set_bits={}", set_bits);
-        }
         if let Some(ref mut hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
     } else {
-        // Conventional mode: scan flat alive array
-        let ac = g.alive.len() as u32;
-        for &k in &g.alive {
-            let (ax, ay) = Coord::unpack(k);
-            if ax >= vx && ay >= vy {
-                let rx = ax - vx;
-                let ry = ay - vy;
-                if rx < vw && ry < vh {
-                    let idx = ry as usize * vw as usize + rx as usize;
-                    bits[idx >> 3] |= 1 << (idx & 7);
-                }
-            }
-        }
-        ac
+        g.alive.len() as u32
     };
 
-    // Overlay: only meaningful in conventional mode (active tiles)
-    let ss = crate::grid::STATIC_SIZE;
-    let mut overlay = vec![0u8; bits_len];
-    if !g.hashlife_mode {
-        for &tkey in &g.active_tiles {
-            let (tx, ty) = Coord::unpack(tkey);
-            for row in ty..(ty + ss) {
-                if row < vy || row >= vy + vh { continue; }
-                let ry = row - vy;
-                for col in tx..(tx + ss) {
-                    if col >= vx && col < vx + vw {
-                        let rx = col - vx;
+    // When scale > 1, populate aggregated bitmap directly (avoids allocating huge raw bitmap)
+    let (final_bits, final_overlay, final_vw, final_vh) = if scale > 1 {
+        let scale_usize = scale as usize;
+        let agg_w = (vw as usize + scale_usize - 1) / scale_usize;
+        let agg_h = (vh as usize + scale_usize - 1) / scale_usize;
+        let agg_len = (agg_w * agg_h + 7) / 8;
+        let mut agg_bits = vec![0u8; agg_len];
+        let mut agg_overlay = vec![0u8; agg_len];
+
+        if g.hashlife_mode {
+            // HashLife: populate aggregated bitmap directly from quadtree (no raw allocation)
+            if let Some(ref hf) = g.hashlife {
+                hf.populate_aggregated_viewport(vx, vy, vw, vh, scale, &mut agg_bits);
+            }
+        } else {
+            // Conventional: populate raw bitmap, then aggregate
+            let bits_len = (vw as usize * vh as usize + 7) / 8;
+            let mut bits = vec![0u8; bits_len];
+            for &k in &g.alive {
+                let (ax, ay) = Coord::unpack(k);
+                if ax >= vx && ay >= vy {
+                    let rx = ax - vx;
+                    let ry = ay - vy;
+                    if rx < vw && ry < vh {
                         let idx = ry as usize * vw as usize + rx as usize;
-                        overlay[idx >> 3] |= 1 << (idx & 7);
+                        bits[idx >> 3] |= 1 << (idx & 7);
+                    }
+                }
+            }
+            agg_bits = aggregate_bitmap(&bits, vw, vh, scale);
+        }
+
+        // Overlay: only meaningful in conventional mode
+        let ss = crate::grid::STATIC_SIZE;
+        if !g.hashlife_mode {
+            let bits_len = (vw as usize * vh as usize + 7) / 8;
+            let mut overlay = vec![0u8; bits_len];
+            for &tkey in &g.active_tiles {
+                let (tx, ty) = Coord::unpack(tkey);
+                for row in ty..(ty + ss) {
+                    if row < vy || row >= vy + vh { continue; }
+                    let ry = row - vy;
+                    for col in tx..(tx + ss) {
+                        if col >= vx && col < vx + vw {
+                            let rx = col - vx;
+                            let idx = ry as usize * vw as usize + rx as usize;
+                            overlay[idx >> 3] |= 1 << (idx & 7);
+                        }
+                    }
+                }
+            }
+            agg_overlay = aggregate_bitmap(&overlay, vw, vh, scale);
+        }
+
+        (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)
+    } else {
+        // scale == 1: original path
+        let bits_len = (vw as usize * vh as usize + 7) / 8;
+        let mut bits = vec![0u8; bits_len];
+
+        if g.hashlife_mode {
+            if let Some(ref hf) = g.hashlife {
+                hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+            }
+        } else {
+            for &k in &g.alive {
+                let (ax, ay) = Coord::unpack(k);
+                if ax >= vx && ay >= vy {
+                    let rx = ax - vx;
+                    let ry = ay - vy;
+                    if rx < vw && ry < vh {
+                        let idx = ry as usize * vw as usize + rx as usize;
+                        bits[idx >> 3] |= 1 << (idx & 7);
                     }
                 }
             }
         }
-    }
 
-    // Aggregate if scale > 1 (sub-pixel rendering)
-    let (final_bits, final_overlay, final_vw, final_vh) = if scale > 1 {
-        let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
-        let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
-        let agg_bits = aggregate_bitmap(&bits, vw, vh, scale);
-        let agg_overlay = aggregate_bitmap(&overlay, vw, vh, scale);
-        (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)
-    } else {
+        // Overlay: only meaningful in conventional mode
+        let ss = crate::grid::STATIC_SIZE;
+        let mut overlay = vec![0u8; bits_len];
+        if !g.hashlife_mode {
+            for &tkey in &g.active_tiles {
+                let (tx, ty) = Coord::unpack(tkey);
+                for row in ty..(ty + ss) {
+                    if row < vy || row >= vy + vh { continue; }
+                    let ry = row - vy;
+                    for col in tx..(tx + ss) {
+                        if col >= vx && col < vx + vw {
+                            let rx = col - vx;
+                            let idx = ry as usize * vw as usize + rx as usize;
+                            overlay[idx >> 3] |= 1 << (idx & 7);
+                        }
+                    }
+                }
+            }
+        }
+
         (bits, overlay, vw, vh)
     };
 

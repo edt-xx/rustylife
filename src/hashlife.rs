@@ -253,7 +253,7 @@ impl HashLifeCache {
                         stack.push(input_node);
                     }
                     // To be in n1 the entry must have been referenced in the last step and
-                    // will be keep by the tree walk above
+                    // will be kept by the tree walk 
                     //if !local_live.contains(&output_node) { 
                     //    local_live.insert(output_node);
                     //    stack.push(output_node);
@@ -1168,6 +1168,57 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
     fill_viewport(cache, node.south_east, depth - 1, ox + half, oy + half, vx, vy, vw, vh, bits);
 }
 
+/// Like fill_viewport but writes directly to an aggregated bitmap.
+/// Each raw cell (x, y) maps to aggregated pixel (aggx, aggy) = ((x-vx)/scale, (y-vy)/scale).
+fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut Vec<u8>) {
+    if node_idx == FALSE_NODE { return; }
+    let size = 1u32 << depth;
+    if ox >= vx + vw || ox + size <= vx || oy >= vy + vh || oy + size <= vy {
+        return;
+    }
+    if node_idx == TRUE_NODE {
+        let rx = ox.max(vx);
+        let ry = oy.max(vy);
+        let rx2 = (ox + size).min(vx + vw);
+        let ry2 = (oy + size).min(vy + vh);
+        // Map bounds to aggregated coordinates
+        let agg_rx = (rx - vx) / scale;
+        let agg_ry = (ry - vy) / scale;
+        let agg_rx2 = (rx2 - vx + scale - 1) / scale; // ceiling
+        let agg_ry2 = (ry2 - vy + scale - 1) / scale;
+        let agg_rx2 = agg_rx2.min(agg_w);
+        let agg_ry2 = agg_ry2.min(agg_h);
+        for aggy in agg_ry..agg_ry2 {
+            for aggx in agg_rx..agg_rx2 {
+                let aidx = (aggy * agg_w + aggx) as usize;
+                if aidx < agg.len() * 8 {
+                    agg[aidx >> 3] |= 1 << (aidx & 7);
+                }
+            }
+        }
+        return;
+    }
+    if depth == 0 {
+        if ox >= vx && oy >= vy && ox < vx + vw && oy < vy + vh {
+            let aggx = (ox - vx) / scale;
+            let aggy = (oy - vy) / scale;
+            if aggx < agg_w && aggy < agg_h {
+                let aidx = (aggy * agg_w + aggx) as usize;
+                if aidx < agg.len() * 8 {
+                    agg[aidx >> 3] |= 1 << (aidx & 7);
+                }
+            }
+        }
+        return;
+    }
+    let node = cache.get_node(node_idx);
+    let half = 1u32 << (depth - 1);
+    fill_aggregated_viewport(cache, node.north_west, depth - 1, ox, oy, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.north_east, depth - 1, ox + half, oy, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.south_west, depth - 1, ox, oy + half, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.south_east, depth - 1, ox + half, oy + half, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+}
+
 // ============================================================================
 // HashLife main struct
 // ============================================================================
@@ -1331,6 +1382,19 @@ impl HashLife {
         let origin_y = self.center.1 - (self.size() as i64 / 2);
         fill_viewport(&self.cache, self.root, self.depth,
             origin_x as u32, origin_y as u32, vx, vy, vw, vh, bits);
+    }
+
+    /// Populate an aggregated bitmap directly from the quadtree.
+    /// Each raw cell maps to aggregated pixel ((x-vx)/scale, (y-vy)/scale).
+    pub fn populate_aggregated_viewport(&self, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg: &mut Vec<u8>) {
+        let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
+        let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
+        let agg_len = (agg_w * agg_h + 7) / 8;
+        if agg.len() < agg_len { agg.resize(agg_len, 0); }
+        let origin_x = self.center.0 - (self.size() as i64 / 2);
+        let origin_y = self.center.1 - (self.size() as i64 / 2);
+        fill_aggregated_viewport(&self.cache, self.root, self.depth,
+            origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, agg);
     }
 
     pub fn get_cell(&self, x: u32, y: u32) -> bool {

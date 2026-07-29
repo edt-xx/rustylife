@@ -49,7 +49,7 @@ const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
 const step = [1,2,4,16,32,64,256,512,1024,4096,16384,65536];
 
-var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.04167]; // 1/24
+var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125]; // 1/32
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
@@ -233,6 +233,7 @@ var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
 var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0;
 var refreshSeq = 0; // sequence guard: discard stale async responses
+var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
 var tracksEnabled = false; // disabled by default, hide active overlay when on
 var hashlifeMode = false; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
@@ -416,9 +417,7 @@ function updateLabels(vw, vh) {
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
-        var zoomTxt = 'Zoom: ' + cellSize + 'px';
-        if (zoomPending > 0) zoomTxt += ' (' + zoomPending + '/' + zoomThreshold() + ')';
-        zoomTxt += ' | ' + vw + '\u00d7' + vh;
+        var zoomTxt = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
         l2.children[0].textContent = zoomTxt;
         l2.children[1].textContent = 'Cam: ' + camX + ', ' + camY;
     }
@@ -449,14 +448,25 @@ async function refresh() {
 }
 
 // Zoom refresh: doesn't touch refreshSeq so it won't cancel pending animLoop requests
+// Serial: only one active at a time. During pan, loops until panning stops.
 async function zoomRefresh() {
-    ensureCanvasSize();
-    var vp = calcCells(cellSize);
-    var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
-    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
-    var r = await fetch(url);
-    var data = await r.arrayBuffer();
-    drawGrid(data);
+    if (zoomRefreshBusy) return;
+    zoomRefreshBusy = true;
+    try {
+        while (true) {
+            ensureCanvasSize();
+            var vp = calcCells(cellSize);
+            var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
+            var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+            var r = await fetch(url);
+            var data = await r.arrayBuffer();
+            drawGrid(data);
+            // If still panning, keep refreshing with latest cam position
+            if (!panning) break;
+        }
+    } finally {
+        zoomRefreshBusy = false;
+    }
 }
 
 async function doQuit() { stopAnim(); await fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'quit'})}); }
@@ -469,6 +479,7 @@ var wasPlayingBeforePan = false; // remember playback state during pan
 // Global so play/stop functions can be called from anywhere
 var running = false;
 var lastGenCount = 0, lastTime = 0, lastGenNum = 0; // for G/s calculation
+var tracksBeforePan = false; // restore tracks after pan
 
 function stopAnim() { running = false; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
 
@@ -549,6 +560,7 @@ canvas.addEventListener('mousedown', function(e) {
         e.preventDefault();
         wasPlayingBeforePan = running;
         if (running) stopAnim();
+        tracksBeforePan = tracksEnabled; tracksEnabled = false;
         rcPending   = target;
         pStartX     = e.clientX; pStartY = e.clientY;
         camStartX   = camX;      camStartY = camY;
@@ -561,6 +573,7 @@ canvas.addEventListener('mousedown', function(e) {
         panning   = true;
         wasPlayingBeforePan = running;
         if (running) stopAnim();
+        tracksBeforePan = tracksEnabled; tracksEnabled = false;
         pStartX   = e.clientX; pStartY = e.clientY;
         camStartX = camX;      camStartY = camY;
         canvas.style.cursor = 'grabbing';
@@ -574,14 +587,25 @@ canvas.addEventListener('mousedown', function(e) {
 });
 
 window.addEventListener('mouseup', function(e) {
+    var wasPanning = panning;
     panning = false; canvas.style.cursor = 'crosshair';
 
     // Right-click released: recenter if we didn't end up panning
-    if (e.button === 2 && rcPending && !panning) {
+    if (e.button === 2 && rcPending && !wasPanning) {
         camX = rcPending.cellX - Math.floor(calcCells(cellSize).vw / 2);
        camY = rcPending.cellY - Math.floor(calcCells(cellSize).vh / 2);
         rcPending = null;
         zoomRefresh();
+    } else if (wasPanning) {
+        // Final refresh — serial loop ensures no overlap
+        zoomRefresh();
+    }
+
+    // Restore tracks state after pan/recenter (only if we saved it)
+    if (e.button === 2 || wasPanning) {
+        tracksEnabled = tracksBeforePan;
+        if (tracksEnabled) document.getElementById('tracksBtn').textContent = 'Active';
+        else document.getElementById('tracksBtn').textContent = 'Tracks';
     }
 
     // Restart playback if it was running before pan started
@@ -597,7 +621,8 @@ window.addEventListener('mousemove', function(e) {
         var dy = Math.round((e.clientY - pStartY) / cellSize);
         camX = camStartX - dx;
         camY = camStartY - dy;
-   zoomRefresh(); // fire-and-forget, gen-wait loop handles stale data
+        // zoomRefresh is serial — just trigger it, the loop inside handles rate limiting
+        zoomRefresh();
     }
     // Right-click: check if we should switch from recenter to pan (moved > 10px)
     if (rcPending && !panning) {
@@ -612,28 +637,6 @@ window.addEventListener('mousemove', function(e) {
 
 // ---- Zoom: mouse wheel & keyboard ----
 // Deep zoom levels need multiple clicks to reach (avoid Brave renderD128 errors)
-var zoomPending = 0; // accumulated ticks for deep zoom
-
-function zoomThreshold() {
-    // How many clicks needed to zoom deeper from current position
-    if (zoomIdx < 17) return 1;  // normal: 1 click
-    if (zoomIdx === 17) return 2; // 0.125 -> 0.0625: 2 clicks
-    if (zoomIdx === 18) return 3; // 0.0625 -> 0.04167: 3 clicks
-    return 1; // already at max depth
-}
-
-function tryZoomDeeper() {
-    if (zoomIdx >= ZOOM_LEVELS.length - 1) return false; // max depth
-    var threshold = zoomThreshold();
-    zoomPending++;
-    if (zoomPending >= threshold) {
-        zoomPending = 0;
-        zoomIdx++;
-        return true;
-    }
-    return false;
-}
-
 function doZoom(oldCs) {
     // Keep center of viewport anchored in grid coords
     var vpOld = calcCells(oldCs);
@@ -643,6 +646,11 @@ function doZoom(oldCs) {
     var vpNew = calcCells(cellSize);
     camX = centerX - Math.floor(vpNew.vw / 2);
     camY = centerY - Math.floor(vpNew.vh / 2);
+    // Clear prevBits so old tracks from previous zoom level don't persist
+    prevBits = null;
+    // Clear canvas immediately so old tracks don't flash
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, canvasW, canvasH);
     if (!running) zoomRefresh();
 }
 
@@ -650,11 +658,8 @@ canvas.addEventListener('wheel', function(e) {
     e.preventDefault();
     var oldCs = cellSize;
     if (e.deltaY < 0) {
-        // Zoom in (deeper) -- may need multiple clicks
-        tryZoomDeeper();
+        if (zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
     } else {
-        // Zoom out -- always single click, clear pending
-        zoomPending = 0;
         zoomIdx = Math.max(0, zoomIdx - 1);
     }
     cellSize = ZOOM_LEVELS[zoomIdx];
@@ -666,9 +671,8 @@ document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
     var oldCs = cellSize;
     if (e.key === '=' || e.key === '+') {
-        tryZoomDeeper();
+        if (zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
     } else if (e.key === '-') {
-        zoomPending = 0;
         zoomIdx = Math.max(0, zoomIdx - 1);
     } else return;
     cellSize = ZOOM_LEVELS[zoomIdx];
