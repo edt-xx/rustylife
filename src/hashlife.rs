@@ -1450,8 +1450,8 @@ impl HashLife {
         if bits.len() < bits_len { bits.resize(bits_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        // Parallelize when bitmap > 128KB and depth >= 3
-        if bits_len > 128 * 1024 && self.depth >= 3 {
+        // Parallelize when bitmap > 64KB and depth >= 3
+        if bits_len > 64 * 1024 && self.depth >= 3 {
             let node = self.cache.get_node(self.root);
             let half = 1u32 << (self.depth - 1);
             let bits_ptr = bits.as_mut_ptr() as usize;
@@ -1481,8 +1481,8 @@ impl HashLife {
         if agg.len() < agg_len { agg.resize(agg_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        // Parallelize when bitmap > 128KB and depth >= 3
-        if agg_len > 128 * 1024 && self.depth >= 3 {
+        // Parallelize when bitmap > 64KB and depth >= 3
+        if agg_len > 64 * 1024 && self.depth >= 3 {
             let node = self.cache.get_node(self.root);
             let half = 1u32 << (self.depth - 1);
             let agg_ptr = agg.as_mut_ptr() as usize;
