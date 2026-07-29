@@ -262,8 +262,8 @@ function drawGrid(data) {
     // Server-side aggregation: when cellSize < 1, the server sends an already-aggregated bitmap.
     // vw/vh in the header are the aggregated dimensions. Just render normally.
     // Decide: full redraw (viewport/zoom changed or first call) vs delta update
-    // At sub-pixel zoom, server sends aggregated bitmap — always full redraw (small enough)
-    var needsFullRedraw = (cellSize < 1) || (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
+    // At sub-pixel zoom, server sends aggregated bitmap — delta works fine (1px fillRect)
+    var needsFullRedraw = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
 
     // Only resize offCanvas when needed — setting .width/.height clears it!
     if (offCanvas.width !== vw || offCanvas.height !== vh) {
@@ -316,7 +316,11 @@ function drawGrid(data) {
         var total = vw * vh;
         var numBytes = (total + 7) >> 3;
 
-        var cw2 = vw * cellSize, ch2 = vh * cellSize;
+        // At sub-pixel zoom, aggregated bitmap — each pixel is 1px on screen
+        var isAggregated = cellSize < 1;
+        var dSize = isAggregated ? 1 : cellSize;
+        var cw2 = isAggregated ? vw : vw * cellSize;
+        var ch2 = isAggregated ? vh : vh * cellSize;
         var ox2 = Math.floor((canvasW - cw2) / 2);
         var oy2 = Math.floor((canvasH - ch2) / 2);
 
@@ -352,12 +356,12 @@ function drawGrid(data) {
              var di = deadCells[i+1] * vw + deadCells[i];
             if (tracksEnabled && camX === prevCamX && camY === prevCamY) ctx.fillStyle = '#3a3a5a'; // track color only on static frames, not pan
             else ctx.fillStyle = (overlay.length > 0 && ((overlay[di >>> 3] >> (di & 7)) & 1)) ? '#22223a' : '#1a1a2e';
-            ctx.fillRect(ox2 + deadCells[i]*cellSize, oy2 + deadCells[i+1]*cellSize, cellSize, cellSize);
+            ctx.fillRect(ox2 + deadCells[i]*dSize, oy2 + deadCells[i+1]*dSize, dSize, dSize);
         }
 
         ctx.fillStyle = '#e94560';
         for (var i = 0; i < aliveCells.length; i += 2)
-            ctx.fillRect(ox2 + aliveCells[i] * cellSize, oy2 + aliveCells[i+1] * cellSize, cellSize, cellSize);
+            ctx.fillRect(ox2 + aliveCells[i] * dSize, oy2 + aliveCells[i+1] * dSize, dSize, dSize);
 
         // Redraw background cells whose tile status changed (overlay update) — skip when tracks on
         if (!tracksEnabled && prevOverlay !== null && overlay.length > 0) {
@@ -381,10 +385,10 @@ function drawGrid(data) {
             }
             ctx.fillStyle = '#22223a';
             for (var i = 0; i < bgLight.length; i += 2)
-                ctx.fillRect(ox2 + bgLight[i]*cellSize, oy2 + bgLight[i+1]*cellSize, cellSize, cellSize);
+                ctx.fillRect(ox2 + bgLight[i]*dSize, oy2 + bgLight[i+1]*dSize, dSize, dSize);
             ctx.fillStyle = '#1a1a2e';
             for (var i = 0; i < bgDark.length; i += 2)
-                ctx.fillRect(ox2 + bgDark[i]*cellSize, oy2 + bgDark[i+1]*cellSize, cellSize, cellSize);
+                ctx.fillRect(ox2 + bgDark[i]*dSize, oy2 + bgDark[i+1]*dSize, dSize, dSize);
         }
     }
 
