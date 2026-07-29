@@ -769,12 +769,12 @@ fn advance_fast(cache: &mut HashLifeCache,
     let bl = cache.find_or_create(n10, n11, n20, n21);
     let br = cache.find_or_create(n11, n12, n21, n22);
 
-    let topLeft = advance_fast(cache, tl, level - 1);
-    let topRight = advance_fast(cache, tr, level - 1);
-    let bottomLeft = advance_fast(cache, bl, level - 1);
-    let bottomRight = advance_fast(cache, br, level - 1);
+    let top_left = advance_fast(cache, tl, level - 1);
+    let top_right = advance_fast(cache, tr, level - 1);
+    let bottom_left = advance_fast(cache, bl, level - 1);
+    let bottom_right = advance_fast(cache, br, level - 1);
 
-    let result = cache.find_or_create(topLeft, topRight, bottomLeft, bottomRight);
+    let result = cache.find_or_create(top_left, top_right, bottom_left, bottom_right);
     cache.fast_cache_n1.insert(fkey, result);
     result
 }

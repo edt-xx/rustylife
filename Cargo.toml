@@ -21,6 +21,3 @@ sysinfo = "0.37"
 jemallocator = "0.5.4"
 ahash = "0.8"
 
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
