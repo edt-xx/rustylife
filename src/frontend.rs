@@ -381,16 +381,30 @@ function drawGrid(data) {
     }
 
     if (needsFullRedraw) {
-        // Full redraw: create fresh ImageData, fill all pixels, paint entire canvas
+        // Full redraw: iterate per-byte (8x fewer loop iterations)
         imgData = offCtx.createImageData(vw, vh);
         var px = imgData.data;
-        for (var i = 0; i < vw * vh; i++) {
-            var alive = (bits[i >>> 3] >> (i & 7)) & 1;
-            var p = i * 4;
-            if (alive) { px[p]=233; px[p+1]=69; px[p+2]=96; }                    // always pink
-            else if (tracksEnabled) { px[p]=26; px[p+1]=26; px[p+2]=46; }      // tracks mode = dark bg (no overlay)
-            else { var inAct = overlay.length > 0 && ((overlay[i>>>3]>>(i&7))&1); if(inAct){px[p]=34;px[p+1]=34;px[p+2]=58;}else{px[p]=26;px[p+1]=26;px[p+2]=46;} }
-            px[p+3] = 255;
+        var total = vw * vh;
+        var bitsLen = (total + 7) >> 3;
+        var hasOverlay = overlay.length > 0 && !tracksEnabled;
+
+        for (var b = 0; b < bitsLen; b++) {
+            var bitMask = bits[b];
+            var overlayMask = hasOverlay ? overlay[b] : 0;
+            var startIdx = b << 3;
+            for (var bit = 0; bit < 8; bit++) {
+                var idx = startIdx + bit;
+                if (idx >= total) break;
+                var p = idx * 4;
+                if (bitMask & (1 << bit)) {
+                    px[p]=233; px[p+1]=69; px[p+2]=96;
+                } else if (hasOverlay && (overlayMask & (1 << bit))) {
+                    px[p]=34; px[p+1]=34; px[p+2]=58;
+                } else {
+                    px[p]=26; px[p+1]=26; px[p+2]=46;
+                }
+                px[p+3] = 255;
+            }
         }
         ctx.fillStyle = '#1a1a2e';
         ctx.fillRect(0, 0, canvasW, canvasH);
