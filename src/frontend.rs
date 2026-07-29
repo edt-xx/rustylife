@@ -251,6 +251,10 @@ function drawGrid(data) {
     var tiles   = hdr.getUint32(36, false);
     var serverScale = hdr.getUint32(40, false);
 
+    // Discard stale response if server scale doesn't match expected
+    var expectedScale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
+    if (serverScale !== expectedScale) return;
+
     // Set globals for updateLabels()
     lblGen = gen; lblPop = pop; lblActive = active;
     lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
@@ -436,7 +440,7 @@ async function refresh() {
         var r = await fetch(url);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
         if (seq !== refreshSeq) return;   // stale response, discard
-        var hdr = new DataView(data, 0, 40);
+        var hdr = new DataView(data, 0, 44);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen) {
             drawGrid(data);

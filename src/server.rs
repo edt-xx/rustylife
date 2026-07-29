@@ -267,7 +267,6 @@ fn serve_state(
     data.extend((final_overlay.len() as u32).to_be_bytes());
     data.extend(g.births.to_be_bytes());
     data.extend(g.deaths.to_be_bytes());
-    data.extend(scale.to_be_bytes());
     if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {
             data.extend(hf.last_cache_size.to_be_bytes());
@@ -280,6 +279,7 @@ fn serve_state(
         data.extend(g.heap.to_be_bytes());
         data.extend((g.active_tiles.len() as u32).to_be_bytes());
     }
+    data.extend(scale.to_be_bytes());
 
     data.extend(final_bits);
     data.extend(final_overlay);
