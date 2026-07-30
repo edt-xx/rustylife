@@ -100,8 +100,14 @@ function parseRLE(text) {
     var x = 0, y = 0;
     var count = '';
 
-    // Strip comments (lines starting with #) and whitespace
-    text = text.replace(/#.*$/gm, '').replace(/\s/g, '');
+    // Strip comments (lines starting with #)
+    text = text.replace(/#.*$/gm, '');
+    // Strip RLE header lines (x = ..., y = ..., rule = ...) before removing whitespace
+    text = text.replace(/^[xy]\s*=\s*.*/gm, '');
+    // Strip the rule= part if it appears on the same line as x/y
+    text = text.replace(/,\s*rule\s*=\s*[^,]*/gi, '');
+    // Remove all whitespace
+    text = text.replace(/\s/g, '');
 
     for (var i = 0; i < text.length; i++) {
         var c = text[i];
