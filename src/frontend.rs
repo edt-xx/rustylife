@@ -761,8 +761,29 @@ document.addEventListener('DOMContentLoaded', async function() {
         document.getElementById('fileInput').click();
     });
 
+    // Extract rule from RLE header. Returns null if no rule specified (OK — default B3/S23).
+    // Returns the rule string if present.
+    function extractRule(text) {
+        var lines = text.split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            // RLE rule can be: "rule = B3/S23" or in a comment line
+            var m = line.match(/rule\s*=\s*(\S+)/i);
+            if (m) return m[1];
+        }
+        return null;
+    }
+
     // Shared pattern loader — used by both file load and paste
     async function loadPattern(text, isMc) {
+        // Check rule for RLE patterns (skip for .mc — no rule concept)
+        if (!isMc) {
+            var rule = extractRule(text);
+            if (rule && rule.toUpperCase() !== 'B3/S23') {
+                alert('Pattern uses rule ' + rule + '. This simulator only supports B3/S23.');
+                return;
+            }
+        }
         stopAnim();
         await call({action:'clear'});
         var cells;
