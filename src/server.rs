@@ -33,6 +33,7 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
             ("POST", "/action") => handle_action(&grid, &mut request),
             ("POST", "/toggle") => handle_toggle(&grid, &mut request),
             ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
+            ("GET", "/export-pattern") => handle_export_pattern(&grid),
             _ => serve_404(),
         };
 
@@ -354,6 +355,98 @@ fn handle_action(
     }
 
     serve_json(r#"{"ok":true}"#)
+}
+
+fn handle_export_pattern(
+    grid: &Arc<Mutex<Grid>>,
+) -> Response<Cursor<Vec<u8>>> {
+    let g = grid.lock().unwrap();
+
+    // Collect alive cells
+    let cells: Vec<(u32, u32)> = if g.hashlife_mode {
+        if let Some(ref hf) = g.hashlife {
+            hf.to_flat().iter().map(|&p| Coord::unpack(p)).collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        g.alive.iter().map(|&k| Coord::unpack(k)).collect()
+    };
+
+    let rle = export_rle(&cells);
+    serve_text(&rle)
+}
+
+/// Export cells to RLE format
+fn export_rle(cells: &[(u32, u32)]) -> String {
+    if cells.is_empty() {
+        return "b!".to_string();
+    }
+
+    // Find bounds
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0, u32::MAX, 0);
+    for &(x, y) in cells {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+    }
+
+    // Build a set for O(1) lookup
+    let alive: std::collections::HashSet<(u32, u32)> = cells.iter().copied().collect();
+
+    // Encode header
+    let mut out = String::new();
+    let width = max_x - min_x + 1;
+    let height = max_y - min_y + 1;
+    out.push_str(&format!("x = {}, y = {}, rule = B3/S23\n", width, height));
+
+    // Encode row by row
+    let mut x = min_x;
+    let mut y = min_y;
+    let mut run_len = 0;
+    let mut run_alive = alive.contains(&(min_x, min_y));
+
+    while y <= max_y {
+        while x <= max_x {
+            let is_alive = alive.contains(&(x, y));
+            if is_alive == run_alive {
+                run_len += 1;
+            } else {
+                // Flush current run
+                if run_len > 0 {
+                    if run_len > 1 { out.push_str(&run_len.to_string()); }
+                    out.push(if run_alive { 'o' } else { 'b' });
+                }
+                run_len = 1;
+                run_alive = is_alive;
+            }
+            x += 1;
+        }
+        // Flush remaining run for this row
+        if run_len > 0 {
+            if run_len > 1 { out.push_str(&run_len.to_string()); }
+            out.push(if run_alive { 'o' } else { 'b' });
+            run_len = 0;
+        }
+        out.push('$');
+        y += 1;
+        x = min_x;
+    }
+
+    out.push('!');
+    out
+}
+
+fn serve_text(body: &str) -> Response<Cursor<Vec<u8>>> {
+    let header = Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap();
+    Response::new(
+        StatusCode(200),
+        vec![header],
+        Cursor::new(body.as_bytes().to_vec()),
+        Some(body.len()),
+        None,
+    )
 }
 
 fn handle_toggle(

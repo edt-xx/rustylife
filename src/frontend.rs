@@ -885,8 +885,15 @@ document.addEventListener('DOMContentLoaded', async function() {
         e.target.value = '';
         document.getElementById('pasteArea').focus();
     });
-    document.getElementById('pasteCopyBtn').addEventListener('click', function() {
-        alert('Copy will export current pattern to paste area. Coming soon.');
+    document.getElementById('pasteCopyBtn').addEventListener('click', async function() {
+        try {
+            var resp = await fetch('/export-pattern');
+            var text = await resp.text();
+            document.getElementById('pasteArea').value = text;
+            document.getElementById('pasteArea').focus();
+        } catch (e) {
+            alert('Export failed: ' + e.message);
+        }
     });
     document.getElementById('pasteCancelBtn').addEventListener('click', function() {
         document.getElementById('pasteModal').classList.remove('active');
