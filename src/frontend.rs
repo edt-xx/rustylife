@@ -847,9 +847,25 @@ document.addEventListener('DOMContentLoaded', async function() {
         document.getElementById('pasteArea').value = '';
         document.getElementById('pasteArea').focus();
     });
-    document.getElementById('pasteSaveBtn').addEventListener('click', function() {
+    document.getElementById('pasteSaveBtn').addEventListener('click', async function() {
         var text = document.getElementById('pasteArea').value.trim();
         if (!text) return;
+        // Try File System Access API (Chromium browsers) — shows native save dialog
+        if (window.showSaveFilePicker) {
+            try {
+                var handle = await window.showSaveFilePicker({
+                    suggestedName: 'pattern.rle',
+                    types: [{description: 'RLE/LIF/MC pattern', accept: {'text/plain': ['.rle', '.lif', '.mc']}}]
+                });
+                var writable = await handle.createWritable();
+                await writable.write(text);
+                await writable.close();
+                return;
+            } catch (e) {
+                if (e.name !== 'AbortError') console.warn('Save failed:', e);
+            }
+        }
+        // Fallback: Blob download (Firefox, Safari)
         var blob = new Blob([text], {type: 'text/plain'});
         var a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
