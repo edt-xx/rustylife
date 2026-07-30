@@ -897,7 +897,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
     document.getElementById('pasteCancelBtn').addEventListener('click', function() {
         document.getElementById('pasteModal').classList.remove('active');
-        document.getElementById('pasteArea').value = '';
     });
     document.getElementById('pasteOkBtn').addEventListener('click', async function() {
         var text = document.getElementById('pasteArea').value.trim();
