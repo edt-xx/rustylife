@@ -861,15 +861,21 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('pasteSaveBtn').addEventListener('click', async function() {
         var text = document.getElementById('pasteArea').value.trim();
         if (!text) return;
+        // Detect format for filename extension
+        var ext = 'rle';
+        if (text.includes('[M2]')) ext = 'mc';
+        else if (text.includes('@')) ext = 'lif';
+        var filename = 'pattern.' + ext;
+        var blob = new Blob([text], {type: 'text/plain'});
         // Try File System Access API (Chromium browsers) — shows native save dialog
         if (window.showSaveFilePicker) {
             try {
                 var handle = await window.showSaveFilePicker({
-                    suggestedName: 'pattern.rle',
-                    types: [{description: 'RLE/LIF/MC pattern', accept: {'text/plain': ['.rle', '.lif', '.mc']}}]
+                    suggestedName: filename,
+                    types: [{description: 'Pattern file', accept: {'text/plain': ['.rle', '.lif', '.mc']}}]
                 });
                 var writable = await handle.createWritable();
-                await writable.write(text);
+                await writable.write(blob);
                 await writable.close();
                 return;
             } catch (e) {
@@ -877,11 +883,12 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         }
         // Fallback: Blob download (Firefox, Safari)
-        var blob = new Blob([text], {type: 'text/plain'});
         var a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
-        a.download = 'pattern.rle';
+        a.download = filename;
+        document.body.appendChild(a);
         a.click();
+        a.remove();
         URL.revokeObjectURL(a.href);
     });
     document.getElementById('pasteReadBtn').addEventListener('click', function() {
