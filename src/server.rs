@@ -373,8 +373,18 @@ fn handle_export_pattern(
         g.alive.iter().map(|&k| Coord::unpack(k)).collect()
     };
 
-    let rle = export_rle(&cells);
-    serve_text(&rle)
+    // Use MC format for large patterns, RLE for small ones
+    let text = if g.hashlife_mode && cells.len() > 5000 {
+        if let Some(ref hf) = g.hashlife {
+            hf.export_mc()
+        } else {
+            export_rle(&cells)
+        }
+    } else {
+        export_rle(&cells)
+    };
+
+    serve_text(&text)
 }
 
 /// Export cells to RLE format

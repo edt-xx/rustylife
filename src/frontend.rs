@@ -141,11 +141,18 @@ function parseMacrocell(text) {
         return null; // not a macrocell file
     }
 
-    // Parse header — skip comment lines
+    // Parse header — skip comment lines, extract origin if present
     var lineIdx = 1;
+    var originX = null, originY = null;
     while (lineIdx < lines.length) {
         var line = lines[lineIdx].trim();
-        if (line === '' || line.startsWith('#')) { lineIdx++; continue; }
+        if (line === '') { lineIdx++; continue; }
+        if (line.startsWith('#')) {
+            // Check for origin offset comment
+            var m = line.match(/origin\s*=\s*(-?\d+)\s+(-?\d+)/);
+            if (m) { originX = parseInt(m[1]); originY = parseInt(m[2]); }
+            lineIdx++; continue;
+        }
         break;
     }
 
@@ -226,9 +233,11 @@ function parseMacrocell(text) {
     var rootNode = nodes[rootNum];
     var rootLevel = rootNode.type === 'leaf' ? 3 : rootNode.level;
     var rootSize = Math.pow(2, rootLevel);
-    // Convention: SE child upper-left is (0, 1), so NW upper-left is (-rootSize, -rootSize + 1)
-    var originX = -rootSize;
-    var originY = -rootSize + 1;
+    // Use explicit origin if present, otherwise fall back to Golly convention
+    if (originX === null) {
+        originX = -rootSize;
+        originY = -rootSize + 1;
+    }
     expandNode(rootNum, originX, originY, rootSize);
 
     return cells;

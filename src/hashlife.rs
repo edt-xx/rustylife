@@ -1039,6 +1039,47 @@ fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: u32, old_cache: &HashLif
     new_cache.find_or_create(nw, ne, sw, se)
 }
 
+/// Export a tree node to MC format — child-first ordering
+/// Returns the node ID assigned to this node
+fn export_mc_node(cache: &HashLifeCache, node_idx: u32, depth: u32, counter: &mut u32, out: &mut String, leaf_depth: u32) -> u32 {
+    // FALSE_NODE and TRUE_NODE are static — don't emit them
+    if node_idx == FALSE_NODE || node_idx == TRUE_NODE {
+        return node_idx;
+    }
+
+    // Leaf node at leaf_depth (8x8 grid)
+    if depth <= leaf_depth {
+        *counter += 1;
+        let id = *counter;
+        // Emit 8x8 grid — one line per node, newline at end
+        let size = 1u32 << depth;
+        for y in 0..8 {
+            for x in 0..8 {
+                let gx = if size > 0 { x / (8 / size) } else { x };
+                let gy = if size > 0 { y / (8 / size) } else { y };
+                let alive = get_cell_at(cache, node_idx, depth, gx, gy);
+                out.push(if alive { '*' } else { '.' });
+            }
+            out.push('$');
+        }
+        out.push('\n');
+        return id;
+    }
+
+    // Non-leaf node — emit children first (child-first ordering)
+    let node = cache.get_node(node_idx);
+    let nw_id = export_mc_node(cache, node.north_west, depth - 1, counter, out, leaf_depth);
+    let ne_id = export_mc_node(cache, node.north_east, depth - 1, counter, out, leaf_depth);
+    let sw_id = export_mc_node(cache, node.south_west, depth - 1, counter, out, leaf_depth);
+    let se_id = export_mc_node(cache, node.south_east, depth - 1, counter, out, leaf_depth);
+
+    // Now emit this node
+    *counter += 1;
+    let id = *counter;
+    out.push_str(&format!("{} {} {} {} {}\n", depth, nw_id, ne_id, sw_id, se_id));
+    id
+}
+
 fn collect_alive(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, result: &mut Vec<u64>) {
     if node_idx == FALSE_NODE { return; }
     if node_idx == TRUE_NODE {
@@ -1441,6 +1482,30 @@ impl HashLife {
         let origin_y = self.center.1 - (self.size() as i64 / 2);
         collect_alive(&self.cache, self.root, self.depth, origin_x as u32, origin_y as u32, &mut result);
         result
+    }
+
+    /// Export tree to MC (macrocell) format — child-first quadtree
+    pub fn export_mc(&self) -> String {
+        let mut out = String::new();
+        out.push_str("[M2]\n");
+
+        if self.root == FALSE_NODE || self.depth == 0 {
+            out.push_str("Cells=0\n");
+            return out;
+        }
+
+        let mut node_counter: u32 = 0;
+        let pop = self.to_flat().len();
+        out.push_str(&format!("Cells={}\n", pop));
+
+        // Emit origin (0,0) — loadPattern handles centering via anchor offset
+        out.push_str("# origin = 0 0\n");
+
+        // Child-first traversal: children first, then parent
+        let root_id = export_mc_node(&self.cache, self.root, self.depth, &mut node_counter, &mut out, 3);
+        out.push_str(&format!("# root = {}\n", root_id));
+
+        out
     }
 
     pub fn size(&self) -> usize { 1usize << self.depth }
