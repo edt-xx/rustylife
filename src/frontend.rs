@@ -37,8 +37,9 @@ input[type=range]{width:100px;vertical-align:middle}
   <div class="modal-content">
     <textarea id="pasteArea" placeholder="Paste .lif, .rle, or .mc pattern here..."></textarea>
     <div class="modal-buttons">
-      <button id="pasteCancelBtn">Cancel</button>
       <button id="pasteOkBtn">Paste</button>
+      <button id="pasteClearBtn">Clear</button>
+      <button id="pasteCancelBtn">Cancel</button>
     </div>
   </div>
 </div>
@@ -832,6 +833,10 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Paste modal
     document.getElementById('pasteBtn').addEventListener('click', function() {
         document.getElementById('pasteModal').classList.add('active');
+        document.getElementById('pasteArea').focus();
+    });
+    document.getElementById('pasteClearBtn').addEventListener('click', function() {
+        document.getElementById('pasteArea').value = '';
         document.getElementById('pasteArea').focus();
     });
     document.getElementById('pasteCancelBtn').addEventListener('click', function() {
