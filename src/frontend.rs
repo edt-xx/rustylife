@@ -36,8 +36,10 @@ input[type=range]{width:100px;vertical-align:middle}
 <div id="pasteModal">
   <div class="modal-content">
     <textarea id="pasteArea" placeholder="Paste .lif, .rle, or .mc pattern here..."></textarea>
+    <input type="file" id="readFileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
     <div class="modal-buttons">
       <button id="pasteSaveBtn">Save</button>
+      <button id="pasteReadBtn">Read</button>
       <button id="pasteCopyBtn">Copy</button>
       <button id="pasteOkBtn">Paste</button>
       <button id="pasteClearBtn">Clear</button>
@@ -872,6 +874,16 @@ document.addEventListener('DOMContentLoaded', async function() {
         a.download = 'pattern.rle';
         a.click();
         URL.revokeObjectURL(a.href);
+    });
+    document.getElementById('pasteReadBtn').addEventListener('click', function() {
+        document.getElementById('readFileInput').click();
+    });
+    document.getElementById('readFileInput').addEventListener('change', async function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        document.getElementById('pasteArea').value = await file.text();
+        e.target.value = '';
+        document.getElementById('pasteArea').focus();
     });
     document.getElementById('pasteCopyBtn').addEventListener('click', function() {
         alert('Copy will export current pattern to paste area. Coming soon.');
