@@ -37,6 +37,8 @@ input[type=range]{width:100px;vertical-align:middle}
   <div class="modal-content">
     <textarea id="pasteArea" placeholder="Paste .lif, .rle, or .mc pattern here..."></textarea>
     <div class="modal-buttons">
+      <button id="pasteSaveBtn">Save</button>
+      <button id="pasteCopyBtn">Copy</button>
       <button id="pasteOkBtn">Paste</button>
       <button id="pasteClearBtn">Clear</button>
       <button id="pasteCancelBtn">Cancel</button>
@@ -844,6 +846,19 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('pasteClearBtn').addEventListener('click', function() {
         document.getElementById('pasteArea').value = '';
         document.getElementById('pasteArea').focus();
+    });
+    document.getElementById('pasteSaveBtn').addEventListener('click', function() {
+        var text = document.getElementById('pasteArea').value.trim();
+        if (!text) return;
+        var blob = new Blob([text], {type: 'text/plain'});
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'pattern.rle';
+        a.click();
+        URL.revokeObjectURL(a.href);
+    });
+    document.getElementById('pasteCopyBtn').addEventListener('click', function() {
+        alert('Copy will export current pattern to paste area. Coming soon.');
     });
     document.getElementById('pasteCancelBtn').addEventListener('click', function() {
         document.getElementById('pasteModal').classList.remove('active');
