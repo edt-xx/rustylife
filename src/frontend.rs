@@ -12,6 +12,11 @@ button:hover{background:#e94560;color:#1a1a2e}
 input[type=range]{width:100px;vertical-align:middle}
 .info{font-size:12px;color:#888;margin-left:4px}
 #topInfo{position:absolute;top:8px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
+#pasteModal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center}
+#pasteModal.active{display:flex}
+#pasteModal .modal-content{background:#16213e;border:2px solid #e94560;border-radius:6px;padding:16px;width:80%;max-width:700px;height:70vh;display:flex;flex-direction:column;gap:8px}
+#pasteModal textarea{flex:1;background:#1a1a2e;color:#e94560;border:1px solid #e94560;border-radius:3px;padding:8px;font-family:monospace;font-size:12px;resize:none}
+#pasteModal .modal-buttons{display:flex;gap:8px;justify-content:flex-end}
 </style></head><body>
 <div id="topInfo">
   <div id="infoLine1">
@@ -28,6 +33,15 @@ input[type=range]{width:100px;vertical-align:middle}
   </div>
 </div>
 <div id="viewport"><canvas id="main"></canvas></div>
+<div id="pasteModal">
+  <div class="modal-content">
+    <textarea id="pasteArea" placeholder="Paste .lif, .rle, or .mc pattern here..."></textarea>
+    <div class="modal-buttons">
+      <button id="pasteCancelBtn">Cancel</button>
+      <button id="pasteOkBtn">Paste</button>
+    </div>
+  </div>
+</div>
 <div class="toolbar">
   <button id="playBtn">&#9654; Play</button>
   <button id="stepBtn">Step</button>
@@ -38,6 +52,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="randBtn">Randomize</button>
   <button id="clearBtn">Clear</button>
   <button id="loadBtn">Load</button>
+  <button id="pasteBtn">Paste</button>
   <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
   <button id="tracksBtn">Tracks</button>
   <button id="hashlifeBtn">Classic</button>
@@ -745,18 +760,14 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('loadBtn').addEventListener('click', function() {
         document.getElementById('fileInput').click();
     });
-    document.getElementById('fileInput').addEventListener('change', async function(e) {
-        var file = e.target.files[0];
-        if (!file) return;
+
+    // Shared pattern loader — used by both file load and paste
+    async function loadPattern(text, isMc) {
         stopAnim();
-        await call({action:'clear'});  // clear board before loading
-        var text = await file.text();
-        var isMc = file.name.endsWith('.mc');
+        await call({action:'clear'});
         var cells;
         if (isMc) {
             cells = parseMacrocell(text);
-            // .mc cells have absolute coords (can be negative). Add center of coord space
-            // so server (cx + anchor) as u32 doesn't wrap negative values to huge numbers.
             var coordCenter = 2000000000;
             for (var i = 0; i < cells.length; i++) {
                 cells[i][0] += coordCenter;
@@ -767,8 +778,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         var centerX = camX + Math.floor(calcCells(cellSize).vw / 2);
         var centerY = camY + Math.floor(calcCells(cellSize).vh / 2);
-        // For .mc: cells already shifted to ~2B range; compute offset to center on viewport
-        // For .lif: cells are relative (0,0 top-left); anchor = centerX centers them
         var anchorX, anchorY;
         if (isMc) {
             var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -786,9 +795,34 @@ document.addEventListener('DOMContentLoaded', async function() {
             anchorX = centerX;
             anchorY = centerY;
         }
-       await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: anchorX, anchor_y: anchorY})});
+        await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: anchorX, anchor_y: anchorY})});
         zoomRefresh();
+    }
+
+    document.getElementById('fileInput').addEventListener('change', async function(e) {
+        var file = e.target.files[0];
+        if (!file) return;
+        var text = await file.text();
+        var isMc = file.name.endsWith('.mc');
+        await loadPattern(text, isMc);
         e.target.value = ''; // allow re-selecting same file
+    });
+
+    // Paste modal
+    document.getElementById('pasteBtn').addEventListener('click', function() {
+        document.getElementById('pasteModal').classList.add('active');
+        document.getElementById('pasteArea').focus();
+    });
+    document.getElementById('pasteCancelBtn').addEventListener('click', function() {
+        document.getElementById('pasteModal').classList.remove('active');
+        document.getElementById('pasteArea').value = '';
+    });
+    document.getElementById('pasteOkBtn').addEventListener('click', async function() {
+        var text = document.getElementById('pasteArea').value.trim();
+        if (!text) { document.getElementById('pasteModal').classList.remove('active'); return; }
+        document.getElementById('pasteModal').classList.remove('active');
+        var isMc = text.includes('cells=') || text.includes('Cells=');
+        await loadPattern(text, isMc);
     });
 
  // Update step value display when slider changes
