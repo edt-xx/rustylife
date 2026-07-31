@@ -909,30 +909,39 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     result
 }
 
-/// Fetch 64 sub-segments (8x8 grid) from a node
+/// Fetch 64 sub-segments (8x8 grid) from a node.
+/// Top-down recursive descent: visits each parent once, fans out to children.
+/// ~21 node lookups vs 192 with the old per-segment approach.
 fn fetch_segments(cache: &HashLifeCache, node_idx: u32) -> [u32; 64] {
     let mut segments = [FALSE_NODE; 64];
-    let fetch = |x: u32, y: u32| -> u32 {
-        let mut current = node_idx;
-        for bit in (0..3).rev() {
-            if current == FALSE_NODE { break; }
-            if current == TRUE_NODE { break; }
-            let east = (x >> bit) & 1 == 1;
-            let south = (y >> bit) & 1 == 1;
-            let node = cache.get_node(current);
-            current = if south {
-                if east { node.south_east } else { node.south_west }
-            } else {
-                if east { node.north_east } else { node.north_west }
-            };
+    fn fill(
+        cache: &HashLifeCache, node_idx: u32, level: u32,
+        row: usize, col: usize, step: usize, seg: &mut [u32; 64],
+    ) {
+        if level == 0 || node_idx == FALSE_NODE {
+            for dy in 0..step {
+                for dx in 0..step {
+                    seg[(row + dy) * 8 + (col + dx)] = node_idx;
+                }
+            }
+            return;
         }
-        current
-    };
-    for y in 0..8u32 {
-        for x in 0..8u32 {
-            segments[(y * 8 + x) as usize] = fetch(x, y);
+        if node_idx == TRUE_NODE {
+            for dy in 0..step {
+                for dx in 0..step {
+                    seg[(row + dy) * 8 + (col + dx)] = TRUE_NODE;
+                }
+            }
+            return;
         }
+        let node = cache.get_node(node_idx);
+        let half = step / 2;
+        fill(cache, node.north_west, level - 1, row, col, half, seg);
+        fill(cache, node.north_east, level - 1, row, col + half, half, seg);
+        fill(cache, node.south_west, level - 1, row + half, col, half, seg);
+        fill(cache, node.south_east, level - 1, row + half, col + half, half, seg);
     }
+    fill(cache, node_idx, 3, 0, 0, 8, &mut segments);
     segments
 }
 
