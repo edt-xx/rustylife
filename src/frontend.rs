@@ -581,21 +581,28 @@ async function animLoop() {
 canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
 // Helper: map click coords to grid cell
-function clickToGrid(e) {
+// If clamp=true, clicks outside viewport map to nearest edge cell (for right-click center)
+function clickToGrid(e, clamp) {
     var rect = canvas.getBoundingClientRect();
-    var scaleX = canvas.width / (rect.right - rect.left);
-    var scaleY = canvas.height / (rect.bottom - rect.top);
-    var mx = ((e.clientX - rect.left)) * scaleX;
-    var my = ((e.clientY - rect.top))  * scaleY;
+    // Work in CSS pixels — cellSize and frame size are all CSS pixels
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
 
     var vp = calcCells(cellSize);
     var cw = vp.vw * cellSize;
     var ch = vp.vh * cellSize;
-    var ox = Math.floor((canvas.width  - cw) / 2);
-    var oy = Math.floor((canvas.height - ch) / 2);
+    var ox = Math.floor((canvasW - cw) / 2);
+    var oy = Math.floor((canvasH - ch) / 2);
     mx -= ox; my -= oy;
 
-    if (mx < 0 || my < 0 || mx >= cw || my >= ch) return null;
+    if (mx < 0 || my < 0 || mx >= cw || my >= ch) {
+        if (clamp) {
+            mx = Math.max(0, Math.min(cw - cellSize, mx));
+            my = Math.max(0, Math.min(ch - cellSize, my));
+        } else {
+            return null;
+        }
+    }
 
     return { cellX: Math.floor(mx / cellSize) + camX, cellY: Math.floor(my / cellSize) + camY };
 }
