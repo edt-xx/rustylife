@@ -753,7 +753,7 @@ window.addEventListener('mousemove', function(e) {
         // Armed — accumulate delta for zoom steps
         zoomDragDelta += e.clientY - zoomDragStartY;
         zoomDragStartY = e.clientY;
-        var steps = Math.floor(Math.abs(zoomDragDelta) / 30);
+        var steps = Math.floor(Math.abs(zoomDragDelta) / 60);
         if (steps >= 1) {
             var oldCs = cellSize;
             var dir = zoomDragDelta > 0 ? 1 : -1; // down = zoom in, up = zoom out
@@ -762,7 +762,7 @@ window.addEventListener('mousemove', function(e) {
                 else if (dir < 0) zoomIdx = Math.max(0, zoomIdx - 1);
             }
             cellSize = ZOOM_LEVELS[zoomIdx];
-            zoomDragDelta %= 30;
+            zoomDragDelta %= 60;
             if (cellSize !== oldCs) doZoom(oldCs);
         }
         return;
@@ -825,10 +825,14 @@ function doZoom(oldCs) {
     if (!running) zoomRefresh();
 }
 
+var lastWheelZoomTime = 0; // throttle: one zoom step per 100ms
 document.addEventListener('wheel', function(e) {
     // Don't zoom when scrolling in inputs/textarea/modal
     if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.closest('#pasteModal')) return;
     e.preventDefault();
+    // Throttle: only accept one zoom step per 100ms
+    var now = performance.now();
+    if (now - lastWheelZoomTime < 100) return;
     var oldCs = cellSize;
     if (e.deltaY < 0) {
         if (zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
@@ -836,7 +840,7 @@ document.addEventListener('wheel', function(e) {
         zoomIdx = Math.max(0, zoomIdx - 1);
     }
     cellSize = ZOOM_LEVELS[zoomIdx];
-    if (cellSize !== oldCs) doZoom(oldCs);
+    if (cellSize !== oldCs) { doZoom(oldCs); lastWheelZoomTime = now; }
 }, {passive: false});
 
 document.addEventListener('keydown', function(e) {
