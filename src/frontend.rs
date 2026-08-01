@@ -516,8 +516,14 @@ async function doQuit() { stopAnim(); await fetch('/action', {method:'POST', hea
 
 // ---- Pan: Shift+drag or right-click drag. Right-click: recenter on mouseup ----
 var panning = false, pStartX, pStartY, camStartX, camStartY;
-var rcPending = null; // {cellX, cellY} — right-click held, awaiting click vs drag
 var wasPlayingBeforePan = false; // remember playback state during pan
+var leftHeld = false, rightHeld = false; // track which buttons are held
+var zoomDragStartY, zoomDragDelta = 0; // zoom drag state (both buttons held)
+var rcPending = null; // {cellX, cellY} — right-click held alone, awaiting recenter vs pan
+var leftClickPending = null; // {cellX, cellY} — deferred toggle, fired on mouseup if no drag
+var leftDragActive = false; // track if left button dragged
+var zoomDragThreshold = 20; // px before zoom activates
+var zoomDragArmed = false; // threshold crossed, zooming active
 
 // Global so play/stop functions can be called from anywhere
 var running = false;
@@ -598,9 +604,40 @@ canvas.addEventListener('mousedown', function(e) {
     var target = clickToGrid(e);
     if (!target) return;
 
-    // Right-click: record for recenter vs pan decision on mouseup
+    if (e.button === 0) {
+        leftHeld = true;
+        // Both buttons held: do nothing
+        if (rightHeld) {
+            leftClickPending = null;
+            rcPending = null; // cancel recenter
+            return;
+        }
+        // Shift+left: pan
+        if (e.shiftKey) {
+            panning   = true;
+            wasPlayingBeforePan = running;
+            if (running) stopAnim();
+            tracksBeforePan = tracksEnabled; tracksEnabled = false;
+            pStartX   = e.clientX; pStartY = e.clientY;
+            camStartX = camX;      camStartY = camY;
+            canvas.style.cursor = 'grabbing';
+            return;
+        }
+        // Left alone: defer toggle to mouseup (in case right button follows)
+        leftClickPending = target;
+        leftDragActive = false;
+        pStartX = e.clientX; pStartY = e.clientY;
+    }
+
     if (e.button === 2) {
         e.preventDefault();
+        rightHeld = true;
+        // Both buttons held: do nothing
+        if (leftHeld) {
+            leftClickPending = null; // cancel deferred toggle
+            return;
+        }
+        // Right alone: record for recenter vs pan
         wasPlayingBeforePan = running;
         if (running) stopAnim();
         tracksBeforePan = tracksEnabled; tracksEnabled = false;
@@ -608,73 +645,131 @@ canvas.addEventListener('mousedown', function(e) {
         pStartX     = e.clientX; pStartY = e.clientY;
         camStartX   = camX;      camStartY = camY;
         canvas.style.cursor = 'grabbing';
-        return;
-    }
-
-    // Shift+drag for pan (left-click only)
-    if (e.shiftKey) {
-        panning   = true;
-        wasPlayingBeforePan = running;
-        if (running) stopAnim();
-        tracksBeforePan = tracksEnabled; tracksEnabled = false;
-        pStartX   = e.clientX; pStartY = e.clientY;
-        camStartX = camX;      camStartY = camY;
-        canvas.style.cursor = 'grabbing';
-        return;
-    }
-
-    // Left-click: toggle cell
-    if (e.button === 0) {
-      toggleCell(target.cellX, target.cellY).then(zoomRefresh);
     }
 });
 
 window.addEventListener('mouseup', function(e) {
     var wasPanning = panning;
-    panning = false; canvas.style.cursor = 'crosshair';
 
-    // Right-click released: recenter if we didn't end up panning
-    if (e.button === 2 && rcPending && !wasPanning) {
-        camX = rcPending.cellX - Math.floor(calcCells(cellSize).vw / 2);
-       camY = rcPending.cellY - Math.floor(calcCells(cellSize).vh / 2);
-        rcPending = null;
-        zoomRefresh();
-    } else if (wasPanning) {
-        // Final refresh — serial loop ensures no overlap
-        zoomRefresh();
+    if (e.button === 0) {
+        // Left released: if we didn't drag AND right not held, toggle the pending cell
+        if (leftClickPending && !leftDragActive && !rightHeld) {
+            toggleCell(leftClickPending.cellX, leftClickPending.cellY).then(zoomRefresh);
+        }
+        leftClickPending = null;
+        leftDragActive = false;
+        leftHeld = false;
+        zoomDragStartY = null;
+        zoomDragDelta = 0;
+        zoomDragArmed = false;
+        // Shift+left pan: release left stops panning
+        if (wasPanning) {
+            panning = false;
+            canvas.style.cursor = 'crosshair';
+            zoomRefresh();
+            tracksEnabled = tracksBeforePan;
+            if (tracksEnabled) document.getElementById('tracksBtn').textContent = 'Active';
+            else document.getElementById('tracksBtn').textContent = 'Tracks';
+            if (wasPlayingBeforePan) {
+                wasPlayingBeforePan = false;
+                startAnim();
+            }
+        }
     }
 
-    // Restore tracks state after pan/recenter (only if we saved it)
-    if (e.button === 2 || wasPanning) {
+    if (e.button === 2) {
+        rightHeld = false;
+        // Right released: recenter if we didn't end up panning
+        if (rcPending && !wasPanning) {
+            camX = rcPending.cellX - Math.floor(calcCells(cellSize).vw / 2);
+           camY = rcPending.cellY - Math.floor(calcCells(cellSize).vh / 2);
+            zoomRefresh();
+        } else if (wasPanning) {
+            zoomRefresh();
+        }
+        rcPending = null;
+        panning = false;
+        canvas.style.cursor = 'crosshair';
+        zoomDragStartY = null;
+        zoomDragDelta = 0;
+        zoomDragArmed = false;
+        // Restore tracks state
         tracksEnabled = tracksBeforePan;
         if (tracksEnabled) document.getElementById('tracksBtn').textContent = 'Active';
         else document.getElementById('tracksBtn').textContent = 'Tracks';
-    }
-
-    // Restart playback if it was running before pan started
-    if (wasPlayingBeforePan) {
-        wasPlayingBeforePan = false;
-        startAnim();
+        // Restart playback if it was running
+        if (wasPlayingBeforePan) {
+            wasPlayingBeforePan = false;
+            startAnim();
+        }
     }
 });
 
 window.addEventListener('mousemove', function(e) {
+    // Both buttons held: zoom by vertical drag (with debounce threshold)
+    if (leftHeld && rightHeld) {
+        if (!zoomDragStartY) {
+            zoomDragStartY = e.clientY;
+            zoomDragDelta = 0;
+            zoomDragArmed = false;
+        }
+        if (!zoomDragArmed) {
+            var dy = Math.abs(e.clientY - zoomDragStartY);
+            if (dy >= zoomDragThreshold) {
+                zoomDragArmed = true;
+                zoomDragStartY = e.clientY;
+                zoomDragDelta = 0;
+                leftClickPending = null; // cancel deferred toggle, we're zooming
+            }
+            return;
+        }
+        // Armed — accumulate delta for zoom steps
+        zoomDragDelta += e.clientY - zoomDragStartY;
+        zoomDragStartY = e.clientY;
+        var steps = Math.floor(Math.abs(zoomDragDelta) / 30);
+        if (steps >= 1) {
+            var oldCs = cellSize;
+            var dir = zoomDragDelta > 0 ? 1 : -1; // down = zoom in, up = zoom out
+            for (var i = 0; i < steps; i++) {
+                if (dir > 0 && zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
+                else if (dir < 0) zoomIdx = Math.max(0, zoomIdx - 1);
+            }
+            cellSize = ZOOM_LEVELS[zoomIdx];
+            zoomDragDelta %= 30;
+            if (cellSize !== oldCs) doZoom(oldCs);
+        }
+        return;
+    }
+
+    // Left held alone: draw cells (only after moving from click point)
+    if (leftHeld && !rightHeld && !panning && leftClickPending) {
+        var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
+        if (moved > cellSize) {
+            leftDragActive = true;
+            var target = clickToGrid(e);
+            if (target) {
+                toggleCell(target.cellX, target.cellY);
+            }
+            zoomRefresh(); // show cells immediately
+        }
+    }
+
+    // Right held alone: pan
+    if (rightHeld && !leftHeld && rcPending && !panning) {
+        var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
+        if (moved > 10) {
+            panning = true;
+            camStartX = camX; camStartY = camY;
+            rcPending = null;
+        }
+    }
+
     if (panning) {
         var dx = Math.round((e.clientX - pStartX) / cellSize);
         var dy = Math.round((e.clientY - pStartY) / cellSize);
         camX = camStartX - dx;
         camY = camStartY - dy;
-        // zoomRefresh is serial — just trigger it, the loop inside handles rate limiting
         zoomRefresh();
-    }
-    // Right-click: check if we should switch from recenter to pan (moved > 10px)
-    if (rcPending && !panning) {
-        var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
-        if (moved > 10) {
-            panning = true;
-            camStartX = camX; camStartY = camY;
-            rcPending = null; // was a drag, cancel recenter
-        }
     }
 });
 
@@ -697,7 +792,9 @@ function doZoom(oldCs) {
     if (!running) zoomRefresh();
 }
 
-canvas.addEventListener('wheel', function(e) {
+document.addEventListener('wheel', function(e) {
+    // Don't zoom when scrolling in inputs/textarea/modal
+    if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.closest('#pasteModal')) return;
     e.preventDefault();
     var oldCs = cellSize;
     if (e.deltaY < 0) {
@@ -707,7 +804,6 @@ canvas.addEventListener('wheel', function(e) {
     }
     cellSize = ZOOM_LEVELS[zoomIdx];
     if (cellSize !== oldCs) doZoom(oldCs);
-
 }, {passive: false});
 
 document.addEventListener('keydown', function(e) {
