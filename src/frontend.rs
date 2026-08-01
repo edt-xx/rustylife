@@ -346,17 +346,19 @@ function drawGrid(data) {
 
         offCtx.putImageData(imgData, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        // When serverScale > 1, server sends aggregated bitmap — vw/vh are display dimensions (1:1)
-        // When serverScale == 1, vw/vh are raw cell counts — multiply by cellSize for display
-        var cw = serverScale > 1 ? vw : vw * cellSize;
-        var ch = serverScale > 1 ? vh : vh * cellSize;
-        var ox = Math.floor((canvasW - cw) / 2);
-        var oy = Math.floor((canvasH - ch) / 2);
-        // Snap to integer internal pixel coords to match delta rendering
+        // Match delta rendering: compute CSS position, convert to internal pixels, use Math.ceil cell size
+        var isAggregated = serverScale > 1;
+        var dSize = isAggregated ? 1 : cellSize;
         var dpr = window.devicePixelRatio || 1;
-        var oxSnapped = Math.floor(ox * dpr) / dpr;
-        var oySnapped = Math.floor(oy * dpr) / dpr;
-        ctx.drawImage(offCanvas, oxSnapped, oySnapped, cw, ch);
+        var dSizei = Math.ceil(dSize * dpr);
+        var cwCSS = isAggregated ? vw : vw * cellSize;
+        var chCSS = isAggregated ? vh : vh * cellSize;
+        var oxCSS = Math.floor((canvasW - cwCSS) / 2);
+        var oyCSS = Math.floor((canvasH - chCSS) / 2);
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(offCanvas, Math.floor(oxCSS*dpr), Math.floor(oyCSS*dpr), vw*dSizei, vh*dSizei);
+        ctx.restore();
         if (overlay.length > 0) { var copyOv2 = new Uint8Array(overlay.length); copyOv2.set(overlay); prevOverlay = copyOv2; }
     } else {
         // Delta: draw ONLY changed cells directly on main canvas
