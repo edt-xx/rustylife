@@ -6,7 +6,9 @@ pub const FRONTEND: &str = r#"<!DOCTYPE html>
 html,body{background:#1a1a2e;width:100%;height:100%;font-family:monospace;color:#e94560}
 #viewport{position:absolute;top:0;left:0;right:0;bottom:0}
 canvas#main{position:absolute;top:48px;left:16px;right:12px;border:2px solid #e94560;image-rendering:pixelated;background:#1a1a2e;cursor:crosshair;margin-bottom:64px;transform:translate3d(0,0,0);will-change:transform}
-.toolbar{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;justify-content:center;padding:6px 14px;background:rgba(22,33,62,.9);border-radius:6px;z-index:10;min-width:95vw}
+.toolbar{position:absolute;bottom:12px;left:16px;right:12px;display:flex;gap:8px;align-items:center;padding:6px 14px;background:rgba(22,33,62,.9);border-radius:6px;z-index:10}
+.toolbar-content{flex:1;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap}
+@media(max-width:2000px){.toolbar-content{justify-content:flex-start}}
 button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px}
 button:hover{background:#e94560;color:#1a1a2e}
 input[type=range]{width:100px;vertical-align:middle}
@@ -48,20 +50,22 @@ input[type=range]{width:100px;vertical-align:middle}
   </div>
 </div>
 <div class="toolbar">
-  <button id="playBtn">&#9654; Play</button>
-  <button id="stepBtn">Step</button>
-  <label>Speed <input type="range" id="speedSlider" min="1" max="50" value="25"></label>
-  <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
-  <button id="stepPlusBtn">Step+1</button>
+  <div class="toolbar-content">
+    <button id="playBtn">&#9654; Play</button>
+    <button id="stepBtn">Step</button>
+    <label>Speed <input type="range" id="speedSlider" min="1" max="50" value="25"></label>
+    <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
+    <button id="stepPlusBtn">Step+1</button>
 
-  <button id="randBtn">Randomize</button>
-  <button id="clearBtn">Clear</button>
-  <button id="loadBtn">Load</button>
-  <button id="pasteBtn">Paste</button>
-  <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
-  <button id="tracksBtn">Tracks</button>
-  <button id="hashlifeBtn">Classic</button>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<button id="quitBtn">Quit</button>
+    <button id="randBtn">Randomize</button>
+    <button id="clearBtn">Clear</button>
+    <button id="loadBtn">Load</button>
+    <button id="pasteBtn">Paste</button>
+    <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
+    <button id="tracksBtn">Tracks</button>
+    <button id="hashlifeBtn">Classic</button>
+  </div>
+  <button id="quitBtn">Quit</button>
 </div>
 <script>
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
