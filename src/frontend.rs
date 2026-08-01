@@ -352,7 +352,11 @@ function drawGrid(data) {
         var ch = serverScale > 1 ? vh : vh * cellSize;
         var ox = Math.floor((canvasW - cw) / 2);
         var oy = Math.floor((canvasH - ch) / 2);
-        ctx.drawImage(offCanvas, ox, oy, cw, ch);
+        // Snap to integer internal pixel coords to match delta rendering
+        var dpr = window.devicePixelRatio || 1;
+        var oxSnapped = Math.floor(ox * dpr) / dpr;
+        var oySnapped = Math.floor(oy * dpr) / dpr;
+        ctx.drawImage(offCanvas, oxSnapped, oySnapped, cw, ch);
         if (overlay.length > 0) { var copyOv2 = new Uint8Array(overlay.length); copyOv2.set(overlay); prevOverlay = copyOv2; }
     } else {
         // Delta: draw ONLY changed cells directly on main canvas
@@ -395,17 +399,26 @@ function drawGrid(data) {
             return;
         }
 
+        // Draw in internal pixel coords to avoid sub-pixel anti-aliasing from DPR scale
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        var dpr = window.devicePixelRatio || 1;
+        var ox2i = Math.floor(ox2 * dpr);
+        var oy2i = Math.floor(oy2 * dpr);
+        var dSizei = Math.ceil(dSize * dpr);
+
         // Batch draw: dead cells first — show tracks or restore bg
         for (var i = 0; i < deadCells.length; i += 2) {
              var di = deadCells[i+1] * vw + deadCells[i];
             if (tracksEnabled && camX === prevCamX && camY === prevCamY) ctx.fillStyle = '#3a3a5a'; // track color only on static frames, not pan
             else ctx.fillStyle = (overlay.length > 0 && ((overlay[di >>> 3] >> (di & 7)) & 1)) ? '#22223a' : '#1a1a2e';
-            ctx.fillRect(ox2 + deadCells[i]*dSize, oy2 + deadCells[i+1]*dSize, dSize, dSize);
+            ctx.fillRect(ox2i + deadCells[i]*dSizei, oy2i + deadCells[i+1]*dSizei, dSizei, dSizei);
         }
 
         ctx.fillStyle = '#e94560';
         for (var i = 0; i < aliveCells.length; i += 2)
-            ctx.fillRect(ox2 + aliveCells[i] * dSize, oy2 + aliveCells[i+1] * dSize, dSize, dSize);
+            ctx.fillRect(ox2i + aliveCells[i] * dSizei, oy2i + aliveCells[i+1] * dSizei, dSizei, dSizei);
+        ctx.restore();
 
         // Redraw background cells whose tile status changed (overlay update) — skip when tracks on
         if (!tracksEnabled && prevOverlay !== null && overlay.length > 0) {
@@ -427,12 +440,15 @@ function drawGrid(data) {
                     }
                 }
             }
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
             ctx.fillStyle = '#22223a';
             for (var i = 0; i < bgLight.length; i += 2)
-                ctx.fillRect(ox2 + bgLight[i]*dSize, oy2 + bgLight[i+1]*dSize, dSize, dSize);
+                ctx.fillRect(ox2i + bgLight[i]*dSizei, oy2i + bgLight[i+1]*dSizei, dSizei, dSizei);
             ctx.fillStyle = '#1a1a2e';
             for (var i = 0; i < bgDark.length; i += 2)
-                ctx.fillRect(ox2 + bgDark[i]*dSize, oy2 + bgDark[i+1]*dSize, dSize, dSize);
+                ctx.fillRect(ox2i + bgDark[i]*dSizei, oy2i + bgDark[i+1]*dSizei, dSizei, dSizei);
+            ctx.restore();
         }
     }
 
