@@ -13,7 +13,8 @@ button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5
 button:hover{background:#e94560;color:#1a1a2e}
 input[type=range]{width:100px;vertical-align:middle}
 .info{font-size:12px;color:#888;margin-left:4px}
-#topInfo{position:absolute;top:8px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
+#topInfo{position:absolute;top:8px;left:16px;right:12px;font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
+#infoLine1,#infoLine2{white-space:nowrap;text-align:center}
 #pasteModal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center}
 #pasteModal.active{display:flex}
 #pasteModal .modal-content{background:#16213e;border:2px solid #e94560;border-radius:6px;padding:16px;width:80%;max-width:700px;height:70vh;display:flex;flex-direction:column;gap:8px}
