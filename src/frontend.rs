@@ -606,22 +606,25 @@ function clickToGrid(e, clamp) {
     var my = e.clientY - rect.top;
 
     var vp = calcCells(cellSize);
-    var cw = vp.vw * cellSize;
-    var ch = vp.vh * cellSize;
-    var ox = Math.floor((canvasW - cw) / 2);
-    var oy = Math.floor((canvasH - ch) / 2);
+    var dpr = window.devicePixelRatio || 1;
+    var dSizei = Math.ceil(cellSize * dpr);
+    var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels
+    var cwActual = vp.vw * dSizei;
+    var chActual = vp.vh * dSizei;
+    var ox = Math.floor((canvasW * dpr - cwActual) / 2) / dpr;
+    var oy = Math.floor((canvasH * dpr - chActual) / 2) / dpr;
     mx -= ox; my -= oy;
 
-    if (mx < 0 || my < 0 || mx >= cw || my >= ch) {
+    if (mx < 0 || my < 0 || mx >= vp.vw * cellCSS || my >= vp.vh * cellCSS) {
         if (clamp) {
-            mx = Math.max(0, Math.min(cw - cellSize, mx));
-            my = Math.max(0, Math.min(ch - cellSize, my));
+            mx = Math.max(0, Math.min(vp.vw * cellCSS - cellCSS, mx));
+            my = Math.max(0, Math.min(vp.vh * cellCSS - cellCSS, my));
         } else {
             return null;
         }
     }
 
-    return { cellX: Math.floor(mx / cellSize) + camX, cellY: Math.floor(my / cellSize) + camY };
+    return { cellX: Math.floor(mx / cellCSS) + camX, cellY: Math.floor(my / cellCSS) + camY };
 }
 
 canvas.addEventListener('mousedown', function(e) {
@@ -767,8 +770,11 @@ window.addEventListener('mousemove', function(e) {
 
     // Left held alone: draw cells (only after moving from click point)
     if (leftHeld && !rightHeld && !panning && leftClickPending) {
+        var dpr = window.devicePixelRatio || 1;
+        var dSizei = Math.ceil(cellSize * dpr);
+        var cellCSS = dSizei / dpr;
         var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
-        if (moved > cellSize) {
+        if (moved > cellCSS) {
             leftDragActive = true;
             var target = clickToGrid(e);
             if (target) {
@@ -789,8 +795,11 @@ window.addEventListener('mousemove', function(e) {
     }
 
     if (panning) {
-        var dx = Math.round((e.clientX - pStartX) / cellSize);
-        var dy = Math.round((e.clientY - pStartY) / cellSize);
+        var dpr = window.devicePixelRatio || 1;
+        var dSizei = Math.ceil(cellSize * dpr);
+        var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels
+        var dx = Math.round((e.clientX - pStartX) / cellCSS);
+        var dy = Math.round((e.clientY - pStartY) / cellCSS);
         camX = camStartX - dx;
         camY = camStartY - dy;
         zoomRefresh();
