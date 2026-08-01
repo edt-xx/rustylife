@@ -350,12 +350,6 @@ impl HashLifeCache {
 // Utility
 // ============================================================================
 
-fn is_alive(cache: &HashLifeCache, idx: u32) -> bool {
-    if idx == FALSE_NODE { return false; }
-    if idx == TRUE_NODE { return true; }
-    !cache.is_empty_check(idx)
-}
-
 fn next_power_of2(n: usize) -> usize {
     if n <= 1 { return 1; }
     n.next_power_of_two()
@@ -422,77 +416,59 @@ struct LeafQuadrants {
     nw: u16, ne: u16, sw: u16, se: u16,
 }
 
-fn encode_quadrant_nw(cache: &HashLifeCache, q: u32) -> u16 {
-    if q == TRUE_NODE { return 0xCC00; }
-    if q == FALSE_NODE { return 0; }
-    let node = cache.get_node(q);
-    let mut bits = 0u16;
-    if is_alive(cache, node.north_west) { bits |= 1 << 15; }
-    if is_alive(cache, node.north_east) { bits |= 1 << 14; }
-    if is_alive(cache, node.south_west) { bits |= 1 << 11; }
-    if is_alive(cache, node.south_east) { bits |= 1 << 10; }
-    bits
-}
-
-fn encode_quadrant_ne(cache: &HashLifeCache, q: u32) -> u16 {
-    if q == TRUE_NODE { return 0x3300; }
-    if q == FALSE_NODE { return 0; }
-    let node = cache.get_node(q);
-    let mut bits = 0u16;
-    if is_alive(cache, node.north_west) { bits |= 1 << 13; }
-    if is_alive(cache, node.north_east) { bits |= 1 << 12; }
-    if is_alive(cache, node.south_west) { bits |= 1 << 9; }
-    if is_alive(cache, node.south_east) { bits |= 1 << 8; }
-    bits
-}
-
-fn encode_quadrant_sw(cache: &HashLifeCache, q: u32) -> u16 {
-    if q == TRUE_NODE { return 0x00CC; }
-    if q == FALSE_NODE { return 0; }
-    let node = cache.get_node(q);
-    let mut bits = 0u16;
-    if is_alive(cache, node.north_west) { bits |= 1 << 7; }
-    if is_alive(cache, node.north_east) { bits |= 1 << 6; }
-    if is_alive(cache, node.south_west) { bits |= 1 << 3; }
-    if is_alive(cache, node.south_east) { bits |= 1 << 2; }
-    bits
-}
-
-fn encode_quadrant_se(cache: &HashLifeCache, q: u32) -> u16 {
-    if q == TRUE_NODE { return 0x0033; }
-    if q == FALSE_NODE { return 0; }
-    let node = cache.get_node(q);
-    let mut bits = 0u16;
-    if is_alive(cache, node.north_west) { bits |= 1 << 5; }
-    if is_alive(cache, node.north_east) { bits |= 1 << 4; }
-    if is_alive(cache, node.south_west) { bits |= 1 << 1; }
-    if is_alive(cache, node.south_east) { bits |= 1 << 0; }
-    bits
-}
-
-// Encodes a level-2 node (4x4 grid of leaf cells) as a 16-bit value.
-fn encode_level2(cache: &HashLifeCache, node_idx: u32) -> u16 {
-    if node_idx == FALSE_NODE { return 0; }
-    if node_idx == TRUE_NODE { return 0xFFFF; }
-    let node = cache.get_node(node_idx);
-    if node.north_west == FALSE_NODE && node.north_east == FALSE_NODE
-        && node.south_west == FALSE_NODE && node.south_east == FALSE_NODE {
-        return 0;
-    }
-    encode_quadrant_nw(cache, node.north_west)
-        | encode_quadrant_ne(cache, node.north_east)
-        | encode_quadrant_sw(cache, node.south_west)
-        | encode_quadrant_se(cache, node.south_east)
-}
-
+/// Inline encode_level3 — fetches all nodes in a tight loop, computes bits inline.
+/// Eliminates 20 function calls per base case vs. the old encode_quadrant_* chain.
+#[inline]
 fn encode_level3(cache: &HashLifeCache, node_idx: u32) -> LeafQuadrants {
     let node = cache.get_node(node_idx);
     LeafQuadrants {
-        nw: encode_level2(cache, node.north_west),
-        ne: encode_level2(cache, node.north_east),
-        sw: encode_level2(cache, node.south_west),
-        se: encode_level2(cache, node.south_east),
+        nw: encode_level2_inline(cache, node.north_west),
+        ne: encode_level2_inline(cache, node.north_east),
+        sw: encode_level2_inline(cache, node.south_west),
+        se: encode_level2_inline(cache, node.south_east),
     }
+}
+
+/// Inline encode_level2 — fetches 4 level-1 nodes, computes all 16 bits inline.
+#[inline]
+fn encode_level2_inline(cache: &HashLifeCache, node_idx: u32) -> u16 {
+    if node_idx == FALSE_NODE { return 0; }
+    if node_idx == TRUE_NODE { return 0xFFFF; }
+    let l2 = cache.get_node(node_idx);
+    if l2.north_west == FALSE_NODE && l2.north_east == FALSE_NODE
+        && l2.south_west == FALSE_NODE && l2.south_east == FALSE_NODE {
+        return 0;
+    }
+
+    // Fetch all 4 level-1 nodes in order
+    let nw1 = cache.get_node(l2.north_west);
+    let ne1 = cache.get_node(l2.north_east);
+    let sw1 = cache.get_node(l2.south_west);
+    let se1 = cache.get_node(l2.south_east);
+
+    // Compute all 16 bits inline
+    // NW quadrant bits: 15,14,11,10
+    // NE quadrant bits: 13,12,9,8
+    // SW quadrant bits: 7,6,3,2
+    // SE quadrant bits: 5,4,1,0
+    let mut bits = 0u16;
+    if nw1.north_west != FALSE_NODE { bits |= 1 << 15; }
+    if nw1.north_east != FALSE_NODE { bits |= 1 << 14; }
+    if nw1.south_west != FALSE_NODE { bits |= 1 << 11; }
+    if nw1.south_east != FALSE_NODE { bits |= 1 << 10; }
+    if ne1.north_west != FALSE_NODE { bits |= 1 << 13; }
+    if ne1.north_east != FALSE_NODE { bits |= 1 << 12; }
+    if ne1.south_west != FALSE_NODE { bits |= 1 << 9; }
+    if ne1.south_east != FALSE_NODE { bits |= 1 << 8; }
+    if sw1.north_west != FALSE_NODE { bits |= 1 << 7; }
+    if sw1.north_east != FALSE_NODE { bits |= 1 << 6; }
+    if sw1.south_west != FALSE_NODE { bits |= 1 << 3; }
+    if sw1.south_east != FALSE_NODE { bits |= 1 << 2; }
+    if se1.north_west != FALSE_NODE { bits |= 1 << 5; }
+    if se1.north_east != FALSE_NODE { bits |= 1 << 4; }
+    if se1.south_west != FALSE_NODE { bits |= 1 << 1; }
+    if se1.south_east != FALSE_NODE { bits |= 1 << 0; }
+    bits
 }
 
 // ============================================================================
