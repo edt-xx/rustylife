@@ -8,7 +8,7 @@ use crate::grid::{Grid, Coord};
 pub fn run(grid: Arc<Mutex<Grid>>) {
     let server = Server::http("0.0.0.0:7654").expect("Failed to start server");
 
-    println!("Game of Life running at http://grover:7654");
+    println!("Game of Life running at http://localhost:7654");
 
     for mut request in server.incoming_requests() {
         let url = request.url().to_string();

@@ -825,14 +825,14 @@ function doZoom(oldCs) {
     if (!running) zoomRefresh();
 }
 
-var lastWheelZoomTime = 0; // throttle: one zoom step per 100ms
+var lastWheelZoomTime = 0; // throttle: one zoom step per 200ms
 document.addEventListener('wheel', function(e) {
     // Don't zoom when scrolling in inputs/textarea/modal
     if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT' || e.target.closest('#pasteModal')) return;
     e.preventDefault();
     // Throttle: only accept one zoom step per 100ms
     var now = performance.now();
-    if (now - lastWheelZoomTime < 100) return;
+    if (now - lastWheelZoomTime < 200) return;
     var oldCs = cellSize;
     if (e.deltaY < 0) {
         if (zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
