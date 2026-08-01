@@ -346,18 +346,18 @@ function drawGrid(data) {
 
         offCtx.putImageData(imgData, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        // Match delta rendering: compute CSS position, convert to internal pixels, use Math.ceil cell size
+        // Internal pixel coords — same formula as delta rendering
         var isAggregated = serverScale > 1;
         var dSize = isAggregated ? 1 : cellSize;
         var dpr = window.devicePixelRatio || 1;
         var dSizei = Math.ceil(dSize * dpr);
-        var cwCSS = isAggregated ? vw : vw * cellSize;
-        var chCSS = isAggregated ? vh : vh * cellSize;
-        var oxCSS = Math.floor((canvasW - cwCSS) / 2);
-        var oyCSS = Math.floor((canvasH - chCSS) / 2);
+        var cwActual = vw * dSizei;
+        var chActual = vh * dSizei;
+        var oxInternal = Math.floor((canvasW * dpr - cwActual) / 2);
+        var oyInternal = Math.floor((canvasH * dpr - chActual) / 2);
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(offCanvas, Math.floor(oxCSS*dpr), Math.floor(oyCSS*dpr), vw*dSizei, vh*dSizei);
+        ctx.drawImage(offCanvas, oxInternal, oyInternal, cwActual, chActual);
         ctx.restore();
         if (overlay.length > 0) { var copyOv2 = new Uint8Array(overlay.length); copyOv2.set(overlay); prevOverlay = copyOv2; }
     } else {
@@ -369,10 +369,12 @@ function drawGrid(data) {
         // At sub-pixel zoom, aggregated bitmap — each pixel is 1px on screen
         var isAggregated = serverScale > 1;
         var dSize = isAggregated ? 1 : cellSize;
-        var cw2 = isAggregated ? vw : vw * cellSize;
-        var ch2 = isAggregated ? vh : vh * cellSize;
-        var ox2 = Math.floor((canvasW - cw2) / 2);
-        var oy2 = Math.floor((canvasH - ch2) / 2);
+        var dpr = window.devicePixelRatio || 1;
+        var dSizei = Math.ceil(dSize * dpr);
+        var cwActual = vw * dSizei;
+        var chActual = vh * dSizei;
+        var ox2i = Math.floor((canvasW * dpr - cwActual) / 2);
+        var oy2i = Math.floor((canvasH * dpr - chActual) / 2);
 
         // Collect changes by color to minimize fillStyle switches
         var aliveCells = [];
@@ -404,10 +406,6 @@ function drawGrid(data) {
         // Draw in internal pixel coords to avoid sub-pixel anti-aliasing from DPR scale
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        var dpr = window.devicePixelRatio || 1;
-        var ox2i = Math.floor(ox2 * dpr);
-        var oy2i = Math.floor(oy2 * dpr);
-        var dSizei = Math.ceil(dSize * dpr);
 
         // Batch draw: dead cells first — show tracks or restore bg
         for (var i = 0; i < deadCells.length; i += 2) {
