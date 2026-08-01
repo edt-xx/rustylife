@@ -721,11 +721,17 @@ fn advance_fast(cache: &mut HashLifeCache,
     // Recursive case: classic 9-subnode approach.
     let node = cache.get_node(node_idx);
 
-    let ch_nw_ne = centered_horizontal(cache, node.north_west, node.north_east);
-    let cv_nw_sw = centered_vertical(cache, node.north_west, node.south_west);
-    let cs_node = centered_subnode(cache, node_idx);
-    let cv_ne_se = centered_vertical(cache, node.north_east, node.south_east);
-    let ch_sw_se = centered_horizontal(cache, node.south_west, node.south_east);
+    // Fetch all 4 children once — avoids 10 redundant HashMap lookups
+    let nw = cache.get_node(node.north_west);
+    let ne = cache.get_node(node.north_east);
+    let sw = cache.get_node(node.south_west);
+    let se = cache.get_node(node.south_east);
+
+    let ch_nw_ne = centered_horizontal(cache, &nw, &ne);
+    let cv_nw_sw = centered_vertical(cache, &nw, &sw);
+    let cs_node = centered_subnode(cache, &nw, &ne, &sw, &se);
+    let cv_ne_se = centered_vertical(cache, &ne, &se);
+    let ch_sw_se = centered_horizontal(cache, &sw, &se);
 
     // Advance all 9 sub-nodes at level-(L-1) — call advance_fast directly
     let n00 = advance_fast(cache, node.north_west, level - 1);
@@ -755,27 +761,18 @@ fn advance_fast(cache: &mut HashLifeCache,
 }
 
 /// CenteredHorizontal: extract inner 2x2 from west+east nodes
-fn centered_horizontal(cache: &mut HashLifeCache, west: u32, east: u32) -> u32 {
-    let wn = cache.get_node(west);
-    let en = cache.get_node(east);
-    cache.find_or_create(wn.north_east, en.north_west, wn.south_east, en.south_west)
+fn centered_horizontal(cache: &mut HashLifeCache, west: &LifeNode, east: &LifeNode) -> u32 {
+    cache.find_or_create(west.north_east, east.north_west, west.south_east, east.south_west)
 }
 
 /// CenteredVertical: extract inner 2x2 from north+south nodes
-fn centered_vertical(cache: &mut HashLifeCache, north: u32, south: u32) -> u32 {
-    let nn = cache.get_node(north);
-    let sn = cache.get_node(south);
-    cache.find_or_create(nn.south_west, nn.south_east, sn.north_west, sn.north_east)
+fn centered_vertical(cache: &mut HashLifeCache, north: &LifeNode, south: &LifeNode) -> u32 {
+    cache.find_or_create(north.south_west, north.south_east, south.north_west, south.north_east)
 }
 
-/// CenteredSubNode: extract central 2x2 from node's 4 corners
-fn centered_subnode(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
-    let node = cache.get_node(node_idx);
-    let nw_se = cache.se(node.north_west);
-    let ne_sw = cache.sw(node.north_east);
-    let sw_ne = cache.ne(node.south_west);
-    let se_nw = cache.nw(node.south_east);
-    cache.find_or_create(nw_se, ne_sw, sw_ne, se_nw)
+/// CenteredSubNode: extract central 2x2 from 4 child nodes
+fn centered_subnode(cache: &mut HashLifeCache, nw: &LifeNode, ne: &LifeNode, sw: &LifeNode, se: &LifeNode) -> u32 {
+    cache.find_or_create(nw.south_east, ne.south_west, sw.north_east, se.north_west)
 }
 
 /// Advance 2 generations at level 3 (8x8 base case)
