@@ -290,18 +290,15 @@ impl HashLifeCache {
 /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
         let live = self.walk_tree_threaded(root, slow_cache_n1);
-        let live_set: std::collections::HashSet<u32> = live.into_iter().collect();
-        let live_len = live_set.len();
-        let live_set = std::sync::Arc::new(live_set);
+        let live_len = live.len();
 
         std::thread::scope(|s| {
             // Thread 1: split nodes into live + freed
             let nodes = &mut self.nodes;
             let freed = &mut self.freed;
             let next_idx = &mut self.next_idx;
-            let live1 = std::sync::Arc::clone(&live_set);
-            s.spawn(move || {
-                let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live1.contains(idx))
+            s.spawn(|| {
+                let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live.contains(idx))
                     .map(|(idx, _)| idx)
                     .collect();
                 nodes.shrink_to_fit();
@@ -320,27 +317,29 @@ impl HashLifeCache {
 
             // Thread 2: remove dead entries from fast_cache_n1
             let fast_cache_n1 = &mut self.fast_cache_n1;
-            let live2 = std::sync::Arc::clone(&live_set);
-            s.spawn(move || {
-                fast_cache_n1.retain(|&(nidx, _), ridx| live2.contains(&nidx) && live2.contains(ridx));
+            s.spawn(|| {
+                fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
                 fast_cache_n1.shrink_to_fit();
             });
 
             // Thread 3: remove dead entries from arena, add sentinels
             let arena = &mut self.arena;
-            let live3 = std::sync::Arc::clone(&live_set);
-            s.spawn(move || {
-                arena.retain(|_, idx| live3.contains(idx));
+            s.spawn(|| {
+                arena.retain(|_, idx| live.contains(idx));
                 arena.entry([0,0,0,0]).or_insert(0);
                 arena.entry([1,1,1,1]).or_insert(1);
                 arena.shrink_to_fit();
+            });
+
+            // Thread 4: retain live entries in count_cache
+            let count_cache = &mut self.count_cache;
+            s.spawn(|| {
+                count_cache.retain(|&(nidx, _), _| live.contains(&nidx));
             });
         });
 
         // Store freelist size after GC for step_n() to use when step count increases.
         self.last_gc_freed_len = self.freed.len();
-
-        self.count_cache.clear();
 
         live_len as u32
     }
