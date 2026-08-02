@@ -276,6 +276,8 @@ var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
 var tracksEnabled = false; // disabled by default, hide active overlay when on
 var hashlifeMode = true; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
+var currentScale = 1; // server-side aggregation scale from last drawGrid
+var currentVw = 0, currentVh = 0; // viewport dimensions from server (aggregated when scale>1)
 
 function drawGrid(data) {
     var hdr  = new DataView(data, 0, 44);
@@ -290,6 +292,8 @@ function drawGrid(data) {
     var heap    = hdr.getUint32(32, false);
     var tiles   = hdr.getUint32(36, false);
     var serverScale = hdr.getUint32(40, false);
+    currentScale = serverScale;
+    currentVw = vw; currentVh = vh;
 
     // Discard stale response if server scale doesn't match expected
     var expectedScale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
@@ -347,9 +351,8 @@ function drawGrid(data) {
 
         offCtx.putImageData(imgData, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        // Internal pixel coords — same formula as delta rendering
-        var isAggregated = serverScale > 1;
-        var dSize = isAggregated ? 1 : cellSize;
+        // Internal pixel coords — use cellSize * scale for aggregated mode
+        var dSize = cellSize * serverScale; // CSS px per aggregated pixel
         var dpr = window.devicePixelRatio || 1;
         var dSizei = Math.ceil(dSize * dpr);
         var cwActual = vw * dSizei;
@@ -367,9 +370,8 @@ function drawGrid(data) {
         var total = vw * vh;
         var numBytes = (total + 7) >> 3;
 
-        // At sub-pixel zoom, aggregated bitmap — each pixel is 1px on screen
-        var isAggregated = serverScale > 1;
-        var dSize = isAggregated ? 1 : cellSize;
+        // Aggregated bitmap — each pixel is cellSize*scale CSS pixels
+        var dSize = cellSize * serverScale;
         var dpr = window.devicePixelRatio || 1;
         var dSizei = Math.ceil(dSize * dpr);
         var cwActual = vw * dSizei;
@@ -605,26 +607,25 @@ function clickToGrid(e, clamp) {
     var mx = e.clientX - rect.left;
     var my = e.clientY - rect.top;
 
-    var vp = calcCells(cellSize);
     var dpr = window.devicePixelRatio || 1;
-    var dSizei = Math.ceil(cellSize * dpr);
-    var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels
-    var cwActual = vp.vw * dSizei;
-    var chActual = vp.vh * dSizei;
+    var dSizei = Math.ceil(cellSize * currentScale * dpr);
+    var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels (includes aggregation scale)
+    var cwActual = currentVw * dSizei;
+    var chActual = currentVh * dSizei;
     var ox = Math.floor((canvasW * dpr - cwActual) / 2) / dpr;
     var oy = Math.floor((canvasH * dpr - chActual) / 2) / dpr;
     mx -= ox; my -= oy;
 
-    if (mx < 0 || my < 0 || mx >= vp.vw * cellCSS || my >= vp.vh * cellCSS) {
+    if (mx < 0 || my < 0 || mx >= currentVw * cellCSS || my >= currentVh * cellCSS) {
         if (clamp) {
-            mx = Math.max(0, Math.min(vp.vw * cellCSS - cellCSS, mx));
-            my = Math.max(0, Math.min(vp.vh * cellCSS - cellCSS, my));
+            mx = Math.max(0, Math.min(currentVw * cellCSS - cellCSS, mx));
+            my = Math.max(0, Math.min(currentVh * cellCSS - cellCSS, my));
         } else {
             return null;
         }
     }
 
-    return { cellX: Math.floor(mx / cellCSS) + camX, cellY: Math.floor(my / cellCSS) + camY };
+    return { cellX: Math.floor(mx / cellCSS) * currentScale + camX, cellY: Math.floor(my / cellCSS) * currentScale + camY };
 }
 
 canvas.addEventListener('mousedown', function(e) {
@@ -771,7 +772,7 @@ window.addEventListener('mousemove', function(e) {
     // Left held alone: draw cells (only after moving from click point)
     if (leftHeld && !rightHeld && !panning && leftClickPending) {
         var dpr = window.devicePixelRatio || 1;
-        var dSizei = Math.ceil(cellSize * dpr);
+        var dSizei = Math.ceil(cellSize * currentScale * dpr);
         var cellCSS = dSizei / dpr;
         var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
         if (moved > cellCSS) {
@@ -796,10 +797,10 @@ window.addEventListener('mousemove', function(e) {
 
     if (panning) {
         var dpr = window.devicePixelRatio || 1;
-        var dSizei = Math.ceil(cellSize * dpr);
-        var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels
-        var dx = Math.round((e.clientX - pStartX) / cellCSS);
-        var dy = Math.round((e.clientY - pStartY) / cellCSS);
+        var dSizei = Math.ceil(cellSize * currentScale * dpr);
+        var cellCSS = dSizei / dpr; // actual rendered cell size in CSS pixels (includes aggregation scale)
+        var dx = Math.round((e.clientX - pStartX) / cellCSS) * currentScale;
+        var dy = Math.round((e.clientY - pStartY) / cellCSS) * currentScale;
         camX = camStartX - dx;
         camY = camStartY - dy;
         zoomRefresh();
