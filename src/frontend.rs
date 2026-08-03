@@ -23,6 +23,11 @@ input[type=range]{width:100px;vertical-align:middle}
 #bookmarkMenu{display:none;position:fixed;z-index:200;background:#16213e;border:2px solid #e94560;border-radius:6px;padding:8px;min-width:140px}
 #bookmarkMenu.active{display:block}
 #bookmarkMenu button{display:block;width:100%;margin:2px 0;padding:4px 8px;font-size:12px}
+#helpModal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center}
+#helpModal.active{display:flex}
+#helpModal .modal-content{background:#16213e;border:2px solid #e94560;border-radius:6px;padding:16px;width:80%;max-width:700px;height:70vh;display:flex;flex-direction:column;gap:8px}
+#helpModal .help-text{flex:1;background:#1a1a2e;color:#ccc;border:1px solid #e94560;border-radius:3px;padding:8px;font-family:monospace;font-size:12px;overflow-y:auto;white-space:pre-wrap}
+#helpModal .modal-buttons{display:flex;gap:8px;justify-content:flex-end}
 </style></head><body>
 <div id="topInfo">
   <div id="infoLine1">
@@ -53,6 +58,14 @@ input[type=range]{width:100px;vertical-align:middle}
     </div>
   </div>
 </div>
+<div id="helpModal">
+  <div class="modal-content">
+    <div class="help-text" id="helpText"></div>
+    <div class="modal-buttons">
+      <button id="helpOkBtn">Close</button>
+    </div>
+  </div>
+</div>
 <div id="bookmarkMenu">
   <button id="bmSaveA">Save A</button>
   <button id="bmSaveB">Save B</button>
@@ -62,6 +75,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <button id="bmGotoC">Goto C</button>
 </div>
 <div class="toolbar">
+  <button id="helpBtn">Help</button>
   <div class="toolbar-content">
     <button id="playBtn">&#9654; Play</button>
     <button id="stepBtn">Step</button>
@@ -87,6 +101,7 @@ const step = [1,4,16,32,64,256,512,1024,4096,16384,65536,131072];
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125]; // 1/64
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
+var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-50)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Randomize** - Fill viewport with random cells\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Paste** - Paste RLE text from clipboard\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport in grid coords
 
 // Fixed frame: fill ~90% of window, aspect ratio constrained to 16:9
@@ -933,9 +948,15 @@ document.addEventListener('wheel', function(e) {
 
 document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
-    // ESC closes bookmark menu
+    // ESC closes popups
     if (e.key === 'Escape') {
         if (bookmarkMenuOpen) { closeBookmarkMenu(); return; }
+        if (document.getElementById('helpModal').classList.contains('active')) {
+            document.getElementById('helpModal').classList.remove('active'); return;
+        }
+        if (document.getElementById('pasteModal').classList.contains('active')) {
+            document.getElementById('pasteModal').classList.remove('active'); return;
+        }
     }
     var oldCs = cellSize;
     if (e.key === '=' || e.key === '+') {
@@ -993,6 +1014,14 @@ document.addEventListener('DOMContentLoaded', async function() {
         zoomRefresh();
     });
 
+    document.getElementById('helpBtn').addEventListener('click', function() {
+        closeBookmarkMenu();
+        document.getElementById('helpText').textContent = HELP_TEXT;
+        document.getElementById('helpModal').classList.add('active');
+    });
+    document.getElementById('helpOkBtn').addEventListener('click', function() {
+        document.getElementById('helpModal').classList.remove('active');
+    });
     document.getElementById('quitBtn').addEventListener('click', doQuit);
     document.getElementById('tracksBtn').addEventListener('click', function() {
         tracksEnabled = !tracksEnabled;
