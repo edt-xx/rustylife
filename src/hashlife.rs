@@ -5,7 +5,6 @@
 //! - Node identity = u32 index. FALSE_NODE=0, TRUE_NODE=1.
 //! - Arena = HashMap<[u32;4], u32> (children tuple → idx)
 //! - Nodes = HashMap<u32, LifeNode> (idx → node data)
-//! - Single arena with mark/sweep GC
 //! - Center-based tracking (like GOLDE's m_SeedOffset), NOT origin-based
 //! - 65536-entry rule table: maps 16-bit 4x4 patterns → 4-bit 2x2 center results
 //! - AdvanceFast: recursive multi-gen advance (3x3 grid of overlapping sub-nodes)
@@ -56,7 +55,6 @@ pub struct LifeNode {
 /// HashLife arena and canonicalization cache.
 /// Arena = HashMap<[u32;4], u32> (children → idx).
 /// Nodes = HashMap<u32, LifeNode> (idx → node data).
-/// Single arena with mark/sweep GC.
 pub struct HashLifeCache {
     /// Canonicalization map: children tuple → node index
     pub arena: ahash::AHashMap<[u32; 4], u32>,
@@ -301,7 +299,7 @@ impl HashLifeCache {
                 let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live.contains(idx))
                     .map(|(idx, _)| idx)
                     .collect();
-                nodes.shrink_to_fit();
+                //nodes.shrink_to_fit();
                 let target = freed_vec.len() * 2;
                 freed.append(&mut freed_vec);
                 // Ensure freelist has at least 2x the freed count.
@@ -319,7 +317,7 @@ impl HashLifeCache {
             let fast_cache_n1 = &mut self.fast_cache_n1;
             s.spawn(|| {
                 fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
-                fast_cache_n1.shrink_to_fit();
+                //fast_cache_n1.shrink_to_fit();
             });
 
             // Thread 3: remove dead entries from arena, add sentinels
@@ -328,7 +326,7 @@ impl HashLifeCache {
                 arena.retain(|_, idx| live.contains(idx));
                 arena.entry([0,0,0,0]).or_insert(0);
                 arena.entry([1,1,1,1]).or_insert(1);
-                arena.shrink_to_fit();
+                //arena.shrink_to_fit();
             });
 
             // Thread 4: retain live entries in count_cache
@@ -1719,10 +1717,10 @@ pub fn step(&mut self) {
         // Rotate both caches after GC
         std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
         self.slow_cache_n1.clear();
-        self.slow_cache_n1.shrink_to_fit();
+        //self.slow_cache_n1.shrink_to_fit();
         std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
         self.cache.fast_cache_n1.clear();
-        self.cache.fast_cache_n1.shrink_to_fit();
+        //self.cache.fast_cache_n1.shrink_to_fit();
     }
 }
 
