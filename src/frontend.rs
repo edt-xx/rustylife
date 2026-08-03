@@ -20,6 +20,9 @@ input[type=range]{width:100px;vertical-align:middle}
 #pasteModal .modal-content{background:#16213e;border:2px solid #e94560;border-radius:6px;padding:16px;width:80%;max-width:700px;height:70vh;display:flex;flex-direction:column;gap:8px}
 #pasteModal textarea{flex:1;background:#1a1a2e;color:#e94560;border:1px solid #e94560;border-radius:3px;padding:8px;font-family:monospace;font-size:12px;resize:none}
 #pasteModal .modal-buttons{display:flex;gap:8px;justify-content:flex-end}
+#bookmarkMenu{display:none;position:fixed;z-index:200;background:#16213e;border:2px solid #e94560;border-radius:6px;padding:8px;min-width:140px}
+#bookmarkMenu.active{display:block}
+#bookmarkMenu button{display:block;width:100%;margin:2px 0;padding:4px 8px;font-size:12px}
 </style></head><body>
 <div id="topInfo">
   <div id="infoLine1">
@@ -49,6 +52,14 @@ input[type=range]{width:100px;vertical-align:middle}
       <button id="pasteCancelBtn">Cancel</button>
     </div>
   </div>
+</div>
+<div id="bookmarkMenu">
+  <button id="bmSaveA">Save A</button>
+  <button id="bmSaveB">Save B</button>
+  <button id="bmSaveC">Save C</button>
+  <button id="bmGotoA">Goto A</button>
+  <button id="bmGotoB">Goto B</button>
+  <button id="bmGotoC">Goto C</button>
 </div>
 <div class="toolbar">
   <div class="toolbar-content">
@@ -278,6 +289,58 @@ var hashlifeMode = true; // tracks hashlife mode toggle
 var stepCountVal = 1; // current step count (slider value + manual adjustments)
 var currentScale = 1; // server-side aggregation scale from last drawGrid
 var currentVw = 0, currentVh = 0; // viewport dimensions from server (aggregated when scale>1)
+
+// Bookmarks: save/restore viewport centers
+var bookmarks = {A: null, B: null, C: null}; // {x, y} grid center coords
+var rightTimer = null; // 250ms timer
+var rightDownTarget = null; // {cellX, cellY} for pending recenter
+var pendingRecenter = false; // set on first right up, acted on when timer fires
+var lastRightMoveX = 0, lastRightMoveY = 0; // track mouse position during right-click
+var bookmarkMenuOpen = false;
+
+function getViewportCenter() {
+    var vp = calcCells(cellSize);
+    return {x: camX + Math.floor(vp.vw / 2), y: camY + Math.floor(vp.vh / 2)};
+}
+function closeBookmarkMenu() {
+    bookmarkMenuOpen = false;
+    document.getElementById('bookmarkMenu').classList.remove('active');
+}
+function saveBookmark(label) {
+    var center = getViewportCenter();
+    bookmarks[label] = {x: center.x, y: center.y};
+    closeBookmarkMenu();
+}
+function gotoBookmark(label) {
+    var bm = bookmarks[label];
+    if (!bm) { alert('Bookmark ' + label + ' not set. Right-double-click and Save ' + label + ' first.'); return; }
+    var vp = calcCells(cellSize);
+    camX = bm.x - Math.floor(vp.vw / 2);
+    camY = bm.y - Math.floor(vp.vh / 2);
+    closeBookmarkMenu();
+    zoomRefresh();
+}
+function doRightTimer() {
+    if (pendingRecenter && !panning) {
+        // Timer expired after first mouseup: recenter
+        camX = rightDownTarget.cellX - Math.floor(calcCells(cellSize).vw / 2);
+        camY = rightDownTarget.cellY - Math.floor(calcCells(cellSize).vh / 2);
+        zoomRefresh();
+    } else if (!panning) {
+        // Timer expired with no mouseup: start panning
+        panning = true;
+        camStartX = camX; camStartY = camY;
+    }
+    pendingRecenter = false;
+    rightDownTarget = null;
+    rightTimer = null;
+}
+function cancelRightTimer() {
+    clearTimeout(rightTimer);
+    rightTimer = null;
+    pendingRecenter = false;
+    rightDownTarget = null;
+}
 
 function drawGrid(data) {
     var hdr  = new DataView(data, 0, 44);
@@ -659,20 +722,35 @@ canvas.addEventListener('mousedown', function(e) {
 
     if (e.button === 2) {
         e.preventDefault();
+        // Detect right double-click: if timer from previous click is still active
+        if (rightTimer !== null) {
+            // Right double-click — show bookmark menu, cancel pending recenter
+            cancelRightTimer();
+            rightHeld = false;
+            bookmarkMenuOpen = true;
+            var menu = document.getElementById('bookmarkMenu');
+            menu.classList.add('active');
+            menu.style.left = e.clientX + 'px';
+            menu.style.top = e.clientY + 'px';
+            return;
+        }
+
         rightHeld = true;
         // Both buttons held: do nothing
         if (leftHeld) {
             leftClickPending = null; // cancel deferred toggle
             return;
         }
-        // Right alone: record for recenter vs pan
+        // Right alone: start pending recenter/pan
         wasPlayingBeforePan = running;
         if (running) stopAnim();
         tracksBeforePan = tracksEnabled; tracksEnabled = false;
-        rcPending   = target;
+        rightDownTarget = target;
         pStartX     = e.clientX; pStartY = e.clientY;
         camStartX   = camX;      camStartY = camY;
         canvas.style.cursor = 'grabbing';
+        // Start 250ms timer — fires to recenter if pendingRecenter is set
+        rightTimer = setTimeout(doRightTimer, 250);
     }
 });
 
@@ -707,15 +785,18 @@ window.addEventListener('mouseup', function(e) {
 
     if (e.button === 2) {
         rightHeld = false;
-        // Right released: recenter if we didn't end up panning
-        if (rcPending && !wasPanning) {
-            camX = rcPending.cellX - Math.floor(calcCells(cellSize).vw / 2);
-           camY = rcPending.cellY - Math.floor(calcCells(cellSize).vh / 2);
-            zoomRefresh();
-        } else if (wasPanning) {
-            zoomRefresh();
+        // Right released: if timer is active, cancel it, set pendingRecenter, start new timer
+        if (rightTimer !== null && rightDownTarget && !panning) {
+            clearTimeout(rightTimer);
+            pendingRecenter = true;
+            rightTimer = setTimeout(doRightTimer, 250);
+        } else {
+            // Timer already expired or no target: clean up
+            clearTimeout(rightTimer);
+            rightTimer = null;
+            rightDownTarget = null;
+            pendingRecenter = false;
         }
-        rcPending = null;
         panning = false;
         canvas.style.cursor = 'crosshair';
         zoomDragStartY = null;
@@ -785,13 +866,16 @@ window.addEventListener('mousemove', function(e) {
         }
     }
 
-    // Right held alone: pan
-    if (rightHeld && !leftHeld && rcPending && !panning) {
+    // Right held alone: check for pan
+    if (rightHeld && !leftHeld && rightDownTarget && !panning) {
+        lastRightMoveX = e.clientX; lastRightMoveY = e.clientY;
         var moved = Math.sqrt((e.clientX - pStartX)**2 + (e.clientY - pStartY)**2);
         if (moved > 10) {
+            // Mouse moved >10px: start panning, cancel recenter timer
             panning = true;
             camStartX = camX; camStartY = camY;
-            rcPending = null;
+            cancelRightTimer();
+            closeBookmarkMenu(); // close menu when panning starts
         }
     }
 
@@ -806,6 +890,9 @@ window.addEventListener('mousemove', function(e) {
         zoomRefresh();
     }
 });
+
+// Prevent browser context menu on canvas
+canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
 // ---- Zoom: mouse wheel & keyboard ----
 // Deep zoom levels need multiple clicks to reach (avoid Brave renderD128 errors)
@@ -846,6 +933,10 @@ document.addEventListener('wheel', function(e) {
 
 document.addEventListener('keydown', function(e) {
     if (e.target.tagName === 'INPUT') return;
+    // ESC closes bookmark menu
+    if (e.key === 'Escape') {
+        if (bookmarkMenuOpen) { closeBookmarkMenu(); return; }
+    }
     var oldCs = cellSize;
     if (e.key === '=' || e.key === '+') {
         if (zoomIdx < ZOOM_LEVELS.length - 1) zoomIdx++;
@@ -894,6 +985,11 @@ document.addEventListener('DOMContentLoaded', async function() {
         var centerX = camX + Math.floor(vp.vw / 2);
         var centerY = camY + Math.floor(vp.vh / 2);
         await call({action:'randomize', cx: centerX, cy: centerY, size:100});
+        // Set all bookmarks to current center
+        var center = getViewportCenter();
+        bookmarks.A = {x: center.x, y: center.y};
+        bookmarks.B = {x: center.x, y: center.y};
+        bookmarks.C = {x: center.x, y: center.y};
         zoomRefresh();
     });
 
@@ -975,6 +1071,11 @@ document.addEventListener('DOMContentLoaded', async function() {
             anchorY = centerY;
         }
         await fetch('/load-pattern', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cells: cells, anchor_x: anchorX, anchor_y: anchorY})});
+        // Set all bookmarks to current center
+        var center = getViewportCenter();
+        bookmarks.A = {x: center.x, y: center.y};
+        bookmarks.B = {x: center.x, y: center.y};
+        bookmarks.C = {x: center.x, y: center.y};
         zoomRefresh();
     }
 
@@ -989,6 +1090,7 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     // Paste modal
     document.getElementById('pasteBtn').addEventListener('click', function() {
+        closeBookmarkMenu();
         document.getElementById('pasteModal').classList.add('active');
         document.getElementById('pasteArea').focus();
     });
@@ -1067,11 +1169,31 @@ document.addEventListener('DOMContentLoaded', async function() {
         stepPlusBtn.textContent = 'Step+1';
     });
 
+    // Bookmark menu button handlers
+    document.getElementById('bmSaveA').addEventListener('click', function() { saveBookmark('A'); });
+    document.getElementById('bmSaveB').addEventListener('click', function() { saveBookmark('B'); });
+    document.getElementById('bmSaveC').addEventListener('click', function() { saveBookmark('C'); });
+    document.getElementById('bmGotoA').addEventListener('click', function() { gotoBookmark('A'); });
+    document.getElementById('bmGotoB').addEventListener('click', function() { gotoBookmark('B'); });
+    document.getElementById('bmGotoC').addEventListener('click', function() { gotoBookmark('C'); });
+
+    // Click outside bookmark menu to dismiss (use click instead of mousedown to avoid interfering with double-click)
+    document.addEventListener('click', function(e) {
+        if (bookmarkMenuOpen && !document.getElementById('bookmarkMenu').contains(e.target)) {
+            closeBookmarkMenu();
+        }
+    });
+
     // Init
     camX = 2000000000; camY = 2000000000;
     var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
     cx += 2000000000; cy += 2000000000;
     await call({action:'randomize', cx: cx, cy: cy});
+    // Set all bookmarks to initial center
+    var center = getViewportCenter();
+    bookmarks.A = {x: center.x, y: center.y};
+    bookmarks.B = {x: center.x, y: center.y};
+    bookmarks.C = {x: center.x, y: center.y};
     zoomRefresh();
     setInterval(function() { if (!running) refresh(); }, 2000);
 });
