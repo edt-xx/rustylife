@@ -1409,6 +1409,7 @@ impl HashLife {
             let arena_size = hf.cache.nodes.len();
             let freelist_target = (arena_size * 4).max(4000000);
             hf.cache.grow_freed(freelist_target);
+            hf.shrink_caches();
             return hf;
         }
 
@@ -1440,7 +1441,7 @@ impl HashLife {
         let origin_x = min_x as i64 - (ox as i64);
         let origin_y = min_y as i64 - (oy as i64);
 
-        Self {
+        let mut hf = Self {
             cache,
             root: tree,
             center: (origin_x + size as i64 / 2, origin_y + size as i64 / 2),
@@ -1452,7 +1453,22 @@ impl HashLife {
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_step_count: 0,
-        }
+        };
+        hf.shrink_caches();
+        hf
+    }
+
+    /// Shrink all caches to fit. Called after loading/pasting a new pattern to
+    /// reclaim excess capacity from initial over-allocation. NOT called during
+    /// stepping — during stepping, caches grow as needed without shrinking.
+    pub fn shrink_caches(&mut self) {
+        self.cache.nodes.shrink_to_fit();
+        self.cache.arena.shrink_to_fit();
+        self.cache.count_cache.shrink_to_fit();
+        self.cache.fast_cache_n.shrink_to_fit();
+        self.cache.fast_cache_n1.shrink_to_fit();
+        self.slow_cache_n.shrink_to_fit();
+        self.slow_cache_n1.shrink_to_fit();
     }
 
     pub fn to_flat(&self) -> Vec<u64> {
