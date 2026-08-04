@@ -51,6 +51,7 @@ input[type=range]{width:100px;vertical-align:middle}
       <button id="pasteSaveBtn">Save</button>
       <button id="pasteReadBtn">Read</button>
       <button id="pasteCopyBtn">Copy</button>
+      <button id="pasteRandomBtn">Random</button>
       <button id="pasteOkBtn">Paste</button>
       <button id="pasteClearBtn">Clear</button>
       <button id="pasteCancelBtn">Cancel</button>
@@ -80,10 +81,9 @@ input[type=range]{width:100px;vertical-align:middle}
     <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
     <button id="stepPlusBtn">Step+1</button>
 
-    <button id="randBtn">Randomize</button>
     <button id="clearBtn">Clear</button>
     <button id="loadBtn">Load</button>
-    <button id="pasteBtn">Paste</button>
+    <button id="pasteBtn">Edit</button>
     <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
     <button id="tracksBtn">Tracks</button>
     <button id="hashlifeBtn">Classic</button>
@@ -98,7 +98,7 @@ const step = [1,4,16,32,64,256,512,1024,4096,16384,65536,131072];
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125]; // 1/64
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
-var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-50)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Randomize** - Fill viewport with random cells\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Paste** - Paste RLE text from clipboard\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
+var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-50)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Edit** - Paste RLE text, load/save files, generate random patterns, copy current pattern\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport
 var coordOffset = 2000000000;                      // 2e9 for classic, 2e15 for hashlife (safe for JS f64)
 
@@ -998,18 +998,26 @@ document.addEventListener('DOMContentLoaded', async function() {
         document.getElementById('stepVal').textContent = stepCountVal;
     });
 
-    document.getElementById('randBtn').addEventListener('click', async function() {
-        stopAnim();
-        var vp = calcCells(cellSize);
-        var centerX = camX + Math.floor(vp.vw / 2);
-        var centerY = camY + Math.floor(vp.vh / 2);
-        await call({action:'randomize', cx: centerX, cy: centerY, size:100});
-        // Set all bookmarks to current center
-        var center = getViewportCenter();
-        bookmarks.A = {x: center.x, y: center.y};
-        bookmarks.B = {x: center.x, y: center.y};
-        bookmarks.C = {x: center.x, y: center.y};
-        zoomRefresh();
+    // Generate random pattern as RLE text — fills textarea with ~50% density
+    function generateRandomRLE() {
+        var w = 40, h = 40;
+        var lines = ['x = ' + w, 'y = ' + h, ''];
+        for (var y = 0; y < h; y++) {
+            var row = '';
+            for (var x = 0; x < w; x++) {
+                if (Math.random() < 0.5) row += 'o';
+                else row += 'b';
+            }
+            lines.push(row);
+            if (y < h - 1) lines.push('');
+        }
+        lines.push('!');
+        return lines.join('$');
+    }
+
+    document.getElementById('pasteRandomBtn').addEventListener('click', function() {
+        document.getElementById('pasteArea').value = generateRandomRLE();
+        document.getElementById('pasteArea').focus();
     });
 
     document.getElementById('helpBtn').addEventListener('click', function() {
