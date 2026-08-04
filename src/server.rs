@@ -133,8 +133,8 @@ fn serve_state(
     grid: &Arc<Mutex<Grid>>,
     params: &HashMap<String, String>,
 ) -> Response<Cursor<Vec<u8>>> {
-   let vx: u32 = params.get("vx").and_then(|s| s.parse().ok()).unwrap_or(0);
-    let vy: u32 = params.get("vy").and_then(|s| s.parse().ok()).unwrap_or(0);
+   let vx: u64 = params.get("vx").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let vy: u64 = params.get("vy").and_then(|s| s.parse().ok()).unwrap_or(0);
     let vw: u32 = params.get("vw").and_then(|s| s.parse().ok()).unwrap_or(530);
     let vh: u32 = params.get("vh").and_then(|s| s.parse().ok()).unwrap_or(300);
     let scale: u32 = params.get("scale").and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -159,8 +159,10 @@ fn serve_state(
 
         if g.hashlife_mode {
             // HashLife: populate aggregated bitmap directly from quadtree (no raw allocation)
+            // Frontend sends frontend-space coords; convert to hashlife-space
             if let Some(ref hf) = g.hashlife {
-                hf.populate_aggregated_viewport(vx, vy, vw, vh, scale, &mut agg_bits);
+                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
+                hf.populate_aggregated_viewport(hvx, hvy, vw, vh, scale, &mut agg_bits);
             }
         } else {
             // Conventional: populate raw bitmap, then aggregate
@@ -168,10 +170,12 @@ fn serve_state(
             let mut bits = vec![0u8; bits_len];
             for &k in &g.alive {
                 let (ax, ay) = Coord::unpack(k);
+                let ax = ax as u64;
+                let ay = ay as u64;
                 if ax >= vx && ay >= vy {
                     let rx = ax - vx;
                     let ry = ay - vy;
-                    if rx < vw && ry < vh {
+                    if rx < vw as u64 && ry < vh as u64 {
                         let idx = ry as usize * vw as usize + rx as usize;
                         bits[idx >> 3] |= 1 << (idx & 7);
                     }
@@ -188,10 +192,12 @@ fn serve_state(
             for &tkey in &g.active_tiles {
                 let (tx, ty) = Coord::unpack(tkey);
                 for row in ty..(ty + ss) {
-                    if row < vy || row >= vy + vh { continue; }
+                    let row = row as u64;
+                    if row < vy || row >= vy + vh as u64 { continue; }
                     let ry = row - vy;
                     for col in tx..(tx + ss) {
-                        if col >= vx && col < vx + vw {
+                        let col = col as u64;
+                        if col >= vx && col < vx + vw as u64 {
                             let rx = col - vx;
                             let idx = ry as usize * vw as usize + rx as usize;
                             overlay[idx >> 3] |= 1 << (idx & 7);
@@ -209,16 +215,20 @@ fn serve_state(
         let mut bits = vec![0u8; bits_len];
 
         if g.hashlife_mode {
+            // Frontend sends frontend-space coords; convert to hashlife-space
             if let Some(ref hf) = g.hashlife {
-                hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
+                hf.populate_viewport(hvx, hvy, vw, vh, &mut bits);
             }
         } else {
             for &k in &g.alive {
                 let (ax, ay) = Coord::unpack(k);
+                let ax = ax as u64;
+                let ay = ay as u64;
                 if ax >= vx && ay >= vy {
                     let rx = ax - vx;
                     let ry = ay - vy;
-                    if rx < vw && ry < vh {
+                    if rx < vw as u64 && ry < vh as u64 {
                         let idx = ry as usize * vw as usize + rx as usize;
                         bits[idx >> 3] |= 1 << (idx & 7);
                     }
@@ -233,10 +243,12 @@ fn serve_state(
             for &tkey in &g.active_tiles {
                 let (tx, ty) = Coord::unpack(tkey);
                 for row in ty..(ty + ss) {
-                    if row < vy || row >= vy + vh { continue; }
+                    let row = row as u64;
+                    if row < vy || row >= vy + vh as u64 { continue; }
                     let ry = row - vy;
                     for col in tx..(tx + ss) {
-                        if col >= vx && col < vx + vw {
+                        let col = col as u64;
+                        if col >= vx && col < vx + vw as u64 {
                             let rx = col - vx;
                             let idx = ry as usize * vw as usize + rx as usize;
                             overlay[idx >> 3] |= 1 << (idx & 7);
@@ -326,8 +338,12 @@ fn handle_action(
             let mut g = grid.lock().unwrap();
             g.hashlife_mode = !g.hashlife_mode;
             if g.hashlife_mode {
-                g.init_hashlife();
+                // Switching to hashlife: init from alive set only if quadtree doesn't exist or is empty
+                if g.hashlife.is_none() || g.hashlife.as_ref().map_or(true, |hf| hf.is_empty()) {
+                    g.init_hashlife();
+                }
             } else {
+                // Switching to classic: rebuild alive from quadtree and drop it
                 g.sync_alive_from_hashlife();
             }
             // eprintln!("SERVER toggle-hashlife: hashlife_mode={}, alive={}, hashlife={:?}",
@@ -339,13 +355,42 @@ fn handle_action(
             let size = json.get("size").and_then(|v| v.as_i64()).unwrap_or(100);
             let density = json.get("density").and_then(|v| v.as_f64()).unwrap_or(0.3);
             let mut g = grid.lock().unwrap();
-            g.randomize(cx, cy, size, density);
-            if g.hashlife_mode { g.rebuild_hashlife(); } else { g.invalidate_hashlife(); }
+            if g.hashlife_mode {
+                // Frontend sends frontend-space coords; convert to hashlife-space
+                let (hc, hy) = game_of_life::hashlife::frontend_to_hashlife(cx as u64, cy as u64);
+                // Clear existing state before randomizing
+                g.hashlife = Some(game_of_life::hashlife::HashLife::new());
+                if let Some(ref mut hf) = g.hashlife {
+                    let half = size / 2;
+                    for dx in -half..=half {
+                        for dy in -half..=half {
+                            if fastrand::f64() < density {
+                                let x = hc.wrapping_add(dx as i64 as u64);
+                                let y = hy.wrapping_add(dy as i64 as u64);
+                                hf.set_cell(x, y, true);
+                            }
+                        }
+                    }
+                }
+                g.alive.clear();
+                g.alive_index.clear();
+                g.active_tiles.clear();
+            } else {
+                g.randomize(cx, cy, size, density);
+                g.invalidate_hashlife();
+            }
         }
      "clear" => {
             let mut g = grid.lock().unwrap();
             g.clear();
-            if g.hashlife_mode { g.rebuild_hashlife(); } else { g.invalidate_hashlife(); }
+            if g.hashlife_mode {
+                // Clear hashlife quadtree too
+                if let Some(ref mut hf) = g.hashlife {
+                    *hf = game_of_life::hashlife::HashLife::new();
+                }
+            } else {
+                g.invalidate_hashlife();
+            }
         }
         "quit" => {
             println!("Quit requested, shutting down...");
@@ -365,7 +410,10 @@ fn handle_export_pattern(
     // Collect alive cells
     let cells: Vec<(u64, u64)> = if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {
-            hf.to_flat().iter().map(|&p| game_of_life::hashlife::coord_unpack(p)).collect()
+            hf.to_flat().iter().map(|&p| {
+                let (hx, hy) = game_of_life::hashlife::coord_unpack(p);
+                game_of_life::hashlife::hashlife_to_frontend(hx, hy)
+            }).collect()
         } else {
             Vec::new()
         }
@@ -478,8 +526,9 @@ fn handle_toggle(
         let mut g = grid.lock().unwrap();
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
-                let was_alive = hf.get_cell(x as u64, y as u64);
-                hf.set_cell(x as u64, y as u64, !was_alive);
+                let (hx, hy) = game_of_life::hashlife::frontend_to_hashlife(x as u64, y as u64);
+                let was_alive = hf.get_cell(hx, hy);
+                hf.set_cell(hx, hy, !was_alive);
             }
         } else {
             g.toggle(x, y);
@@ -514,16 +563,19 @@ fn handle_load_pattern(
         let mut g = grid.lock().unwrap();
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
+                // Frontend sends frontend-space coords; convert to hashlife-space
+                let (ha_x, ha_y) = game_of_life::hashlife::frontend_to_hashlife(anchor_x as u64, anchor_y as u64);
                 if hf.is_empty() {
-                    // Load all cells at once via from_flat — avoids per-cell tree expansion
-                    let flat: Vec<u128> = cell_list.iter().map(|&(cx, cy)| {
-                        game_of_life::hashlife::coord_pack((cx + anchor_x) as u64, (cy + anchor_y) as u64)
+                    let flat: Vec<u128> = cell_list.iter().map(|&(ccx, ccy)| {
+                        let gx = ha_x.wrapping_add(ccx as i64 as u64);
+                        let gy = ha_y.wrapping_add(ccy as i64 as u64);
+                        game_of_life::hashlife::coord_pack(gx, gy)
                     }).collect();
                     *hf = game_of_life::hashlife::HashLife::from_flat(&flat);
                 } else {
-                    for &(cx, cy) in &cell_list {
-                        let x = (cx + anchor_x) as u64;
-                        let y = (cy + anchor_y) as u64;
+                    for &(ccx, ccy) in &cell_list {
+                        let x = ha_x.wrapping_add(ccx as i64 as u64);
+                        let y = ha_y.wrapping_add(ccy as i64 as u64);
                         hf.set_cell(x, y, true);
                     }
                 }

@@ -474,13 +474,15 @@ impl Grid {
     }
 
     /// Build HashLife from current alive set if not already present.
-    /// Converts grid's u64 coords (u32,u32) to hashlife's u128 coords (u64,u64).
+    /// Converts grid's u64 coords (u32,u32) to hashlife's u128 coords (u64,u64)
+    /// with offset remapping: subtract GRID_OFFSET, add HASHLIFE_OFFSET.
     pub fn init_hashlife(&mut self) {
         if self.hashlife.is_none() {
             eprintln!("INIT_HASHLIFE: creating new instance from {} cells", self.alive.len());
             let cells: Vec<u128> = self.alive.iter().map(|&k| {
                 let (x, y) = Coord::unpack(k);
-                game_of_life::hashlife::coord_pack(x as u64, y as u64)
+                let (hx, hy) = game_of_life::hashlife::grid_to_hashlife(x as u64, y as u64);
+                game_of_life::hashlife::coord_pack(hx, hy)
             }).collect();
             self.hashlife = Some(game_of_life::hashlife::HashLife::from_flat(&cells));
         }
@@ -493,15 +495,17 @@ impl Grid {
     }
 
     /// Switch from HashLife to Classic: rebuild alive from quadtree.
-    /// Converts hashlife's u128 coords (u64,u64) back to grid's u64 coords (u32,u32).
+    /// Converts hashlife's u128 coords (u64,u64) back to grid's u64 coords (u32,u32)
+    /// with offset remapping: subtract HASHLIFE_OFFSET, add GRID_OFFSET.
     pub fn sync_alive_from_hashlife(&mut self) {
         if let Some(ref hf) = self.hashlife {
             let alive_u128 = hf.collect_alive();
             let alive: Vec<u64> = alive_u128.iter().filter_map(|&cell| {
-                let (x, y) = game_of_life::hashlife::coord_unpack(cell);
+                let (hx, hy) = game_of_life::hashlife::coord_unpack(cell);
+                let (gx, gy) = game_of_life::hashlife::hashlife_to_grid(hx, hy);
                 // Only include cells that fit in u32
-                if x <= u32::MAX as u64 && y <= u32::MAX as u64 {
-                    Some(Coord::pack(x as u32, y as u32))
+                if gx <= u32::MAX as u64 && gy <= u32::MAX as u64 {
+                    Some(Coord::pack(gx as u32, gy as u32))
                 } else {
                     None
                 }

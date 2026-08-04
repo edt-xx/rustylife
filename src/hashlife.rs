@@ -16,6 +16,53 @@ use ahash::AHashMap;
 pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
 pub fn coord_unpack(cell: u128) -> (u64, u64) { ((cell & ((1u128 << 64) - 1)) as u64, (cell >> 64) as u64) }
 
+/// Grid coordinates are offset by this amount so the "origin" sits at (2e9, 2e9).
+/// Allows negative real-world coordinates without wrapping.
+pub const GRID_OFFSET: u64 = 2_000_000_000;
+
+/// Frontend uses this offset when in hashlife mode (2e15 — safe for JS f64 precision).
+pub const FRONTEND_OFFSET: u64 = 2_000_000_000_000_000;
+
+/// HashLife coordinates are offset by this amount so the "origin" sits at (9e18, 9e18).
+/// Gives ~9e18 range in both positive and negative directions before wrapping.
+pub const HASHLIFE_OFFSET: u64 = 9_000_000_000_000_000_000;
+
+/// Convert grid coords (GRID_OFFSET-based) to hashlife coords (HASHLIFE_OFFSET-based).
+pub fn grid_to_hashlife(x: u64, y: u64) -> (u64, u64) {
+    let gx = x as i64;
+    let gy = y as i64;
+    let hx = gx.wrapping_sub(GRID_OFFSET as i64).wrapping_add(HASHLIFE_OFFSET as i64);
+    let hy = gy.wrapping_sub(GRID_OFFSET as i64).wrapping_add(HASHLIFE_OFFSET as i64);
+    (hx as u64, hy as u64)
+}
+
+/// Convert hashlife coords (HASHLIFE_OFFSET-based) to grid coords (GRID_OFFSET-based).
+pub fn hashlife_to_grid(x: u64, y: u64) -> (u64, u64) {
+    let hx = x as i64;
+    let hy = y as i64;
+    let gx = hx.wrapping_sub(HASHLIFE_OFFSET as i64).wrapping_add(GRID_OFFSET as i64);
+    let gy = hy.wrapping_sub(HASHLIFE_OFFSET as i64).wrapping_add(GRID_OFFSET as i64);
+    (gx as u64, gy as u64)
+}
+
+/// Convert frontend coords (FRONTEND_OFFSET-based) to hashlife coords (HASHLIFE_OFFSET-based).
+pub fn frontend_to_hashlife(x: u64, y: u64) -> (u64, u64) {
+    let fx = x as i64;
+    let fy = y as i64;
+    let hx = fx.wrapping_sub(FRONTEND_OFFSET as i64).wrapping_add(HASHLIFE_OFFSET as i64);
+    let hy = fy.wrapping_sub(FRONTEND_OFFSET as i64).wrapping_add(HASHLIFE_OFFSET as i64);
+    (hx as u64, hy as u64)
+}
+
+/// Convert hashlife coords (HASHLIFE_OFFSET-based) to frontend coords (FRONTEND_OFFSET-based).
+pub fn hashlife_to_frontend(x: u64, y: u64) -> (u64, u64) {
+    let hx = x as i64;
+    let hy = y as i64;
+    let fx = hx.wrapping_sub(HASHLIFE_OFFSET as i64).wrapping_add(FRONTEND_OFFSET as i64);
+    let fy = hy.wrapping_sub(HASHLIFE_OFFSET as i64).wrapping_add(FRONTEND_OFFSET as i64);
+    (fx as u64, fy as u64)
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -1145,23 +1192,23 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: 
     cache.find_or_create(nw, ne, sw, se)
 }
 
-fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut [u8]) {
+fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u64, vy: u64, vw: u32, vh: u32, bits: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
     // Overlap check: node [ox, ox+size) vs viewport [vx, vx+vw)
-    if ox >= (vx + vw) as u64 || ox + size as u64 <= vx as u64 || oy >= (vy + vh) as u64 || oy + size as u64 <= vy as u64 {
+    if ox >= vx + vw as u64 || ox + size as u64 <= vx || oy >= vy + vh as u64 || oy + size as u64 <= vy {
         return; // No overlap
     }
     if node_idx == TRUE_NODE {
-        let rx = ox.max(vx as u64);
-        let ry = oy.max(vy as u64);
-        let rx2 = (ox + size as u64).min((vx + vw) as u64);
-        let ry2 = (oy + size as u64).min((vy + vh) as u64);
+        let rx = ox.max(vx);
+        let ry = oy.max(vy);
+        let rx2 = (ox + size as u64).min(vx + vw as u64);
+        let ry2 = (oy + size as u64).min(vy + vh as u64);
         // Iterate by row, then by byte: skip non-zero bytes, set zero bytes to 0xFF
         for y in ry..ry2 {
-            let row_base = ((y - vy as u64) * vw as u64) as usize;
-            let start_idx = row_base + (rx - vx as u64) as usize;
-            let end_idx = row_base + (rx2 - vx as u64) as usize;
+            let row_base = ((y - vy) * vw as u64) as usize;
+            let start_idx = row_base + (rx - vx) as usize;
+            let end_idx = row_base + (rx2 - vx) as usize;
             let start_byte = start_idx >> 3;
             let end_byte = (end_idx - 1) >> 3;
             let max_byte = bits.len();
@@ -1195,8 +1242,8 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: 
     }
     if depth == 0 {
         // Single cell at (ox, oy)
-        if ox >= vx as u64 && oy >= vy as u64 && ox < (vx + vw) as u64 && oy < (vy + vh) as u64 {
-            let idx = ((oy - vy as u64) * vw as u64 + (ox - vx as u64)) as usize;
+        if ox >= vx && oy >= vy && ox < vx + vw as u64 && oy < vy + vh as u64 {
+            let idx = ((oy - vy) * vw as u64 + (ox - vx)) as usize;
             let byte = idx / 8;
             if byte < bits.len() {
                 bits[byte] |= 1 << (idx % 8);
@@ -1214,22 +1261,22 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: 
 
 /// Like fill_viewport but writes directly to an aggregated bitmap.
 /// Each raw cell (x, y) maps to aggregated pixel (aggx, aggy) = ((x-vx)/scale, (y-vy)/scale).
-fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut [u8]) {
+fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u64, vy: u64, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
-    if ox >= (vx + vw) as u64 || ox + size as u64 <= vx as u64 || oy >= (vy + vh) as u64 || oy + size as u64 <= vy as u64 {
+    if ox >= vx + vw as u64 || ox + size as u64 <= vx || oy >= vy + vh as u64 || oy + size as u64 <= vy {
         return;
     }
     if node_idx == TRUE_NODE {
-        let rx = ox.max(vx as u64);
-        let ry = oy.max(vy as u64);
-        let rx2 = (ox + size as u64).min((vx + vw) as u64);
-        let ry2 = (oy + size as u64).min((vy + vh) as u64);
+        let rx = ox.max(vx);
+        let ry = oy.max(vy);
+        let rx2 = (ox + size as u64).min(vx + vw as u64);
+        let ry2 = (oy + size as u64).min(vy + vh as u64);
         // Map bounds to aggregated coordinates
-        let agg_rx = (rx - vx as u64) / scale as u64;
-        let agg_ry = (ry - vy as u64) / scale as u64;
-        let agg_rx2 = (rx2 - vx as u64 + scale as u64 - 1) / scale as u64; // ceiling
-        let agg_ry2 = (ry2 - vy as u64 + scale as u64 - 1) / scale as u64;
+        let agg_rx = (rx - vx) / scale as u64;
+        let agg_ry = (ry - vy) / scale as u64;
+        let agg_rx2 = (rx2 - vx + scale as u64 - 1) / scale as u64; // ceiling
+        let agg_ry2 = (ry2 - vy + scale as u64 - 1) / scale as u64;
         let agg_rx2 = agg_rx2.min(agg_w as u64);
         let agg_ry2 = agg_ry2.min(agg_h as u64);
         for aggy in agg_ry..agg_ry2 {
@@ -1272,9 +1319,9 @@ fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox
         return;
     }
     if depth == 0 {
-        if ox >= vx as u64 && oy >= vy as u64 && ox < (vx + vw) as u64 && oy < (vy + vh) as u64 {
-            let aggx = (ox - vx as u64) / scale as u64;
-            let aggy = (oy - vy as u64) / scale as u64;
+        if ox >= vx && oy >= vy && ox < vx + vw as u64 && oy < vy + vh as u64 {
+            let aggx = (ox - vx) / scale as u64;
+            let aggy = (oy - vy) / scale as u64;
             if aggx < agg_w as u64 && aggy < agg_h as u64 {
                 let aidx = (aggy * agg_w as u64 + aggx) as usize;
                 if aidx < agg.len() * 8 {
@@ -1505,7 +1552,7 @@ impl HashLife {
 
     pub fn size(&self) -> usize { 1usize << self.depth }
 
-    pub fn populate_viewport(&self, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut Vec<u8>) {
+    pub fn populate_viewport(&self, vx: u64, vy: u64, vw: u32, vh: u32, bits: &mut Vec<u8>) {
         let bits_len = (vw as usize * vh as usize + 7) / 8;
         if bits.len() < bits_len { bits.resize(bits_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
@@ -1534,7 +1581,7 @@ impl HashLife {
 
     /// Populate an aggregated bitmap directly from the quadtree.
     /// Each raw cell maps to aggregated pixel ((x-vx)/scale, (y-vy)/scale).
-    pub fn populate_aggregated_viewport(&self, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg: &mut Vec<u8>) {
+    pub fn populate_aggregated_viewport(&self, vx: u64, vy: u64, vw: u32, vh: u32, scale: u32, agg: &mut Vec<u8>) {
         let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
         let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
         let agg_len = (agg_w * agg_h + 7) / 8;
