@@ -363,14 +363,17 @@ fn handle_export_pattern(
     let g = grid.lock().unwrap();
 
     // Collect alive cells
-    let cells: Vec<(u32, u32)> = if g.hashlife_mode {
+    let cells: Vec<(u64, u64)> = if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {
-            hf.to_flat().iter().map(|&p| Coord::unpack(p)).collect()
+            hf.to_flat().iter().map(|&p| game_of_life::hashlife::coord_unpack(p)).collect()
         } else {
             Vec::new()
         }
     } else {
-        g.alive.iter().map(|&k| Coord::unpack(k)).collect()
+        g.alive.iter().map(|&k| {
+            let (x, y) = Coord::unpack(k);
+            (x as u64, y as u64)
+        }).collect()
     };
 
     // Use MC format for large patterns, RLE for small ones
@@ -388,13 +391,13 @@ fn handle_export_pattern(
 }
 
 /// Export cells to RLE format
-fn export_rle(cells: &[(u32, u32)]) -> String {
+fn export_rle(cells: &[(u64, u64)]) -> String {
     if cells.is_empty() {
         return "b!".to_string();
     }
 
     // Find bounds
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0, u32::MAX, 0);
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u64::MAX, 0, u64::MAX, 0);
     for &(x, y) in cells {
         if x < min_x { min_x = x; }
         if x > max_x { max_x = x; }
@@ -403,7 +406,7 @@ fn export_rle(cells: &[(u32, u32)]) -> String {
     }
 
     // Build a set for O(1) lookup
-    let alive: std::collections::HashSet<(u32, u32)> = cells.iter().copied().collect();
+    let alive: std::collections::HashSet<(u64, u64)> = cells.iter().copied().collect();
 
     // Encode header
     let mut out = String::new();
@@ -475,8 +478,8 @@ fn handle_toggle(
         let mut g = grid.lock().unwrap();
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
-                let was_alive = hf.get_cell(x as u32, y as u32);
-                hf.set_cell(x as u32, y as u32, !was_alive);
+                let was_alive = hf.get_cell(x as u64, y as u64);
+                hf.set_cell(x as u64, y as u64, !was_alive);
             }
         } else {
             g.toggle(x, y);
@@ -513,14 +516,14 @@ fn handle_load_pattern(
             if let Some(ref mut hf) = g.hashlife {
                 if hf.is_empty() {
                     // Load all cells at once via from_flat — avoids per-cell tree expansion
-                    let flat: Vec<u64> = cell_list.iter().map(|&(cx, cy)| {
-                        game_of_life::hashlife::coord_pack((cx + anchor_x) as u32, (cy + anchor_y) as u32)
+                    let flat: Vec<u128> = cell_list.iter().map(|&(cx, cy)| {
+                        game_of_life::hashlife::coord_pack((cx + anchor_x) as u64, (cy + anchor_y) as u64)
                     }).collect();
                     *hf = game_of_life::hashlife::HashLife::from_flat(&flat);
                 } else {
                     for &(cx, cy) in &cell_list {
-                        let x = (cx + anchor_x) as u32;
-                        let y = (cy + anchor_y) as u32;
+                        let x = (cx + anchor_x) as u64;
+                        let y = (cy + anchor_y) as u64;
                         hf.set_cell(x, y, true);
                     }
                 }

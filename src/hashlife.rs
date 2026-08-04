@@ -12,9 +12,9 @@
 
 use ahash::AHashMap;
 
-// Coord pack/unpack (inline to avoid grid dependency in lib context)
-pub fn coord_pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
-fn coord_unpack(cell: u64) -> (u32, u32) { ((cell & 0xFFFFFFFF) as u32, (cell >> 32) as u32) }
+// Coord pack/unpack: u64 coords packed into u128
+pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
+pub fn coord_unpack(cell: u128) -> (u64, u64) { ((cell & ((1u128 << 64) - 1)) as u64, (cell >> 64) as u64) }
 
 // ============================================================================
 // Constants
@@ -596,7 +596,7 @@ fn ensure_level2(cache: &mut HashLifeCache, idx: u32) -> u32 {
 
 /// Build quadtree directly from packed cell list (no 2D grid allocation).
 /// Partitions cells into quadrants recursively, creating leaf nodes at 8x8 blocks.
-fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u64], ox: u32, oy: u32, size: u32, depth: u32) -> u32 {
+fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u128], ox: u64, oy: u64, size: u32, depth: u32) -> u32 {
     if cells.is_empty() {
         return FALSE_NODE;
     }
@@ -613,7 +613,7 @@ fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u64], ox: u32, 
     let mut se_cells = Vec::with_capacity(cells.len() / 4);
     for &cell in cells {
         let (x, y) = coord_unpack(cell);
-        match (x >= ox + half, y >= oy + half) {
+        match (x >= ox + half as u64, y >= oy + half as u64) {
             (false, false) => nw_cells.push(cell),
             (true, false) => ne_cells.push(cell),
             (false, true) => sw_cells.push(cell),
@@ -621,9 +621,9 @@ fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u64], ox: u32, 
         }
     }
     let nw = build_quadtree_from_cells(cache, &nw_cells, ox, oy, half, depth - 1);
-    let ne = build_quadtree_from_cells(cache, &ne_cells, ox + half, oy, half, depth - 1);
-    let sw = build_quadtree_from_cells(cache, &sw_cells, ox, oy + half, half, depth - 1);
-    let se = build_quadtree_from_cells(cache, &se_cells, ox + half, oy + half, half, depth - 1);
+    let ne = build_quadtree_from_cells(cache, &ne_cells, ox + half as u64, oy, half, depth - 1);
+    let sw = build_quadtree_from_cells(cache, &sw_cells, ox, oy + half as u64, half, depth - 1);
+    let se = build_quadtree_from_cells(cache, &se_cells, ox + half as u64, oy + half as u64, half, depth - 1);
     cache.find_or_create(nw, ne, sw, se)
 }
 
@@ -1059,14 +1059,14 @@ fn export_mc_node(cache: &HashLifeCache, node_idx: u32, depth: u32, counter: &mu
     id
 }
 
-fn collect_alive(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, result: &mut Vec<u64>) {
+fn collect_alive(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, result: &mut Vec<u128>) {
     if node_idx == FALSE_NODE { return; }
     if node_idx == TRUE_NODE {
         // Uniform block — fill entire region
         let size = 1u32 << depth;
         for y in 0..size {
             for x in 0..size {
-                result.push(coord_pack(ox + x, oy + y));
+                result.push(coord_pack(ox + x as u64, oy + y as u64));
             }
         }
         return;
@@ -1079,9 +1079,9 @@ fn collect_alive(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
     let node = cache.get_node(node_idx);
     let half = 1u32 << (depth - 1);
     collect_alive(cache, node.north_west, depth - 1, ox, oy, result);
-    collect_alive(cache, node.north_east, depth - 1, ox + half, oy, result);
-    collect_alive(cache, node.south_west, depth - 1, ox, oy + half, result);
-    collect_alive(cache, node.south_east, depth - 1, ox + half, oy + half, result);
+    collect_alive(cache, node.north_east, depth - 1, ox.wrapping_add(half as u64), oy, result);
+    collect_alive(cache, node.south_west, depth - 1, ox, oy.wrapping_add(half as u64), result);
+    collect_alive(cache, node.south_east, depth - 1, ox.wrapping_add(half as u64), oy.wrapping_add(half as u64), result);
 }
 
 fn get_cell_at(cache: &HashLifeCache, node_idx: u32, depth: u32, x: u32, y: u32) -> bool {
@@ -1145,23 +1145,23 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: 
     cache.find_or_create(nw, ne, sw, se)
 }
 
-fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut [u8]) {
+fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u32, vy: u32, vw: u32, vh: u32, bits: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
     // Overlap check: node [ox, ox+size) vs viewport [vx, vx+vw)
-    if ox >= vx + vw || ox + size <= vx || oy >= vy + vh || oy + size <= vy {
+    if ox >= (vx + vw) as u64 || ox + size as u64 <= vx as u64 || oy >= (vy + vh) as u64 || oy + size as u64 <= vy as u64 {
         return; // No overlap
     }
     if node_idx == TRUE_NODE {
-        let rx = ox.max(vx);
-        let ry = oy.max(vy);
-        let rx2 = (ox + size).min(vx + vw);
-        let ry2 = (oy + size).min(vy + vh);
+        let rx = ox.max(vx as u64);
+        let ry = oy.max(vy as u64);
+        let rx2 = (ox + size as u64).min((vx + vw) as u64);
+        let ry2 = (oy + size as u64).min((vy + vh) as u64);
         // Iterate by row, then by byte: skip non-zero bytes, set zero bytes to 0xFF
         for y in ry..ry2 {
-            let row_base = ((y - vy) * vw) as usize;
-            let start_idx = row_base + (rx - vx) as usize;
-            let end_idx = row_base + (rx2 - vx) as usize;
+            let row_base = ((y - vy as u64) * vw as u64) as usize;
+            let start_idx = row_base + (rx - vx as u64) as usize;
+            let end_idx = row_base + (rx2 - vx as u64) as usize;
             let start_byte = start_idx >> 3;
             let end_byte = (end_idx - 1) >> 3;
             let max_byte = bits.len();
@@ -1195,8 +1195,8 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
     }
     if depth == 0 {
         // Single cell at (ox, oy)
-        if ox >= vx && oy >= vy && ox < vx + vw && oy < vy + vh {
-            let idx = ((oy - vy) * vw + (ox - vx)) as usize;
+        if ox >= vx as u64 && oy >= vy as u64 && ox < (vx + vw) as u64 && oy < (vy + vh) as u64 {
+            let idx = ((oy - vy as u64) * vw as u64 + (ox - vx as u64)) as usize;
             let byte = idx / 8;
             if byte < bits.len() {
                 bits[byte] |= 1 << (idx % 8);
@@ -1207,33 +1207,33 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: 
     let node = cache.get_node(node_idx);
     let half = 1u32 << (depth - 1);
     fill_viewport(cache, node.north_west, depth - 1, ox, oy, vx, vy, vw, vh, bits);
-    fill_viewport(cache, node.north_east, depth - 1, ox + half, oy, vx, vy, vw, vh, bits);
-    fill_viewport(cache, node.south_west, depth - 1, ox, oy + half, vx, vy, vw, vh, bits);
-    fill_viewport(cache, node.south_east, depth - 1, ox + half, oy + half, vx, vy, vw, vh, bits);
+    fill_viewport(cache, node.north_east, depth - 1, ox + half as u64, oy, vx, vy, vw, vh, bits);
+    fill_viewport(cache, node.south_west, depth - 1, ox, oy + half as u64, vx, vy, vw, vh, bits);
+    fill_viewport(cache, node.south_east, depth - 1, ox + half as u64, oy + half as u64, vx, vy, vw, vh, bits);
 }
 
 /// Like fill_viewport but writes directly to an aggregated bitmap.
 /// Each raw cell (x, y) maps to aggregated pixel (aggx, aggy) = ((x-vx)/scale, (y-vy)/scale).
-fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut [u8]) {
+fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u32, vy: u32, vw: u32, vh: u32, scale: u32, agg_w: u32, agg_h: u32, agg: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
-    if ox >= vx + vw || ox + size <= vx || oy >= vy + vh || oy + size <= vy {
+    if ox >= (vx + vw) as u64 || ox + size as u64 <= vx as u64 || oy >= (vy + vh) as u64 || oy + size as u64 <= vy as u64 {
         return;
     }
     if node_idx == TRUE_NODE {
-        let rx = ox.max(vx);
-        let ry = oy.max(vy);
-        let rx2 = (ox + size).min(vx + vw);
-        let ry2 = (oy + size).min(vy + vh);
+        let rx = ox.max(vx as u64);
+        let ry = oy.max(vy as u64);
+        let rx2 = (ox + size as u64).min((vx + vw) as u64);
+        let ry2 = (oy + size as u64).min((vy + vh) as u64);
         // Map bounds to aggregated coordinates
-        let agg_rx = (rx - vx) / scale;
-        let agg_ry = (ry - vy) / scale;
-        let agg_rx2 = (rx2 - vx + scale - 1) / scale; // ceiling
-        let agg_ry2 = (ry2 - vy + scale - 1) / scale;
-        let agg_rx2 = agg_rx2.min(agg_w);
-        let agg_ry2 = agg_ry2.min(agg_h);
+        let agg_rx = (rx - vx as u64) / scale as u64;
+        let agg_ry = (ry - vy as u64) / scale as u64;
+        let agg_rx2 = (rx2 - vx as u64 + scale as u64 - 1) / scale as u64; // ceiling
+        let agg_ry2 = (ry2 - vy as u64 + scale as u64 - 1) / scale as u64;
+        let agg_rx2 = agg_rx2.min(agg_w as u64);
+        let agg_ry2 = agg_ry2.min(agg_h as u64);
         for aggy in agg_ry..agg_ry2 {
-            let row_base = (aggy * agg_w) as usize;
+            let row_base = (aggy * agg_w as u64) as usize;
             let start_idx = row_base + agg_rx as usize;
             let end_idx = row_base + agg_rx2 as usize;
             let start_byte = start_idx >> 3;
@@ -1272,11 +1272,11 @@ fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox
         return;
     }
     if depth == 0 {
-        if ox >= vx && oy >= vy && ox < vx + vw && oy < vy + vh {
-            let aggx = (ox - vx) / scale;
-            let aggy = (oy - vy) / scale;
-            if aggx < agg_w && aggy < agg_h {
-                let aidx = (aggy * agg_w + aggx) as usize;
+        if ox >= vx as u64 && oy >= vy as u64 && ox < (vx + vw) as u64 && oy < (vy + vh) as u64 {
+            let aggx = (ox - vx as u64) / scale as u64;
+            let aggy = (oy - vy as u64) / scale as u64;
+            if aggx < agg_w as u64 && aggy < agg_h as u64 {
+                let aidx = (aggy * agg_w as u64 + aggx) as usize;
                 if aidx < agg.len() * 8 {
                     agg[aidx >> 3] |= 1 << (aidx & 7);
                 }
@@ -1287,9 +1287,9 @@ fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox
     let node = cache.get_node(node_idx);
     let half = 1u32 << (depth - 1);
     fill_aggregated_viewport(cache, node.north_west, depth - 1, ox, oy, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
-    fill_aggregated_viewport(cache, node.north_east, depth - 1, ox + half, oy, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
-    fill_aggregated_viewport(cache, node.south_west, depth - 1, ox, oy + half, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
-    fill_aggregated_viewport(cache, node.south_east, depth - 1, ox + half, oy + half, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.north_east, depth - 1, ox + half as u64, oy, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.south_west, depth - 1, ox, oy + half as u64, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
+    fill_aggregated_viewport(cache, node.south_east, depth - 1, ox + half as u64, oy + half as u64, vx, vy, vw, vh, scale, agg_w, agg_h, agg);
 }
 
 // ============================================================================
@@ -1353,30 +1353,30 @@ impl HashLife {
         count_cells(&mut self.cache, self.root, self.depth)
     }
 
-    /// Collect all alive cells from the quadtree as packed u64 coords.
-    pub fn collect_alive(&self) -> Vec<u64> {
+    /// Collect all alive cells from the quadtree as packed u128 coords.
+    pub fn collect_alive(&self) -> Vec<u128> {
         let mut alive = Vec::new();
         collect_alive(&self.cache, self.root, self.depth, 0, 0, &mut alive);
         // Offset from quadtree-local (0,0) to global coords
         let cx = self.center.0;
         let cy = self.center.1;
-        let half = (self.size() as i64 / 2) as u64;
+        let half = self.size() as i64 / 2;
         for cell in &mut alive {
             let (x, y) = coord_unpack(*cell);
-            let gx = (x as i64 + cx - half as i64) as u32;
-            let gy = (y as i64 + cy - half as i64) as u32;
-            *cell = coord_pack(gx, gy);
+            let gx = x as i64 + cx - half;
+            let gy = y as i64 + cy - half;
+            *cell = coord_pack(gx as u64, gy as u64);
         }
         alive
     }
 
-    pub fn from_flat(data: &[u64]) -> Self {
+    pub fn from_flat(data: &[u128]) -> Self {
         if data.is_empty() { return Self::new(); }
 
-        let mut min_x = u32::MAX;
-        let mut min_y = u32::MAX;
-        let mut max_x = u32::MIN;
-        let mut max_y = u32::MIN;
+        let mut min_x = u64::MAX;
+        let mut min_y = u64::MAX;
+        let mut max_x = u64::MIN;
+        let mut max_y = u64::MIN;
         for &cell in data {
             let (x, y) = coord_unpack(cell);
             min_x = min_x.min(x); min_y = min_y.min(y);
@@ -1420,7 +1420,7 @@ impl HashLife {
         let mut grid_2d = vec![vec![0u8; size]; size];
         for &cell in data {
             let (x, y) = coord_unpack(cell);
-            grid_2d[(y - min_y + oy as u32) as usize][(x - min_x + ox as u32) as usize] = 1;
+            grid_2d[(y - min_y + oy as u64) as usize][(x - min_x + ox as u64) as usize] = 1;
         }
 
         let mut cache = HashLifeCache::new_for_population(data.len());
@@ -1471,11 +1471,11 @@ impl HashLife {
         self.slow_cache_n1.shrink_to_fit();
     }
 
-    pub fn to_flat(&self) -> Vec<u64> {
+    pub fn to_flat(&self) -> Vec<u128> {
         let mut result = Vec::new();
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        collect_alive(&self.cache, self.root, self.depth, origin_x as u32, origin_y as u32, &mut result);
+        collect_alive(&self.cache, self.root, self.depth, origin_x as u64, origin_y as u64, &mut result);
         result
     }
 
@@ -1518,17 +1518,17 @@ impl HashLife {
             let bits_len = bits_len;
             std::thread::scope(|s| {
                 s.spawn(|| fill_viewport(&self.cache, node.north_west, self.depth - 1,
-                    origin_x as u32, origin_y as u32, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                    origin_x as u64, origin_y as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
                 s.spawn(|| fill_viewport(&self.cache, node.north_east, self.depth - 1,
-                    origin_x as u32 + half, origin_y as u32, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                    origin_x as u64 + half as u64, origin_y as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
                 s.spawn(|| fill_viewport(&self.cache, node.south_west, self.depth - 1,
-                    origin_x as u32, origin_y as u32 + half, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                    origin_x as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
                 s.spawn(|| fill_viewport(&self.cache, node.south_east, self.depth - 1,
-                    origin_x as u32 + half, origin_y as u32 + half, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
+                    origin_x as u64 + half as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
             });
         } else {
             fill_viewport(&self.cache, self.root, self.depth,
-                origin_x as u32, origin_y as u32, vx, vy, vw, vh, &mut bits[..]);
+                origin_x as u64, origin_y as u64, vx, vy, vw, vh, &mut bits[..]);
         }
     }
 
@@ -1549,21 +1549,21 @@ impl HashLife {
             let agg_len = agg_len;
             std::thread::scope(|s| {
                 s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_west, self.depth - 1,
-                    origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                    origin_x as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
                 s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_east, self.depth - 1,
-                    origin_x as u32 + half, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                    origin_x as u64 + half as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
                 s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_west, self.depth - 1,
-                    origin_x as u32, origin_y as u32 + half, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                    origin_x as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
                 s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_east, self.depth - 1,
-                    origin_x as u32 + half, origin_y as u32 + half, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
+                    origin_x as u64 + half as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
             });
         } else {
             fill_aggregated_viewport(&self.cache, self.root, self.depth,
-                origin_x as u32, origin_y as u32, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, &mut agg[..]);
+                origin_x as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, &mut agg[..]);
         }
     }
 
-    pub fn get_cell(&self, x: u32, y: u32) -> bool {
+    pub fn get_cell(&self, x: u64, y: u64) -> bool {
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
         let rel_x = x as i64 - origin_x;
@@ -1573,7 +1573,7 @@ impl HashLife {
         get_cell_at(&self.cache, self.root, self.depth, rel_x as u32, rel_y as u32)
     }
 
-    pub fn set_cell(&mut self, x: u32, y: u32, alive: bool) {
+    pub fn set_cell(&mut self, x: u64, y: u64, alive: bool) {
         // Handle empty tree: no-op for clearing, rebuild for setting
         if self.is_empty() {
             if !alive { return; }
@@ -1814,19 +1814,19 @@ mod tests {
     use ahash::AHashMap;
 
     // Inline Coord for test context — must match module-level coord_pack/coord_unpack
-    fn pack(x: u32, y: u32) -> u64 { (y as u64) << 32 | x as u64 }
-    fn unpack(cell: u64) -> (u32, u32) { ((cell & 0xFFFFFFFF) as u32, (cell >> 32) as u32) }
+    fn pack(x: u32, y: u32) -> u128 { (y as u128) << 64 | x as u128 }
+    fn unpack(cell: u128) -> (u64, u64) { ((cell & ((1u128 << 64) - 1)) as u64, (cell >> 64) as u64) }
 
-    fn step_flat(alive: &HashSet<u64>) -> HashSet<u64> {
+    fn step_flat(alive: &HashSet<u128>) -> HashSet<u128> {
         let mut counts = AHashMap::new();
         for &cell in alive {
             let (x, y) = unpack(cell);
-            for dy in -1i32..=1 {
-                for dx in -1i32..=1 {
+            for dy in -1i64..=1 {
+                for dx in -1i64..=1 {
                     if dx == 0 && dy == 0 { continue; }
-                    let nx = x.wrapping_add(dx as u32);
-                    let ny = y.wrapping_add(dy as u32);
-                    let key = pack(nx, ny);
+                    let nx = x.wrapping_add(dx as u64);
+                    let ny = y.wrapping_add(dy as u64);
+                    let key = pack(nx as u32, ny as u32);
                     *counts.entry(key).or_insert(0u32) += 1;
                 }
             }
@@ -1845,13 +1845,13 @@ mod tests {
     }
 
     fn test_pattern(name: &str, pattern: &[(u32, u32)], gens: usize) {
-        let flat_initial: HashSet<u64> = pattern.iter().map(|&(x, y)| pack(x, y)).collect();
-        let mut flat: HashSet<u64> = flat_initial.clone();
+        let flat_initial: HashSet<u128> = pattern.iter().map(|&(x, y)| pack(x, y)).collect();
+        let mut flat: HashSet<u128> = flat_initial.clone();
         let mut hf = HashLife::from_flat(&flat_initial.iter().copied().collect::<Vec<_>>());
 
         for i in 0..gens {
             // Check to_flat matches BEFORE stepping
-            let hf_before: HashSet<u64> = hf.to_flat().into_iter().collect();
+            let hf_before: HashSet<u128> = hf.to_flat().into_iter().collect();
             if flat != hf_before {
                 let only_flat: Vec<_> = flat.difference(&hf_before).collect();
                 let only_hf: Vec<_> = hf_before.difference(&flat).collect();
@@ -1870,7 +1870,7 @@ mod tests {
             }
             let flat_next = step_flat(&flat);
             hf.step();
-            let hf_result: HashSet<u64> = hf.to_flat().into_iter().collect();
+            let hf_result: HashSet<u128> = hf.to_flat().into_iter().collect();
             if flat_next != hf_result {
                 let only_flat: Vec<_> = flat_next.difference(&hf_result).collect();
                 let only_hf: Vec<_> = hf_result.difference(&flat_next).collect();
@@ -1925,7 +1925,7 @@ mod tests {
         ];
 
         // Build flat grid
-        let mut flat: HashSet<u64> = HashSet::new();
+        let mut flat: HashSet<u128> = HashSet::new();
         for &(x, y) in &pattern_cells {
             flat.insert(pack(x, y));
         }
@@ -1948,10 +1948,10 @@ mod tests {
         // The center 8x8 covers cells (4,4) to (11,11) in the 16x16 grid
         let mut hf_result = Vec::new();
         collect_alive_rel(&cache, result, 3, 4, 4, &mut hf_result);
-        let hf_set: HashSet<u64> = hf_result.iter().map(|&(x,y)| pack(x, y)).collect();
+        let hf_set: HashSet<u128> = hf_result.iter().map(|&(x,y)| pack(x, y)).collect();
 
         // Compare: flat_next should match hf_set for the center 8x8 region
-        let flat_center: HashSet<u64> = flat_next.iter()
+        let flat_center: HashSet<u128> = flat_next.iter()
             .filter(|&&c| {
                 let (x, y) = unpack(c);
                 x >= 4 && x < 12 && y >= 4 && y < 12
@@ -1987,7 +1987,7 @@ mod tests {
             (14,16), (15,16), (16,16),
         ];
 
-        let mut flat: HashSet<u64> = HashSet::new();
+        let mut flat: HashSet<u128> = HashSet::new();
         for &(x, y) in &pattern_cells {
             flat.insert(pack(x, y));
         }
@@ -2006,9 +2006,9 @@ mod tests {
         // Covers cells (8,8) to (23,23)
         let mut hf_result = Vec::new();
         collect_alive_rel(&cache, result, 4, 8, 8, &mut hf_result);
-        let hf_set: HashSet<u64> = hf_result.iter().map(|&(x,y)| pack(x, y)).collect();
+        let hf_set: HashSet<u128> = hf_result.iter().map(|&(x,y)| pack(x, y)).collect();
 
-        let flat_center: HashSet<u64> = flat_next.iter()
+        let flat_center: HashSet<u128> = flat_next.iter()
             .filter(|&&c| {
                 let (x, y) = unpack(c);
                 x >= 8 && x < 24 && y >= 8 && y < 24
@@ -2039,7 +2039,7 @@ mod tests {
     #[test]
     fn test_advance_slow_level7_gen22() {
         // Step pi heptamino 22 times using flat
-        let initial: HashSet<u64> = [
+        let initial: HashSet<u128> = [
             pack(100,100), pack(101,100), pack(102,100),
             pack(100,101),
             pack(100,102), pack(101,102), pack(102,102),
@@ -2077,8 +2077,8 @@ mod tests {
         let origin_y = hf.center.1 - (tree_size as i64 / 2) + offset as i64;
         
         let mut hf_result = Vec::new();
-        collect_alive(&cache, result, result_depth, origin_x as u32, origin_y as u32, &mut hf_result);
-        let hf_set: HashSet<u64> = hf_result.into_iter().collect();
+        collect_alive(&cache, result, result_depth, origin_x as u64, origin_y as u64, &mut hf_result);
+        let hf_set: HashSet<u128> = hf_result.into_iter().collect();
 
         if flat_next != hf_set {
             let only_flat: Vec<_> = flat_next.difference(&hf_set).collect();
@@ -2154,7 +2154,7 @@ mod tests {
     /// Convert a 4×4 cell block (top-left at tx,ty in the flat grid) into a 16-bit
     /// encoded value using the same bit layout as encode_level2:
     ///   bit_idx(r, c) = 15 - (r*4 + c),  where r=0 is the top row, c=0 is left.
-    fn encode_4x4_from_grid(flat: &HashSet<u64>, tx: u32, ty: u32) -> u16 {
+    fn encode_4x4_from_grid(flat: &HashSet<u128>, tx: u32, ty: u32) -> u16 {
         let get = |x: u32, y: u32| -> u16 {
             if flat.contains(&pack(x, y)) { 1 } else { 0 }
         };
@@ -2176,7 +2176,7 @@ mod tests {
             (100,101),
             (100,102), (101,102), (102,102),
         ];
-        let flat_initial: HashSet<u64> = pattern.iter().map(|&(x, y)| pack(x, y)).collect();
+        let flat_initial: HashSet<u128> = pattern.iter().map(|&(x, y)| pack(x, y)).collect();
 
         // Step 22 times using flat stepping (the correct reference)
         let mut flat = flat_initial.clone();
@@ -2185,14 +2185,14 @@ mod tests {
         }
         println!("\n=== Pi heptamino at generation 22 (flat reference) ===");
         println!("Alive cells ({}):", flat.len());
-        let mut cells: Vec<(u32, u32)> = flat.iter().map(|&c| unpack(c)).collect();
+        let mut cells: Vec<(u64, u64)> = flat.iter().map(|&c| unpack(c)).collect();
         cells.sort();
         for (x, y) in &cells {
             println!("  ({}, {})", x, y);
         }
 
         // Build a fresh HashLife from gen-22 flat state
-        let flat_vec: Vec<u64> = flat.iter().copied().collect();
+        let flat_vec: Vec<u128> = flat.iter().copied().collect();
         let hf = HashLife::from_flat(&flat_vec);
         println!("\nHashLife: depth={} center={:?} size={}", hf.depth, hf.center, hf.size());
 
@@ -2446,7 +2446,7 @@ mod tests {
         // Finally: step the fresh HashLife once and compare with flat_next
         let mut hf2 = HashLife::from_flat(&flat_vec);
         hf2.step();
-        let hf2_result: HashSet<u64> = hf2.to_flat().into_iter().collect();
+        let hf2_result: HashSet<u128> = hf2.to_flat().into_iter().collect();
         if hf2_result != flat_next {
             let only_flat: Vec<_> = flat_next.difference(&hf2_result).collect();
             let only_hf: Vec<_> = hf2_result.difference(&flat_next).collect();
@@ -2462,7 +2462,7 @@ mod tests {
     #[test]
     fn test_populate_viewport() {
         // Build a simple pattern and verify populate_viewport produces non-zero bits
-        let cells: Vec<u64> = vec![
+        let cells: Vec<u128> = vec![
             pack(100, 100), pack(101, 100), pack(102, 100),
             pack(100, 101),
             pack(100, 102), pack(101, 102), pack(102, 102),
@@ -2504,7 +2504,7 @@ mod tests {
             (100, 101), (102, 101),
             (100, 102), (101, 102),
         ];
-        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+        let cells: Vec<u128> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
 
         // Advance using single-gen steps
         let mut hf1 = HashLife::from_flat(&cells);
@@ -2529,7 +2529,7 @@ mod tests {
             (100, 101), (101, 101), (102, 101),
             (100, 102), (101, 102),
         ];
-        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+        let cells: Vec<u128> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
 
         // Advance 16 gens using single-gen steps
         let mut hf1 = HashLife::from_flat(&cells);
@@ -2554,7 +2554,7 @@ mod tests {
             (100, 101), (101, 101), (102, 101),
             (100, 102), (101, 102),
         ];
-        let cells: Vec<u64> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
+        let cells: Vec<u128> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
 
         // Advance 5000 gens
         let mut hf1 = HashLife::from_flat(&cells);
