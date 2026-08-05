@@ -294,7 +294,7 @@ var prevBits = null, imgData = null, prevOverlay = null;
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
-var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0;
+var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0, lblFps='Gen/s: 0';
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
 var tracksEnabled = false; // disabled by default, hide active overlay when on
@@ -541,28 +541,16 @@ function drawGrid(data) {
 function updateLabels(vw, vh) {
     var l1 = document.getElementById('infoLine1');
     if (l1) {
-        var fpsHidden = (lblFps === '' || lblFps === '0');
-        var birthsHidden = hashlifeMode;
-        var sp = '\xa0\xa0'; // clean &nbsp;&nbsp; spacing
-
-        // Update label text
-        l1.children[0].textContent = 'Gen: ' + lblGen;
-        l1.children[1].textContent = fpsHidden ? '' : 'Gen/s: ' + lblFps;
-        l1.children[2].textContent = birthsHidden ? '' : 'Births: ' + lblBirths;
-        l1.children[3].textContent = birthsHidden ? '' : 'Deaths: ' + lblDeaths;
-        l1.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
+        var parts = ['Gen: ' + lblGen, lblFps];
+        if (!hashlifeMode) { parts.push('Births: ' + lblBirths); parts.push('Deaths: ' + lblDeaths); }
+        parts.push('Pop: ' + lblPop + ' (' + lblActive + ')');
         if (hashlifeMode) {
             var rate = (lblTiles / 10.0).toFixed(1) + '%';
-            l1.children[5].textContent = 'Cache: ' + lblHeap + ' (' + rate + ')';
+            parts.push('Cache: ' + lblHeap + ' (' + rate + ')');
         } else {
-            l1.children[5].textContent = 'Heap: ' + lblHeap + ' (' + lblTiles + ')';
+            parts.push('Heap: ' + lblHeap + ' (' + lblTiles + ')');
         }
-
-        // Spacing: each text node belongs to the label AFTER it — show if visible, empty if hidden
-        l1.childNodes[2].nodeValue = fpsHidden ? '' : sp;       // before fpsLabel
-        l1.childNodes[4].nodeValue = birthsHidden ? '' : sp;    // before birthsLabel
-        l1.childNodes[6].nodeValue = birthsHidden ? '' : sp;    // before deathsLabel
-        l1.childNodes[8].nodeValue = sp;                         // before popLabel (always visible)
+        l1.textContent = parts.join('\xa0\xa0');
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
@@ -636,7 +624,7 @@ var running = false;
 var lastGenCount = 0, lastTime = 0, lastGenNum = 0; // for G/s calculation
 var tracksBeforePan = false; // restore tracks after pan
 
-function stopAnim() { running = false; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
+function stopAnim() { running = false; lblFps = 'Gen/s: 0'; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
 
 function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastGenCount = 0; lastTime = performance.now(); animLoop(); }
 
@@ -673,7 +661,7 @@ async function animLoop() {
     var now = performance.now();
     if (now - lastTime >= 1000) {
         var gs = Math.round((lblGen - lastGenNum) / ((now - lastTime) / 1000));
-        document.getElementById('fpsLabel').textContent = 'Gen/s: ' + gs;
+        lblFps = 'Gen/s: ' + gs;
         lastGenNum = lblGen;
         lastGenCount = 0; lastTime = now;
     }
