@@ -323,6 +323,7 @@ function saveBookmark(label) {
     var center = getViewportCenter();
     bookmarks[label] = {x: center.x, y: center.y};
     closeBookmarkMenu();
+    savePrefs();
 }
 function gotoBookmark(label) {
     var bm = bookmarks[label];
@@ -331,6 +332,7 @@ function gotoBookmark(label) {
     camX = bm.x - Math.floor(vp.vw / 2);
     camY = bm.y - Math.floor(vp.vh / 2);
     closeBookmarkMenu();
+    savePrefs();
     zoomRefresh();
 }
 function doRightTimer() {
@@ -338,6 +340,7 @@ function doRightTimer() {
         // Timer expired after first mouseup: recenter
         camX = rightDownTarget.cellX - Math.floor(calcCells(cellSize).vw / 2);
         camY = rightDownTarget.cellY - Math.floor(calcCells(cellSize).vh / 2);
+        savePrefs();
         zoomRefresh();
     } else if (!panning) {
         // Timer expired with no mouseup: start panning
@@ -348,6 +351,12 @@ function doRightTimer() {
     rightDownTarget = null;
     rightTimer = null;
 }
+function savePrefs() {
+    localStorage.setItem('gol_camX', camX);
+    localStorage.setItem('gol_camY', camY);
+    localStorage.setItem('gol_bookmarks', JSON.stringify(bookmarks));
+}
+
 function cancelRightTimer() {
     clearTimeout(rightTimer);
     rightTimer = null;
@@ -356,7 +365,7 @@ function cancelRightTimer() {
 }
 
 function drawGrid(data) {
-    var hdr  = new DataView(data, 0, 44);
+    var hdr  = new DataView(data, 0, 48);
     var gen     = hdr.getUint32(0, false);
     var vw      = hdr.getUint32(4, false);
     var vh      = hdr.getUint32(8, false);
@@ -368,6 +377,7 @@ function drawGrid(data) {
     var heap    = hdr.getUint32(32, false);
     var tiles   = hdr.getUint32(36, false);
     var serverScale = hdr.getUint32(40, false);
+    var serverHashlife = hdr.getUint32(44, false) === 1;
     currentScale = serverScale;
     currentVw = vw; currentVh = vh;
 
@@ -375,13 +385,55 @@ function drawGrid(data) {
     var expectedScale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
     if (serverScale !== expectedScale) return;
 
+    // Detect server restart: gen went backwards
+    if (gen < lblGen) {
+        lblGen = 0; lblFps = 'Gen/s: 0';
+        imgData = null;
+        // Reset all user preferences on server restart
+        localStorage.removeItem('gol_step');
+        localStorage.removeItem('gol_speed');
+        localStorage.removeItem('gol_tracks');
+        localStorage.removeItem('gol_camX');
+        localStorage.removeItem('gol_camY');
+        localStorage.removeItem('gol_bookmarks');
+        document.getElementById('stepSlider').value = 0;
+        document.getElementById('stepVal').textContent = 1;
+        document.getElementById('speedSlider').value = 25;
+        tracksEnabled = false;
+        document.getElementById('tracksBtn').textContent = 'Tracks';
+        stepCountVal = step[0];
+        document.getElementById('stepPlusBtn').textContent = 'Step+1';
+        coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
+        camX = coordOffset; camY = coordOffset;
+        bookmarks.A = null; bookmarks.B = null; bookmarks.C = null;
+    }
+
+    // Detect mode mismatch: sync frontend to server
+    if (serverHashlife !== hashlifeMode) {
+        var oldOffset = coordOffset;
+        hashlifeMode = serverHashlife;
+        coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
+        var delta = coordOffset - oldOffset;
+        // Convert bookmarks to new coordinate space
+        for (var key in bookmarks) {
+            if (bookmarks[key]) {
+                bookmarks[key].x += delta;
+                bookmarks[key].y += delta;
+            }
+        }
+        camX = coordOffset; camY = coordOffset;
+        imgData = null;
+        document.getElementById('hashlifeBtn').textContent = hashlifeMode ? 'Classic' : 'HashLife';
+        savePrefs();
+    }
+
     // Set globals for updateLabels()
     lblGen = gen; lblPop = pop; lblActive = active;
     lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
 
     var bitsLen = ((vw * vh + 7) >> 3);
-    var bits = new Uint8Array(data, 44, bitsLen);
-    var overlayOff = 44 + bitsLen;
+    var bits = new Uint8Array(data, 48, bitsLen);
+    var overlayOff = 48 + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
     // Server-side aggregation: when serverScale > 1, the server sends an already-aggregated bitmap.
@@ -573,7 +625,7 @@ async function refresh() {
         var r = await fetch(url);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
         if (seq !== refreshSeq) return;   // stale response, discard
-        var hdr = new DataView(data, 0, 44);
+        var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen) {
             drawGrid(data);
@@ -605,6 +657,28 @@ async function zoomRefresh() {
         zoomRefreshBusy = false;
     }
 }
+
+// Sync with server: detect mode mismatch, gen reset (server restart), visibility change
+async function syncWithServer() {
+    ensureCanvasSize();
+    var vp = calcCells(cellSize);
+    var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
+    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+    try {
+        var r = await fetch(url);
+        var data = await r.arrayBuffer();
+        drawGrid(data);
+    } catch (e) {
+        // Server may be down or unreachable, ignore
+    }
+}
+
+// Visibility change: sync when user returns to tab
+document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+        syncWithServer();
+    }
+});
 
 async function doQuit() { stopAnim(); await fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'quit'})}); }
 
@@ -784,6 +858,7 @@ window.addEventListener('mouseup', function(e) {
         if (wasPanning) {
             panning = false;
             canvas.style.cursor = 'crosshair';
+            savePrefs();
             zoomRefresh();
             tracksEnabled = tracksBeforePan;
             if (tracksEnabled) document.getElementById('tracksBtn').textContent = 'Active';
@@ -811,6 +886,7 @@ window.addEventListener('mouseup', function(e) {
         }
         panning = false;
         canvas.style.cursor = 'crosshair';
+        savePrefs();
         zoomDragStartY = null;
         zoomDragDelta = 0;
         zoomDragArmed = false;
@@ -922,6 +998,7 @@ function doZoom(oldCs) {
     // Clear canvas immediately so old tracks don't flash
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, canvasW, canvasH);
+    savePrefs();
     if (!running) zoomRefresh();
 }
 
@@ -971,7 +1048,25 @@ window.addEventListener('resize', function() { refresh(); });
 
 // ---- Controls ----
 document.addEventListener('DOMContentLoaded', async function() {
-    stepCountVal = step[0]; // init to first step size
+    // Restore user preferences from localStorage
+    var savedStep = localStorage.getItem('gol_step');
+    var savedSpeed = localStorage.getItem('gol_speed');
+    var savedTracks = localStorage.getItem('gol_tracks');
+    if (savedStep !== null) {
+        document.getElementById('stepSlider').value = savedStep;
+        stepCountVal = step[+savedStep];
+    } else {
+        stepCountVal = step[0];
+    }
+    document.getElementById('stepVal').textContent = stepCountVal;
+    stepPlusBtn = document.getElementById('stepPlusBtn');
+    stepPlusBtn.textContent = 'Step+1';
+    if (savedSpeed !== null) document.getElementById('speedSlider').value = savedSpeed;
+    if (savedTracks !== null) {
+        tracksEnabled = savedTracks === '1';
+        document.getElementById('tracksBtn').textContent = tracksEnabled ? 'Active' : 'Tracks';
+    }
+
     var playBtn = document.getElementById('playBtn');
 
     playBtn.addEventListener('click', function() {
@@ -985,7 +1080,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         zoomRefresh();
     });
 
-    stepPlusBtn = document.getElementById('stepPlusBtn');
     stepPlusBtn.addEventListener('click', function() {
         if (stepPlusBtn.textContent === 'Step+1') {
             stepCountVal += 1;
@@ -1025,17 +1119,28 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('tracksBtn').addEventListener('click', function() {
         tracksEnabled = !tracksEnabled;
         this.textContent = tracksEnabled ? 'Active' : 'Tracks';
+        localStorage.setItem('gol_tracks', tracksEnabled ? '1' : '0');
         imgData = null; // force full redraw
         zoomRefresh();
     });
     document.getElementById('hashlifeBtn').addEventListener('click', async function() {
         if (running) stopAnim();
+        var oldOffset = coordOffset;
         hashlifeMode = !hashlifeMode;
         coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
+        var delta = coordOffset - oldOffset;
+        // Convert bookmarks to new coordinate space
+        for (var key in bookmarks) {
+            if (bookmarks[key]) {
+                bookmarks[key].x += delta;
+                bookmarks[key].y += delta;
+            }
+        }
         camX = coordOffset; camY = coordOffset;
+        savePrefs();
         await call({action:'toggle-hashlife'});
         this.textContent = hashlifeMode ? 'Classic' : 'HashLife';
-        zoomRefresh();
+        await syncWithServer();
     });
     document.getElementById('clearBtn').addEventListener('click', async function() {
        stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';
@@ -1198,6 +1303,12 @@ document.addEventListener('DOMContentLoaded', async function() {
         stepCountVal = step[+this.value];
         document.getElementById('stepVal').textContent = stepCountVal;
         stepPlusBtn.textContent = 'Step+1';
+        localStorage.setItem('gol_step', this.value);
+    });
+
+    // Save speed to localStorage
+    document.getElementById('speedSlider').addEventListener('input', function() {
+        localStorage.setItem('gol_speed', this.value);
     });
 
     // Bookmark menu button handlers
@@ -1218,15 +1329,40 @@ document.addEventListener('DOMContentLoaded', async function() {
     // Init
     coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
     camX = coordOffset; camY = coordOffset;
-    var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
-    cx += coordOffset; cy += coordOffset;
-    await call({action:'randomize', cx: cx, cy: cy});
-    // Set all bookmarks to initial center
+
+    // Restore cam position and bookmarks from localStorage
+    var savedCamX = localStorage.getItem('gol_camX');
+    var savedCamY = localStorage.getItem('gol_camY');
+    if (savedCamX !== null && savedCamY !== null) {
+        camX = Number(savedCamX);
+        camY = Number(savedCamY);
+    }
+    var savedBookmarks = localStorage.getItem('gol_bookmarks');
+    if (savedBookmarks !== null) {
+        try {
+            var bms = JSON.parse(savedBookmarks);
+            if (bms.A) bookmarks.A = bms.A;
+            if (bms.B) bookmarks.B = bms.B;
+            if (bms.C) bookmarks.C = bms.C;
+        } catch (e) { /* ignore parse errors */ }
+    }
+
+    // Sync with server first — check if it already has state
+    await syncWithServer();
+
+    // Only randomize if server is empty (fresh start)
+    if (lblPop === 0) {
+        var cx = Math.floor(400 / 2) - 50, cy = Math.floor(300 / 2) - 50;
+        cx += coordOffset; cy += coordOffset;
+        await call({action:'randomize', cx: cx, cy: cy});
+        zoomRefresh();
+    }
+
+    // Set bookmarks to initial center if not restored from localStorage
     var center = getViewportCenter();
-    bookmarks.A = {x: center.x, y: center.y};
-    bookmarks.B = {x: center.x, y: center.y};
-    bookmarks.C = {x: center.x, y: center.y};
-    zoomRefresh();
+    if (!bookmarks.A) bookmarks.A = {x: center.x, y: center.y};
+    if (!bookmarks.B) bookmarks.B = {x: center.x, y: center.y};
+    if (!bookmarks.C) bookmarks.C = {x: center.x, y: center.y};
     setInterval(function() { if (!running) refresh(); }, 2000);
 });
 </script></body></html>"#;

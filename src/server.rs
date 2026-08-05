@@ -293,6 +293,8 @@ fn serve_state(
         data.extend((g.active_tiles.len() as u32).to_be_bytes());
     }
     data.extend(scale.to_be_bytes());
+    // HashLife mode flag (0 or 1) for frontend sync
+    data.extend((if g.hashlife_mode { 1u32 } else { 0u32 }).to_be_bytes());
 
     data.extend(final_bits);
     data.extend(final_overlay);
