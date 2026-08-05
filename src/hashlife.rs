@@ -224,6 +224,9 @@ impl HashLifeCache {
             if live.contains(&idx) { continue; }
             live.insert(idx);
             if let Some(node) = self.nodes.get(&idx) {
+                if node.is_empty { 
+                    continue; 
+                }
                 for &child in &[node.north_west, node.north_east, node.south_west, node.south_east] {
                     if !live.contains(&child) {
                         stack.push(child);
@@ -269,10 +272,13 @@ impl HashLifeCache {
                     }
                     while let Some(idx) = stack.pop() {
                         if let Some(node) = self.nodes.get(&idx) {
+                            if node.is_empty {
+                                continue;
+                            }
                             for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
                                 if !local_live.contains(&c) {
                                     local_live.insert(c);
-                                    stack.push(c);
+                                    stack.push(c); 
                                 }
                             }
                         }
@@ -296,20 +302,19 @@ impl HashLifeCache {
                     if !local_live.contains(&input_node) {
                         local_live.insert(input_node);
                         stack.push(input_node);
-                    }
                     // To be in n1 the entry must have been referenced in the last step and
-                    // will be kept by the tree walk 
-                    //if !local_live.contains(&output_node) { 
-                    //    local_live.insert(output_node);
-                    //    stack.push(output_node);
-                    //}
-                }
-                while let Some(idx) = stack.pop() {
-                    if let Some(node) = self.nodes.get(&idx) {
-                        for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
-                            if !local_live.contains(&c) {
-                                local_live.insert(c);
-                                stack.push(c);
+                    // will be kept by the tree walk, so we need not walk it.
+                        while let Some(idx) = stack.pop() {
+                            if let Some(node) = self.nodes.get(&idx) {
+                                if node.is_empty {
+                                    continue;
+                                }
+                                for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
+                                    if !local_live.contains(&c) {
+                                        local_live.insert(c);
+                                        stack.push(c); 
+                                    }
+                                }
                             }
                         }
                     }

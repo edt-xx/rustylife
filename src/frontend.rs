@@ -541,10 +541,15 @@ function drawGrid(data) {
 function updateLabels(vw, vh) {
     var l1 = document.getElementById('infoLine1');
     if (l1) {
+        var fpsHidden = (lblFps === '' || lblFps === '0');
+        var birthsHidden = hashlifeMode;
+        var sp = '\xa0\xa0'; // clean &nbsp;&nbsp; spacing
+
+        // Update label text
         l1.children[0].textContent = 'Gen: ' + lblGen;
-        // fpsLabel updated in animLoop
-        l1.children[2].textContent = 'Births: ' + lblBirths;
-        l1.children[3].textContent = 'Deaths: ' + lblDeaths;
+        l1.children[1].textContent = fpsHidden ? '' : 'Gen/s: ' + lblFps;
+        l1.children[2].textContent = birthsHidden ? '' : 'Births: ' + lblBirths;
+        l1.children[3].textContent = birthsHidden ? '' : 'Deaths: ' + lblDeaths;
         l1.children[4].textContent = 'Pop: ' + lblPop + ' (' + lblActive + ')';
         if (hashlifeMode) {
             var rate = (lblTiles / 10.0).toFixed(1) + '%';
@@ -552,6 +557,12 @@ function updateLabels(vw, vh) {
         } else {
             l1.children[5].textContent = 'Heap: ' + lblHeap + ' (' + lblTiles + ')';
         }
+
+        // Spacing: each text node belongs to the label AFTER it — show if visible, empty if hidden
+        l1.childNodes[2].nodeValue = fpsHidden ? '' : sp;       // before fpsLabel
+        l1.childNodes[4].nodeValue = birthsHidden ? '' : sp;    // before birthsLabel
+        l1.childNodes[6].nodeValue = birthsHidden ? '' : sp;    // before deathsLabel
+        l1.childNodes[8].nodeValue = sp;                         // before popLabel (always visible)
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
