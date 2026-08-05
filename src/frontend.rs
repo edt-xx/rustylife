@@ -11,7 +11,8 @@ canvas#main{position:absolute;top:48px;left:16px;right:12px;border:2px solid #e9
 @media(max-width:2000px){.toolbar-content{justify-content:flex-start}}
 button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px}
 button:hover{background:#e94560;color:#1a1a2e}
-input[type=range]{width:100px;vertical-align:middle}
+input[type=range]{width:75px;vertical-align:middle}
+#speedSlider{width:50px}
 .info{font-size:12px;color:#888;margin-left:4px}
 #topInfo{position:absolute;top:8px;left:16px;right:12px;font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
 #infoLine1,#infoLine2{white-space:nowrap;text-align:center}
@@ -77,7 +78,7 @@ input[type=range]{width:100px;vertical-align:middle}
   <div class="toolbar-content">
     <button id="playBtn">&#9654; Play</button>
     <button id="stepBtn">Step</button>
-    <label>Speed <input type="range" id="speedSlider" min="1" max="50" value="25"></label>
+    <label>Speed <input type="range" id="speedSlider" min="1" max="5" value="3"></label>
     <label>Step <input type="range" id="stepSlider" min="0" max="11" value="0"> <span id="stepVal">1</span></label>
     <button id="stepPlusBtn">Step+1</button>
 
@@ -398,7 +399,7 @@ function drawGrid(data) {
         localStorage.removeItem('gol_bookmarks');
         document.getElementById('stepSlider').value = 0;
         document.getElementById('stepVal').textContent = 1;
-        document.getElementById('speedSlider').value = 25;
+        document.getElementById('speedSlider').value = 3;
         tracksEnabled = false;
         document.getElementById('tracksBtn').textContent = 'Tracks';
         stepCountVal = step[0];
@@ -741,7 +742,7 @@ async function animLoop() {
     }
 
     // max of 500 f/s with 2ms frame times, provided we can run that fast
-    var targetInterval = Math.max(2, 510 - 20 * (+speedEl.value));
+    var targetInterval = Math.max(2, 510 - 20 * (+speedEl.value * 10));
     var remaining = targetInterval - elapsed;
     setTimeout(animLoop, remaining > 0 ? remaining : 0);
 }
@@ -1061,7 +1062,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('stepVal').textContent = stepCountVal;
     stepPlusBtn = document.getElementById('stepPlusBtn');
     stepPlusBtn.textContent = 'Step+1';
-    if (savedSpeed !== null) document.getElementById('speedSlider').value = savedSpeed;
+    if (savedSpeed !== null) document.getElementById('speedSlider').value = Math.min(5, Math.max(1, Math.round(+savedSpeed / 10)));
     if (savedTracks !== null) {
         tracksEnabled = savedTracks === '1';
         document.getElementById('tracksBtn').textContent = tracksEnabled ? 'Active' : 'Tracks';
