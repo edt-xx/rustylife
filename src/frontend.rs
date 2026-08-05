@@ -997,26 +997,20 @@ document.addEventListener('DOMContentLoaded', async function() {
         document.getElementById('stepVal').textContent = stepCountVal;
     });
 
-    // Generate random pattern as RLE text — fills textarea with ~50% density
-    function generateRandomRLE() {
-        var w = 40, h = 40;
-        var lines = ['x = ' + w, 'y = ' + h, ''];
-        for (var y = 0; y < h; y++) {
-            var row = '';
-            for (var x = 0; x < w; x++) {
-                if (Math.random() < 0.5) row += 'o';
-                else row += 'b';
-            }
-            lines.push(row);
-            if (y < h - 1) lines.push('');
-        }
-        lines.push('!');
-        return lines.join('$');
-    }
-
-    document.getElementById('pasteRandomBtn').addEventListener('click', function() {
-        document.getElementById('pasteArea').value = generateRandomRLE();
-        document.getElementById('pasteArea').focus();
+    document.getElementById('pasteRandomBtn').addEventListener('click', async function() {
+        // Step 1: Randomize on server
+        stopAnim();
+        var vp = calcCells(cellSize);
+        var centerX = camX + Math.floor(vp.vw / 2);
+        var centerY = camY + Math.floor(vp.vh / 2);
+        await call({action:'randomize', cx: centerX, cy: centerY, size:100});
+        // Step 2: Copy exported RLE to textarea
+        var resp = await fetch('/export-pattern');
+        var rle = await resp.text();
+        document.getElementById('pasteArea').value = rle;
+        // Step 3: Paste and close
+        await loadPattern(rle, false);
+        document.getElementById('pasteModal').classList.remove('active');
     });
 
     document.getElementById('helpBtn').addEventListener('click', function() {
