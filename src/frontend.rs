@@ -11,7 +11,7 @@ canvas#main{position:absolute;top:48px;left:16px;right:12px;border:2px solid #e9
 @media(max-width:2000px){.toolbar-content{justify-content:flex-start}}
 button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5px 12px;cursor:pointer;font-family:monospace;font-size:13px;border-radius:3px}
 button:hover{background:#e94560;color:#1a1a2e}
-input[type=range]{width:75px;vertical-align:middle}
+input[type=range]{width:90px;vertical-align:middle}
 #speedSlider{width:50px}
 .info{font-size:12px;color:#888;margin-left:4px}
 #topInfo{position:absolute;top:8px;left:16px;right:12px;font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -1145,6 +1145,11 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
     document.getElementById('clearBtn').addEventListener('click', async function() {
        stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';
+       lblGen = 0; // prevent false server restart detection
+       coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
+       camX = coordOffset; camY = coordOffset;
+       bookmarks.A = null; bookmarks.B = null; bookmarks.C = null;
+       savePrefs();
        await call({action:'clear'}); imgData = null; prevBits = null; prevOverlay = null; zoomRefresh();
     });
 
@@ -1178,6 +1183,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
         stopAnim();
         await call({action:'clear'});
+        lblGen = 0; // prevent false server restart detection on next fetch
         var cells;
         if (isMc) {
             cells = parseMacrocell(text);
@@ -1213,6 +1219,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         bookmarks.A = {x: center.x, y: center.y};
         bookmarks.B = {x: center.x, y: center.y};
         bookmarks.C = {x: center.x, y: center.y};
+        imgData = null; prevBits = null; prevOverlay = null; // force full redraw
         zoomRefresh();
     }
 
