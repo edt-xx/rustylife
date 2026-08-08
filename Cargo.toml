@@ -21,7 +21,7 @@ sysinfo = "0.37"
 ahash = "0.8"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-jemallocator = "0.5.4"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -4,11 +4,11 @@ mod server;
 mod step;
 
 #[cfg(not(target_os = "windows"))]
-use jemallocator::Jemalloc;
+use mimalloc::MiMalloc;
 
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
+static GLOBAL: MiMalloc = MiMalloc;
 
 use std::sync::{Arc, Mutex};
 use grid::Grid;
