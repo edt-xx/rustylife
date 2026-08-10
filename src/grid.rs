@@ -519,11 +519,4 @@ impl Grid {
         }
         self.hashlife = None;
     }
-
-    /// Rebuild HashLife from current alive set.
-    /// Drops old instance and creates new one from updated alive data.
-    pub fn rebuild_hashlife(&mut self) {
-        self.hashlife = None;
-        self.init_hashlife();
-    }
 }
