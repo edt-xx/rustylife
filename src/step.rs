@@ -1,15 +1,64 @@
 use rayon::prelude::*;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, Duration};
 use crate::grid::*;
 
 /// Per-generation timing output to stderr (disabled, no UI toggle)
 #[allow(dead_code)]
 static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// Track last logged generation and time for threshold timing
+static LAST_LOGGED_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PLAY_START_TIME: OnceLock<Instant> = OnceLock::new();
+static LAST_LOG_TIME: Mutex<Option<Instant>> = Mutex::new(None);
+
+// Initialize play start time at module load
+fn init_play_time() {
+    PLAY_START_TIME.get_or_init(|| Instant::now());
+}
+static INIT: std::sync::Once = std::sync::Once::new();
+
 fn timing_on() -> bool {
     TIMING_ENABLED.load(Ordering::Relaxed)
+}
+
+fn log_generation_threshold(generation: u32, is_first_step: bool) {
+    // Initialize play start time on first step
+    if is_first_step {
+        let now = Instant::now();
+        let mut last_time_guard = LAST_LOG_TIME.lock().unwrap();
+        *last_time_guard = Some(now);
+        PLAY_START_TIME.get_or_init(|| now);
+        return;
+    }
+    
+    let current_million = generation / 1_000_000;
+    let last = LAST_LOGGED_GENERATION.load(Ordering::Relaxed);
+    let last_million = last / 1_000_000;
+    
+    if u64::from(current_million) > last_million {
+        let now = Instant::now();
+        let mut last_time_guard = LAST_LOG_TIME.lock().unwrap();
+        
+        let elapsed = if let Some(last_time) = *last_time_guard {
+            let elapsed = now.duration_since(last_time);
+            *last_time_guard = Some(now);
+            elapsed
+        } else {
+            Duration::ZERO
+        };
+        
+        let gens = if last == 0 { generation } else { generation - last as u32 };
+        let gens_per_sec = if elapsed.as_secs_f64() > 0.0 {
+            gens as f64 / elapsed.as_secs_f64()
+        } else { 0.0 };
+        
+        eprintln!("Generation {} crossed {}M threshold ({} generations in {:?} ({:.2} gens/sec))", 
+                  generation, current_million, gens, elapsed, gens_per_sec);
+        
+        LAST_LOGGED_GENERATION.store(generation as u64, Ordering::Relaxed);
+    }
 }
 
 fn max_procs() -> usize {
@@ -186,7 +235,9 @@ impl Grid {
 
         std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
         grid.active_count = work;
+        let is_first = grid.generation == 0;
         grid.generation += 1;
+        log_generation_threshold(grid.generation, is_first);
         grid.heap = nc_dict.len() as u32;
 
         // Safety: raw pointers to disjoint fields — alive/alive_index/deaths_buf/births_buf
@@ -322,8 +373,10 @@ impl Grid {
 
         self.init_hashlife();
         let hf = self.hashlife.as_mut().unwrap();
+        let is_first = self.generation == 0;
         hf.step();
         self.generation += 1;
+        log_generation_threshold(self.generation, is_first);
         self.births = 0;
         self.deaths = 0;
         self.active_count = 0;
@@ -336,8 +389,10 @@ impl Grid {
 
         self.init_hashlife();
         let hf = self.hashlife.as_mut().unwrap();
+        let is_first = self.generation == 0;
         hf.step_n(n);
         self.generation += n;
+        log_generation_threshold(self.generation, is_first);
         self.births = 0;
         self.deaths = 0;
         self.active_count = 0;
