@@ -771,28 +771,36 @@ fn advance_fast(cache: &mut HashLifeCache,
     // Recursive case: classic 9-subnode approach.
     let node = cache.get_node(node_idx);
 
-    // Fetch all 4 children once — avoids 10 redundant HashMap lookups
-    let nw = cache.get_node(node.north_west);
-    let ne = cache.get_node(node.north_east);
-    let sw = cache.get_node(node.south_west);
-    let se = cache.get_node(node.south_east);
+    // Get child indices
+    let nw_idx = node.north_west;
+    let ne_idx = node.north_east;
+    let sw_idx = node.south_west;
+    let se_idx = node.south_east;
 
-    let ch_nw_ne = centered_horizontal(cache, &nw, &ne);
-    let cv_nw_sw = centered_vertical(cache, &nw, &sw);
-    let cs_node = centered_subnode(cache, &nw, &ne, &sw, &se);
-    let cv_ne_se = centered_vertical(cache, &ne, &se);
-    let ch_sw_se = centered_horizontal(cache, &sw, &se);
+    // Fetch child nodes only for centered operations - avoid redundant lookups
+    let nw_node = cache.get_node(nw_idx);
+    let ne_node = cache.get_node(ne_idx);
+    let sw_node = cache.get_node(sw_idx);
+    let se_node = cache.get_node(se_idx);
+
+    // Centered operations use node data directly
+    let ch_nw_ne = centered_horizontal(cache, &nw_node, &ne_node);
+    let cv_nw_sw = centered_vertical(cache, &nw_node, &sw_node);
+    let cs_node = centered_subnode(cache, &nw_node, &ne_node, &sw_node, &se_node);
+    let cv_ne_se = centered_vertical(cache, &ne_node, &se_node);
+    let ch_sw_se = centered_horizontal(cache, &sw_node, &se_node);
 
     // Advance all 9 sub-nodes at level-(L-1) — call advance_fast directly
-    let n00 = advance_fast(cache, node.north_west, level - 1);
+    // Use indices directly to avoid redundant lookups
+    let n00 = advance_fast(cache, nw_idx, level - 1);
     let n01 = advance_fast(cache, ch_nw_ne, level - 1);
-    let n02 = advance_fast(cache, node.north_east, level - 1);
+    let n02 = advance_fast(cache, ne_idx, level - 1);
     let n10 = advance_fast(cache, cv_nw_sw, level - 1);
     let n11 = advance_fast(cache, cs_node, level - 1);
     let n12 = advance_fast(cache, cv_ne_se, level - 1);
-    let n20 = advance_fast(cache, node.south_west, level - 1);
+    let n20 = advance_fast(cache, sw_idx, level - 1);
     let n21 = advance_fast(cache, ch_sw_se, level - 1);
-    let n22 = advance_fast(cache, node.south_east, level - 1);
+    let n22 = advance_fast(cache, se_idx, level - 1);
 
     // Build 4 windows and advance each — call advance_fast directly
     let tl = cache.find_or_create(n00, n01, n10, n11);
