@@ -95,9 +95,22 @@ const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
 const step = [1,4,16,32,64,256,512,1024,4096,16384,65536,131072];
 
-var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125]; // 1/64
+var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125,0.00390625,0.001953125,0.0009765625]; // 1/1024
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
+
+// Format cell size for display (show fractions like 1/2, 1/4 instead of 0.5, 0.25)
+function formatCellSize(size) {
+    if (size >= 1) {
+        return size + 'px';
+    }
+    // Convert to fraction: 0.5 -> 1/2, 0.25 -> 1/4, etc.
+    var denominator = Math.round(1 / size);
+    if (denominator === 1) {
+        return '1px';
+    }
+    return '1/' + denominator + 'px';
+}
 var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-50)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Edit** - Paste RLE text, load/save files, generate random patterns, copy current pattern\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport
 var coordOffset = 2000000000;                      // 2e9 for classic, 2e15 for hashlife (safe for JS f64)
@@ -606,7 +619,7 @@ function updateLabels(vw, vh) {
     }
     var l2 = document.getElementById('infoLine2');
     if (l2) {
-        var zoomTxt = 'Zoom: ' + cellSize + 'px | ' + vw + '\u00d7' + vh;
+        var zoomTxt = 'Zoom: ' + formatCellSize(cellSize) + ' | ' + vw + '\u00d7' + vh;
         l2.children[0].textContent = zoomTxt;
         l2.children[1].textContent = 'Cam: ' + camX + ', ' + camY;
     }
