@@ -13,12 +13,6 @@ static LAST_LOGGED_GENERATION: AtomicU64 = AtomicU64::new(0);
 static PLAY_START_TIME: OnceLock<Instant> = OnceLock::new();
 static LAST_LOG_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 
-// Initialize play start time at module load
-fn init_play_time() {
-    PLAY_START_TIME.get_or_init(|| Instant::now());
-}
-static INIT: std::sync::Once = std::sync::Once::new();
-
 fn timing_on() -> bool {
     TIMING_ENABLED.load(Ordering::Relaxed)
 }
