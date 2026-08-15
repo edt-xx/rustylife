@@ -90,45 +90,6 @@ fn serve_octet_stream(data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
     )
 }
 
-/// Aggregate a bit-packed bitmap by `scale`×`scale` blocks.
-/// A display pixel is alive if any underlying cell is alive.
-fn aggregate_bitmap(bits: &[u8], vw: u32, vh: u32, scale: u32) -> Vec<u8> {
-    let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
-    let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
-    let agg_len = (agg_w * agg_h + 7) / 8;
-    let mut agg = vec![0u8; agg_len];
-
-    let scale_usize = scale as usize;
-    for aggy in 0..agg_h {
-        let base_y = aggy * scale_usize;
-        if base_y >= vh as usize { break; }
-        for aggx in 0..agg_w {
-            let base_x = aggx * scale_usize;
-            if base_x >= vw as usize { continue; }
-            let mut alive = false;
-            for dy in 0..scale_usize {
-                let ry = base_y + dy as usize;
-                if ry >= vh as usize { break; }
-                for dx in 0..scale_usize {
-                    let rx = base_x + dx as usize;
-                    if rx >= vw as usize { break; }
-                    let idx = ry * vw as usize + rx;
-                    if (bits[idx >> 3] >> (idx & 7)) & 1 != 0 {
-                        alive = true;
-                        break;
-                    }
-                }
-                if alive { break; }
-            }
-            if alive {
-                let aidx = aggy * agg_w + aggx;
-                agg[aidx >> 3] |= 1 << (aidx & 7);
-            }
-        }
-    }
-    agg
-}
-
 fn serve_state(
     grid: &Arc<Mutex<Grid>>,
     params: &HashMap<String, String>,
@@ -165,9 +126,7 @@ fn serve_state(
                 hf.populate_aggregated_viewport(hvx, hvy, vw, vh, scale, &mut agg_bits);
             }
         } else {
-            // Conventional: populate raw bitmap, then aggregate
-            let bits_len = (vw as usize * vh as usize + 7) / 8;
-            let mut bits = vec![0u8; bits_len];
+            // Conventional: aggregate directly from alive set (no raw bitmap, O(alive-in-viewport))
             for &k in &g.alive {
                 let (ax, ay) = Coord::unpack(k);
                 let ax = ax as u64;
@@ -176,36 +135,39 @@ fn serve_state(
                     let rx = ax - vx;
                     let ry = ay - vy;
                     if rx < vw as u64 && ry < vh as u64 {
-                        let idx = ry as usize * vw as usize + rx as usize;
-                        bits[idx >> 3] |= 1 << (idx & 7);
+                        let aggx = (rx / scale as u64) as usize;
+                        let aggy = (ry / scale as u64) as usize;
+                        let aidx = aggy * agg_w + aggx;
+                        agg_bits[aidx >> 3] |= 1 << (aidx & 7);
                     }
                 }
             }
-            agg_bits = aggregate_bitmap(&bits, vw, vh, scale);
         }
 
         // Overlay: only meaningful in conventional mode
+        // Aggregate directly: each active tile (ss×ss cells) maps to a small agg-pixel box
         let ss = crate::grid::STATIC_SIZE;
         if !g.hashlife_mode {
-            let bits_len = (vw as usize * vh as usize + 7) / 8;
-            let mut overlay = vec![0u8; bits_len];
             for &tkey in &g.active_tiles {
                 let (tx, ty) = Coord::unpack(tkey);
-                for row in ty..(ty + ss) {
-                    let row = row as u64;
-                    if row < vy || row >= vy + vh as u64 { continue; }
-                    let ry = row - vy;
-                    for col in tx..(tx + ss) {
-                        let col = col as u64;
-                        if col >= vx && col < vx + vw as u64 {
-                            let rx = col - vx;
-                            let idx = ry as usize * vw as usize + rx as usize;
-                            overlay[idx >> 3] |= 1 << (idx & 7);
-                        }
+                // Tile cell range in absolute coords, clamped to viewport
+                let cx0 = (tx as u64).max(vx);
+                let cx1 = (tx as u64 + ss as u64).min(vx + vw as u64);
+                let cy0 = (ty as u64).max(vy);
+                let cy1 = (ty as u64 + ss as u64).min(vy + vh as u64);
+                if cx0 >= cx1 || cy0 >= cy1 { continue; }
+                // Agg-pixel box covered by the tile (viewport-relative; ceil on the far edge)
+                let ax0 = ((cx0 - vx) / scale as u64) as usize;
+                let ax1 = (((cx1 - vx) + scale as u64 - 1) / scale as u64) as usize;
+                let ay0 = ((cy0 - vy) / scale as u64) as usize;
+                let ay1 = (((cy1 - vy) + scale as u64 - 1) / scale as u64) as usize;
+                for aggy in ay0..ay1 {
+                    for aggx in ax0..ax1 {
+                        let aidx = aggy * agg_w + aggx;
+                        agg_overlay[aidx >> 3] |= 1 << (aidx & 7);
                     }
                 }
             }
-            agg_overlay = aggregate_bitmap(&overlay, vw, vh, scale);
         }
 
         (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)

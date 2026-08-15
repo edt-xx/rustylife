@@ -111,7 +111,7 @@ function formatCellSize(size) {
     }
     return '1/' + denominator + 'px';
 }
-var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-50)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Edit** - Paste RLE text, load/save files, generate random patterns, copy current pattern\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
+var HELP_TEXT = '# Game of Life Simulator\n\nA Conway\'s Game of Life implementation with HashLife optimization and a canvas-based frontend.\n\n## How to Run\n\nStart the server: `cargo run --release`\n\nOpen a browser at `http://localhost:7654`\n\n## Controls\n\n### Playback\n- **Play** - Start/stop animation\n- **Step** - Advance one generation (or multiple based on Step slider)\n- **Speed slider** - Control animation speed (1-5)\n- **Step slider** - Set generations per step (1 to 131072)\n- **Step+1** - Increase step count level by one\n\n### Patterns\n- **Clear** - Remove all cells\n- **Load** - Load .lif/.rle/.txt/.mc files\n- **Edit** - Paste RLE text, load/save files, generate random patterns, copy current pattern\n\n### Display\n- **Tracks** - Toggle birth/death overlay colors\n- **HashLife/Classic** - Toggle between HashLife and classic algorithms\n- **Quit** - Shut down the server\n\n## Mouse Commands\n\n- **Left click** - Toggle a cell (live/dead)\n- **Left drag** - Draw multiple cells\n- **Right click** - Release to recenter viewport on clicked cell\n- **Right drag** - Pan the viewport\n- **Right double-click** - Position bookmarks menu (Save/Goto A, B, C)\n- **Both buttons** - Hold both and drag up/down to zoom\n- **Mouse wheel** - Zoom in/out\n\n## Keyboard\n\n- **+ / =** - Zoom in\n- **-** - Zoom out\n- **Escape** - Close popup menus\n\n## Position Bookmarks\n\nRight-double-click to open the position bookmarks menu. Save A, B, or C to store the current viewport center. Goto A, B, or C to jump to a saved position. Bookmarks reset when you load a pattern, paste, or randomize.\n\n## Acknowledgments\n\nThe HashLife implementation is based on GOLDE (Game Of Life Development Environment) by RyanJK5.\nGOLDE: https://github.com/RyanJK5/GOLDE';
 var camX = 2000000000, camY = 2000000000;         // top-left of viewport
 var coordOffset = 2000000000;                      // 2e9 for classic, 2e15 for hashlife (safe for JS f64)
 
@@ -640,7 +640,7 @@ async function refresh() {
         if (seq !== refreshSeq) return;   // stale response, discard
         var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
-        if (gen !== initialGen) {
+        if (gen !== initialGen || !running) {
             drawGrid(data);
             return;
         }
@@ -708,12 +708,12 @@ var zoomDragArmed = false; // threshold crossed, zooming active
 
 // Global so play/stop functions can be called from anywhere
 var running = false;
-var lastGenCount = 0, lastTime = 0, lastGenNum = 0; // for G/s calculation
+var lastTime = 0, lastGenNum = 0; // for G/s calculation
 var tracksBeforePan = false; // restore tracks after pan
 
 function stopAnim() { running = false; lblFps = 'Gen/s: 0'; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
 
-function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastGenCount = 0; lastTime = performance.now(); animLoop(); }
+function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastTime = performance.now(); animLoop(); }
 
 var animLoopPending = false; // prevent multiple simultaneous dispatches
 async function animLoop() {
@@ -750,7 +750,7 @@ async function animLoop() {
         var gs = Math.round((lblGen - lastGenNum) / ((now - lastTime) / 1000));
         lblFps = 'Gen/s: ' + gs;
         lastGenNum = lblGen;
-        lastGenCount = 0; lastTime = now;
+        lastTime = now;
     }
 
     // max of 500 f/s with 2ms frame times, provided we can run that fast

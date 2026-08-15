@@ -131,6 +131,7 @@ fn neighbor_count_worker(
 
 impl Grid {
     pub fn step(&mut self) {
+        if self.alive.is_empty() { return; }
         let t_start = Instant::now();
 
         // Initialize active_tiles and bloom filter on first step
