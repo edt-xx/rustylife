@@ -1774,29 +1774,38 @@ pub fn step(&mut self) {
             }
         }
 
+        // Compress after step_n
+        if remaining == 0 {
+            self.rotate_caches(n);
+        }
+
         // Fall back to single-gen steps for remainder (these create many more new nodes)
         // Each self.step() calls rotate_caches(1) internally
         for _ in 0..remaining {
             self.step();
         }
 
-        // Compress after step_n
-        self.rotate_caches(n);
     }
 
     /// Compress caches: run GC + rotate both caches.
     /// Called after every step() and step_n().
-    pub fn rotate_caches(&mut self, _n: u32) {
+    pub fn rotate_caches(&mut self, n: u32) {
         // Always run GC
+        if n != 1 && !self.slow_cache_n.is_empty() {
+           self.slow_cache_n.clear(); 
+        } 
         self.cache.gc(self.root, &self.slow_cache_n1);
 
         // Rotate both caches after GC
-        std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
-        self.slow_cache_n1.clear();
-        //self.slow_cache_n1.shrink_to_fit();
-        std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-        self.cache.fast_cache_n1.clear();
-        //self.cache.fast_cache_n1.shrink_to_fit();
+        if n == 1 {
+            std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
+            self.slow_cache_n1.clear();
+            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+            self.cache.fast_cache_n1.clear();
+        } else {
+            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+            self.cache.fast_cache_n1.clear();
+        }
     }
 }
 
