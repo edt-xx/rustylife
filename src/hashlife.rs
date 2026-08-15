@@ -1791,9 +1791,6 @@ pub fn step(&mut self) {
     /// Called after every step() and step_n().
     pub fn rotate_caches(&mut self, n: u32) {
         // Always run GC
-        if n != 1 && !self.slow_cache_n.is_empty() {
-           self.slow_cache_n.clear(); 
-        } 
         self.cache.gc(self.root, &self.slow_cache_n1);
 
         // Rotate both caches after GC
@@ -1805,6 +1802,7 @@ pub fn step(&mut self) {
         } else {
             std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
             self.cache.fast_cache_n1.clear();
+            self.slow_cache_n.clear(); 
         }
     }
 }
