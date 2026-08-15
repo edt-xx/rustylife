@@ -10,7 +10,6 @@ static TIMING_ENABLED: AtomicBool = AtomicBool::new(false);
 
 // Track last logged generation and time for threshold timing
 static LAST_LOGGED_GENERATION: AtomicU64 = AtomicU64::new(0);
-static PLAY_START_TIME: OnceLock<Instant> = OnceLock::new();
 static LAST_LOG_TIME: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn timing_on() -> bool {
@@ -18,12 +17,12 @@ fn timing_on() -> bool {
 }
 
 fn log_generation_threshold(generation: u32, is_first_step: bool) {
-    // Initialize play start time on first step
+    // Reset threshold timing on first step (generation == 0, i.e. right after a grid reset)
     if is_first_step {
         let now = Instant::now();
         let mut last_time_guard = LAST_LOG_TIME.lock().unwrap();
         *last_time_guard = Some(now);
-        PLAY_START_TIME.get_or_init(|| now);
+        LAST_LOGGED_GENERATION.store(0, Ordering::Relaxed);
         return;
     }
     
