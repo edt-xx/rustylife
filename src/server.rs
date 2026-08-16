@@ -112,18 +112,30 @@ fn serve_state(
     // When scale > 1, populate aggregated bitmap directly (avoids allocating huge raw bitmap)
     let (final_bits, final_overlay, final_vw, final_vh) = if scale > 1 {
         let scale_usize = scale as usize;
-        let agg_w = (vw as usize + scale_usize - 1) / scale_usize;
-        let agg_h = (vh as usize + scale_usize - 1) / scale_usize;
+        // HashLife: align the viewport so the parallel 4-quadrant fill has
+        // byte-aligned seams (avoids a data race on seam bytes). The aligned
+        // viewport is a superset of the requested one; report its dimensions.
+        // Conventional mode is single-threaded (no race) and uses the request as-is.
+        let (hvx_a, hvy_a, vw_a, vh_a) = if g.hashlife_mode {
+            if let Some(ref hf) = g.hashlife {
+                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
+                hf.aligned_viewport(hvx, hvy, vw, vh, scale)
+            } else {
+                (0, 0, vw, vh)
+            }
+        } else {
+            (0, 0, vw, vh)
+        };
+        let agg_w = (vw_a as usize + scale_usize - 1) / scale_usize;
+        let agg_h = (vh_a as usize + scale_usize - 1) / scale_usize;
         let agg_len = (agg_w * agg_h + 7) / 8;
         let mut agg_bits = vec![0u8; agg_len];
         let mut agg_overlay = vec![0u8; agg_len];
 
         if g.hashlife_mode {
             // HashLife: populate aggregated bitmap directly from quadtree (no raw allocation)
-            // Frontend sends frontend-space coords; convert to hashlife-space
             if let Some(ref hf) = g.hashlife {
-                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
-                hf.populate_aggregated_viewport(hvx, hvy, vw, vh, scale, &mut agg_bits);
+                hf.populate_aggregated_viewport(hvx_a, hvy_a, vw_a, vh_a, scale, &mut agg_bits);
             }
         } else {
             // Conventional: aggregate directly from alive set (no raw bitmap, O(alive-in-viewport))
@@ -173,14 +185,27 @@ fn serve_state(
         (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)
     } else {
         // scale == 1: original path
-        let bits_len = (vw as usize * vh as usize + 7) / 8;
+        // HashLife: align the viewport so the parallel 4-quadrant fill has
+        // byte-aligned seams (avoids a data race on seam bytes). The aligned
+        // viewport is a superset of the requested one; report its dimensions.
+        // Conventional mode is single-threaded (no race) and uses the request as-is.
+        let (hvx_a, hvy_a, vw_a, vh_a) = if g.hashlife_mode {
+            if let Some(ref hf) = g.hashlife {
+                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
+                hf.aligned_viewport(hvx, hvy, vw, vh, 1)
+            } else {
+                (0, 0, vw, vh)
+            }
+        } else {
+            (0, 0, vw, vh)
+        };
+        let bits_len = (vw_a as usize * vh_a as usize + 7) / 8;
         let mut bits = vec![0u8; bits_len];
 
         if g.hashlife_mode {
             // Frontend sends frontend-space coords; convert to hashlife-space
             if let Some(ref hf) = g.hashlife {
-                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
-                hf.populate_viewport(hvx, hvy, vw, vh, &mut bits);
+                hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits);
             }
         } else {
             for &k in &g.alive {
@@ -220,7 +245,7 @@ fn serve_state(
             }
         }
 
-        (bits, overlay, vw, vh)
+        (bits, overlay, vw_a, vh_a)
     };
 
     // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)

@@ -63,6 +63,54 @@ pub fn hashlife_to_frontend(x: u64, y: u64) -> (u64, u64) {
     (fx as u64, fy as u64)
 }
 
+/// Pad a raw-cell dimension so that `ceil(dim / scale)` is a multiple of 8.
+/// Returns the smallest `dim' >= dim` with that property. For scale == 1 this
+/// just rounds `dim` up to a multiple of 8.
+fn pad_to_agg_multiple(dim: u64, scale: u32) -> u64 {
+    let s = scale as u64;
+    let agg = (dim + s - 1) / s;              // ceil(dim / scale)
+    let agg_padded = (agg + 7) / 8 * 8;      // round up to a multiple of 8
+    let min_dim = (agg_padded - 1) * s + 1;  // smallest raw dim mapping to agg_padded
+    dim.max(min_dim)
+}
+
+/// Align a viewport so the parallel 4-quadrant fill has byte-aligned seams.
+///
+/// The parallel fill spawns one thread per quadrant; the NW/NE and SW/SE
+/// quadrants meet at `center.0` (vertical seam) and NW/SW and NE/SE meet at
+/// `center.1` (horizontal seam). A seam that falls mid-byte makes two threads
+/// `|=` the same byte concurrently (data race). We shift the viewport origin
+/// and pad its dimensions so both seams land exactly on byte boundaries:
+///   - vertical seam:   `(center.0 - hvx_a) % (8*scale) == 0`
+///   - horizontal seam: `(center.1 - hvy_a) % scale == 0` AND `agg_w % 8 == 0`
+///
+/// The aligned viewport is a superset of the requested one (origin shifted
+/// left/down by < 8*scale cells, dimensions padded), so the returned bitmap
+/// covers the requested region plus a small border.
+pub fn align_viewport(
+    center: (i64, i64),
+    hvx: u64,
+    hvy: u64,
+    vw: u32,
+    vh: u32,
+    scale: u32,
+) -> (u64, u64, u32, u32) {
+    let unit_x = (8 * scale) as u64; // raw cells per aggregated byte-column
+    let unit_y = scale as u64;       // raw cells per aggregated row
+    // Shift x so the vertical seam (center.0) is byte-aligned.
+    let dx = ((hvx as i64 - center.0).rem_euclid(unit_x as i64)) as u64;
+    let hvx_a = hvx - dx;
+    // Shift y so the horizontal seam (center.1) row is aligned.
+    let dy = ((hvy as i64 - center.1).rem_euclid(unit_y as i64)) as u64;
+    let hvy_a = hvy - dy;
+    // Pad dimensions so the row length is a multiple of 8 (agg units) and the
+    // aligned viewport still covers the requested region (origin shifted by
+    // dx/dy). x-axis needs vw+dx, y-axis needs vh+dy.
+    let vw_a = pad_to_agg_multiple(vw as u64 + dx, scale) as u32;
+    let vh_a = pad_to_agg_multiple(vh as u64 + dy, scale) as u32;
+    (hvx_a, hvy_a, vw_a, vh_a)
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -1565,6 +1613,37 @@ impl HashLife {
 
     pub fn size(&self) -> usize { 1usize << self.depth }
 
+    /// Return the viewport to actually fill, byte-aligned when the parallel
+    /// 4-quadrant path will be used (bitmap > 64KB and depth >= 3).
+    ///
+    /// The parallel path races on seam bytes unless the quadrant seams land on
+    /// byte boundaries, so we align the viewport (see `align_viewport`). When
+    /// the single-threaded path is used the viewport is returned unchanged.
+    /// The caller must size the output buffer from the returned dimensions and
+    /// report them in the response so the frontend renders the (slightly
+    /// larger) bitmap at the correct scale.
+    pub fn aligned_viewport(
+        &self,
+        hvx: u64,
+        hvy: u64,
+        vw: u32,
+        vh: u32,
+        scale: u32,
+    ) -> (u64, u64, u32, u32) {
+        let bitmap_len = if scale > 1 {
+            let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
+            let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
+            (agg_w * agg_h + 7) / 8
+        } else {
+            (vw as usize * vh as usize + 7) / 8
+        };
+        if bitmap_len > 64 * 1024 && self.depth >= 3 {
+            align_viewport(self.center, hvx, hvy, vw, vh, scale)
+        } else {
+            (hvx, hvy, vw, vh)
+        }
+    }
+
     pub fn populate_viewport(&self, vx: u64, vy: u64, vw: u32, vh: u32, bits: &mut Vec<u8>) {
         let bits_len = (vw as usize * vh as usize + 7) / 8;
         if bits.len() < bits_len { bits.resize(bits_len, 0); }
@@ -2636,5 +2715,67 @@ mod tests {
         let cells2 = hf2.to_flat();
 
         assert_eq!(cells1, cells2, "Freelist GC corruption");
+    }
+
+    #[test]
+    fn test_align_viewport_scale1() {
+        let center = (100i64, 200i64);
+        let (hvx_a, hvy_a, vw_a, vh_a) = align_viewport(center, 12345, 67890, 100, 100, 1);
+        // Vertical seam byte-aligned: (center.0 - hvx_a) % 8 == 0
+        assert_eq!((center.0 - hvx_a as i64).rem_euclid(8), 0, "vertical seam not byte-aligned");
+        // Row length multiple of 8
+        assert_eq!(vw_a % 8, 0, "vw_a not multiple of 8");
+        // Aligned viewport is a superset of the requested one
+        assert!(hvx_a <= 12345, "hvx_a should be <= hvx");
+        assert!(hvy_a <= 67890, "hvy_a should be <= hvy");
+        assert!(hvx_a + vw_a as u64 >= 12345 + 100, "aligned viewport should cover requested x");
+        assert!(hvy_a + vh_a as u64 >= 67890 + 100, "aligned viewport should cover requested y");
+    }
+
+    #[test]
+    fn test_align_viewport_scale2() {
+        let center = (100i64, 200i64);
+        let (hvx_a, hvy_a, vw_a, vh_a) = align_viewport(center, 12345, 67890, 100, 100, 2);
+        // Vertical seam: (center.0 - hvx_a) % (8*scale) == 0
+        assert_eq!((center.0 - hvx_a as i64).rem_euclid(16), 0, "vertical seam not aligned (scale=2)");
+        // Horizontal seam: (center.1 - hvy_a) % scale == 0
+        assert_eq!((center.1 - hvy_a as i64).rem_euclid(2), 0, "horizontal seam not aligned (scale=2)");
+        // Agg dimensions multiple of 8
+        assert_eq!(((vw_a as u64 + 1) / 2) % 8, 0, "agg_w not multiple of 8 (scale=2)");
+        assert_eq!(((vh_a as u64 + 1) / 2) % 8, 0, "agg_h not multiple of 8 (scale=2)");
+        // Aligned viewport is a superset
+        assert!(hvx_a <= 12345, "hvx_a should be <= hvx");
+        assert!(hvy_a <= 67890, "hvy_a should be <= hvy");
+        assert!(hvx_a + vw_a as u64 >= 12345 + 100, "aligned viewport should cover requested x");
+        assert!(hvy_a + vh_a as u64 >= 67890 + 100, "aligned viewport should cover requested y");
+    }
+
+    #[test]
+    fn test_aligned_viewport_small() {
+        let cells: Vec<u128> = vec![coord_pack(100, 100)];
+        let hf = HashLife::from_flat(&cells);
+        // 100x100 = 10000 cells = 1250 bytes < 64KB → no alignment
+        let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(12345, 67890, 100, 100, 1);
+        assert_eq!((hvx_a, hvy_a, vw_a, vh_a), (12345, 67890, 100, 100), "small viewport should be unchanged");
+    }
+
+    #[test]
+    fn test_aligned_viewport_large() {
+        // 16x16 area → depth 4, center (8, 8)
+        let mut cells = Vec::new();
+        for x in 0..16u64 {
+            for y in 0..16u64 {
+                cells.push(coord_pack(x, y));
+            }
+        }
+        let hf = HashLife::from_flat(&cells);
+        assert!(hf.depth >= 3, "tree should be depth >= 3, got {}", hf.depth);
+        // 1000x1000 = 1M cells = 125000 bytes > 64KB → aligned
+        let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(12345, 67890, 1000, 1000, 1);
+        let center = hf.center;
+        assert_eq!((center.0 - hvx_a as i64).rem_euclid(8), 0, "vertical seam not byte-aligned");
+        assert_eq!(vw_a % 8, 0, "vw_a not multiple of 8");
+        assert!(hvx_a <= 12345, "hvx_a should be <= hvx");
+        assert!(hvx_a + vw_a as u64 >= 12345 + 1000, "aligned viewport should cover requested x");
     }
 }
