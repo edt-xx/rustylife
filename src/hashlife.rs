@@ -297,8 +297,7 @@ impl HashLifeCache {
         let mut live = ahash::AHashSet::new();
         live.insert(root);
 
-        let mut results: [std::mem::MaybeUninit<ahash::AHashSet<u32>>; 5] = [
-            std::mem::MaybeUninit::uninit(),
+        let mut results: [std::mem::MaybeUninit<ahash::AHashSet<u32>>; 4] = [
             std::mem::MaybeUninit::uninit(),
             std::mem::MaybeUninit::uninit(),
             std::mem::MaybeUninit::uninit(),
@@ -306,8 +305,10 @@ impl HashLifeCache {
         ];
         let results_ptr = results.as_mut_ptr() as usize;
 
-        std::thread::scope(|scope| {
-            // 4 threads for tree quadrants
+        // Phase 1: 4 quadtree threads + unique extraction (overlapping).
+        // The thread::scope returns the unique_nodes once the quadtree walk is done.
+        let unique_set: ahash::AHashSet<u32> = std::thread::scope(|scope| {
+            // 4 threads for tree quadrants (started first)
             for (i, &child) in children.iter().enumerate() {
                 scope.spawn(move || {
                     let mut local_live = ahash::AHashSet::new();
@@ -326,7 +327,7 @@ impl HashLifeCache {
                             for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
                                 if !local_live.contains(&c) {
                                     local_live.insert(c);
-                                    stack.push(c); 
+                                    stack.push(c);
                                 }
                             }
                         }
@@ -338,46 +339,49 @@ impl HashLifeCache {
                 });
             }
 
-            // 5th thread for slow cache subtrees
-            scope.spawn(|| {
-                let mut local_live = ahash::AHashSet::new();
-                local_live.insert(FALSE_NODE);
-                local_live.insert(TRUE_NODE);
-                let mut stack = Vec::new();
-                // for (&key, &output_node) in slow_cache_n1.iter() {
-                for (&key, _) in slow_cache_n1.iter() {
-                    let input_node = (key >> 32) as u32;
-                    if !local_live.contains(&input_node) {
-                        local_live.insert(input_node);
-                        stack.push(input_node);
-                    // To be in n1 the entry must have been referenced in the last step and
-                    // will be kept by the tree walk, so we need not walk it.
-                        while let Some(idx) = stack.pop() {
-                            if let Some(node) = self.nodes.get(&idx) {
-                                if node.is_empty {
-                                    continue;
-                                }
-                                for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
-                                    if !local_live.contains(&c) {
-                                        local_live.insert(c);
-                                        stack.push(c); 
-                                    }
+            // Unique nodeid extraction (on the main thread, overlaps with the 4
+            // quadtree threads).
+            let mut unique_set: ahash::AHashSet<u32> = ahash::AHashSet::new();
+            for (&key, _) in slow_cache_n1.iter() {
+                unique_set.insert((key >> 32) as u32);
+            }
+            unique_set
+        });
+
+        // Merge the 4 quadtree results into live.
+        unsafe {
+            for i in 0..4 {
+                let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
+                live.extend(std::ptr::read((*inner).as_ptr()));
+            }
+        }
+
+        // Phase 2: slow_cache walk, seeded with live from the quadtree walk.
+        // Runs on the self.slow_pool (n_slow threads) after the quadtree walk.
+        // Seed each chunk with live to prune shared subtrees.
+        if !unique_set.is_empty() {
+            let mut stack = Vec::new();
+            for &input_node in &unique_set {
+                if !live.contains(&input_node) {
+                    live.insert(input_node);
+                    stack.push(input_node);
+                    // To be in n1 the entry must have been referenced in the
+                    // last step and will be kept by the tree walk, so we need
+                    // not walk it.
+                    while let Some(idx) = stack.pop() {
+                        if let Some(node) = self.nodes.get(&idx) {
+                            if node.is_empty {
+                                continue;
+                            }
+                            for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
+                                if !live.contains(&c) {
+                                    live.insert(c);
+                                    stack.push(c);
                                 }
                             }
                         }
                     }
                 }
-                unsafe {
-                    let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(4);
-                    std::ptr::write((*inner).as_mut_ptr(), local_live);
-                }
-            });
-        });
-
-        unsafe {
-            for i in 0..5 {
-                let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
-                live.extend(std::ptr::read((*inner).as_ptr()));
             }
         }
 
