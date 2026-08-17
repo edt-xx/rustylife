@@ -307,7 +307,7 @@ impl HashLifeCache {
 
         // Phase 1: 4 quadtree threads + unique extraction (overlapping).
         // The thread::scope returns the unique_nodes once the quadtree walk is done.
-        let unique_set: ahash::AHashSet<u32> = std::thread::scope(|scope| {
+        let mut stack: Vec<u32> = std::thread::scope(|scope| {
             // 4 threads for tree quadrants (started first)
             for (i, &child) in children.iter().enumerate() {
                 scope.spawn(move || {
@@ -345,7 +345,7 @@ impl HashLifeCache {
             for (&key, _) in slow_cache_n1.iter() {
                 unique_set.insert((key >> 32) as u32);
             }
-            unique_set
+            unique_set.iter().copied().collect()
         });
 
         // Merge the 4 quadtree results into live.
@@ -359,29 +359,19 @@ impl HashLifeCache {
         // Phase 2: slow_cache walk, seeded with live from the quadtree walk.
         // Runs on the self.slow_pool (n_slow threads) after the quadtree walk.
         // Seed each chunk with live to prune shared subtrees.
-        if !unique_set.is_empty() {
-            let mut stack = Vec::new();
-            for &input_node in &unique_set {
-                if !live.contains(&input_node) {
-                    live.insert(input_node);
-                    stack.push(input_node);
-                    // To be in n1 the entry must have been referenced in the
-                    // last step and will be kept by the tree walk, so we need
-                    // not walk it.
-                    while let Some(idx) = stack.pop() {
-                        if let Some(node) = self.nodes.get(&idx) {
-                            if node.is_empty {
-                                continue;
-                            }
-                            for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
-                                if !live.contains(&c) {
-                                    live.insert(c);
-                                    stack.push(c);
-                                }
-                            }
-                        }
-                    }
+        while let Some(idx) = stack.pop() {
+            if live.contains(&idx) {
+                continue;
+            }
+            live.insert(idx);
+            if let Some(node) = self.nodes.get(&idx) {
+                if node.is_empty {
+                    continue;
                 }
+                stack.push(node.north_west);
+                stack.push(node.north_east);
+                stack.push(node.south_west);
+                stack.push(node.south_east);
             }
         }
 
