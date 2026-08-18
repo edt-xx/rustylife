@@ -11,6 +11,7 @@
 //! - AdvanceSlow: recursive exact-gen advance (8x8 grid of segments)
 
 use ahash::AHashMap;
+use std::sync::{Arc, Mutex};
 
 // Coord pack/unpack: u64 coords packed into u128
 pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
@@ -294,48 +295,39 @@ impl HashLifeCache {
             root_node.south_east,
         ];
 
-        let mut live = ahash::AHashSet::new();
-        live.insert(root);
-
-        let mut results: [std::mem::MaybeUninit<ahash::AHashSet<u32>>; 4] = [
-            std::mem::MaybeUninit::uninit(),
-            std::mem::MaybeUninit::uninit(),
-            std::mem::MaybeUninit::uninit(),
-            std::mem::MaybeUninit::uninit(),
-        ];
-        let results_ptr = results.as_mut_ptr() as usize;
+        let live = Arc::new(Mutex::new({
+            let mut s = ahash::AHashSet::new();
+            s.insert(root);
+            s
+        }));
 
         // Phase 1: 4 quadtree threads + unique extraction (overlapping).
         // The thread::scope returns the unique_nodes once the quadtree walk is done.
-        let mut stack: Vec<u32> = std::thread::scope(|scope| {
+        let unique: ahash::AHashSet<u32> = std::thread::scope(|scope| {
             // 4 threads for tree quadrants (started first)
-            for (i, &child) in children.iter().enumerate() {
+            for &child in &children {
+                let shared = Arc::clone(&live);
                 scope.spawn(move || {
                     let mut local_live = ahash::AHashSet::new();
                     local_live.insert(FALSE_NODE);
                     local_live.insert(TRUE_NODE);
-                    let mut stack = Vec::new();
-                    if !local_live.contains(&child) {
-                        local_live.insert(child);
-                        stack.push(child);
-                    }
+                    let mut stack = vec![ child ];
                     while let Some(idx) = stack.pop() {
+                        if local_live.contains(&idx) {
+                            continue;
+                        }
+                        local_live.insert(idx);
                         if let Some(node) = self.nodes.get(&idx) {
                             if node.is_empty {
                                 continue;
                             }
-                            for &c in &[node.north_west, node.north_east, node.south_west, node.south_east] {
-                                if !local_live.contains(&c) {
-                                    local_live.insert(c);
-                                    stack.push(c);
-                                }
-                            }
+                            stack.push(node.north_west);
+                            stack.push(node.north_east);
+                            stack.push(node.south_west);
+                            stack.push(node.south_east);
                         }
                     }
-                    unsafe {
-                        let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
-                        std::ptr::write((*inner).as_mut_ptr(), local_live);
-                    }
+                    shared.lock().unwrap().extend(local_live);
                 });
             }
 
@@ -345,36 +337,33 @@ impl HashLifeCache {
             for (&key, _) in slow_cache_n1.iter() {
                 unique_set.insert((key >> 32) as u32);
             }
-            unique_set.iter().copied().collect()
+            unique_set
         });
 
-        // Merge the 4 quadtree results into live.
-        unsafe {
-            for i in 0..4 {
-                let inner = (results_ptr as *mut std::mem::MaybeUninit<ahash::AHashSet<u32>>).add(i);
-                live.extend(std::ptr::read((*inner).as_ptr()));
-            }
-        }
+        let mut live = std::mem::take(&mut *live.lock().unwrap());
 
         // Phase 2: slow_cache walk, seeded with live from the quadtree walk.
         // Runs on the self.slow_pool (n_slow threads) after the quadtree walk.
         // Seed each chunk with live to prune shared subtrees.
-        while let Some(idx) = stack.pop() {
-            if live.contains(&idx) {
-                continue;
-            }
-            live.insert(idx);
-            if let Some(node) = self.nodes.get(&idx) {
-                if node.is_empty {
+        let mut stack = Vec::<u32>::new();
+        for node in unique {
+            stack.push(node);
+            while let Some(idx) = stack.pop() {
+                if live.contains(&idx) {
                     continue;
                 }
-                stack.push(node.north_west);
-                stack.push(node.north_east);
-                stack.push(node.south_west);
-                stack.push(node.south_east);
+                live.insert(idx);
+                if let Some(node) = self.nodes.get(&idx) {
+                    if node.is_empty {
+                        continue;
+                    }
+                    stack.push(node.north_west);
+                    stack.push(node.north_east);
+                    stack.push(node.south_west);
+                    stack.push(node.south_east);
+                }
             }
         }
-
         live
     }
 
