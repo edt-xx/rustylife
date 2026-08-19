@@ -233,6 +233,7 @@ impl HashLifeCache {
     /// Find existing canonical node or create new one in arena.
     pub fn find_or_create(&mut self, nw: u32, ne: u32, sw: u32, se: u32) -> u32 {
         // Keep FALSE_NODE and TRUE_NODE as sentinels
+
         if nw == FALSE_NODE && ne == FALSE_NODE && sw == FALSE_NODE && se == FALSE_NODE {
             return FALSE_NODE;
         }
@@ -240,7 +241,7 @@ impl HashLifeCache {
             return TRUE_NODE;
         }
 
-        let key = [nw, ne, sw, se];
+	let key = [nw, ne, sw, se];
 
         if let Some(&idx) = self.arena.get(&key) {
             return idx;
@@ -333,7 +334,7 @@ impl HashLifeCache {
 
             // Unique nodeid extraction (on the main thread, overlaps with the 4
             // quadtree threads).
-            let mut unique_set: ahash::AHashSet<u32> = ahash::AHashSet::new();
+            let mut unique_set: ahash::AHashSet<u32> = ahash::AHashSet::with_capacity(slow_cache_n1.len());
             for (&key, _) in slow_cache_n1.iter() {
                 unique_set.insert((key >> 32) as u32);
             }
@@ -1408,6 +1409,8 @@ pub struct HashLife {
     pub last_cache_hit_rate: u32,
     /// Step count used in last step_n() call (for freelist pre-grow scaling)
     pub last_step_count: u32,
+    /// Total number of rotate_caches() calls since construction
+    pub rotate_count: u32,
 }
 
 impl HashLife {
@@ -1425,6 +1428,7 @@ impl HashLife {
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_step_count: 0,
+            rotate_count: 0,
         }
     }
 
@@ -1495,6 +1499,7 @@ impl HashLife {
                 last_cache_size: 0,
                 last_cache_hit_rate: 0,
                 last_step_count: 0,
+                rotate_count: 0,
             };
             // Grow freelist
             let arena_size = hf.cache.nodes.len();
@@ -1544,6 +1549,7 @@ impl HashLife {
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_step_count: 0,
+            rotate_count: 0,
         };
         hf.shrink_caches();
         hf
@@ -1852,15 +1858,17 @@ pub fn step(&mut self) {
     /// Compress caches: run GC + rotate both caches.
     /// Called after every step() and step_n().
     pub fn rotate_caches(&mut self, n: u32) {
+        self.rotate_count += 1;
         // Always run GC
         self.cache.gc(self.root, &self.slow_cache_n1);
 
         // Rotate both caches after GC
-        if n == 1 {
+        if n == 1 || self.rotate_count > 999998/n {
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
             std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
             self.cache.fast_cache_n1.clear();
+            self.rotate_count = 0;
         } else {
             std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
             self.cache.fast_cache_n1.clear();

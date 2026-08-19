@@ -27,4 +27,6 @@ mimalloc = { version = "0.1", default-features = false }
 opt-level = 3
 lto = true
 codegen-units = 1
-debug = false
+debug = "line-directives-only"
+#debug = "line-tables-only"
+#debug = false
