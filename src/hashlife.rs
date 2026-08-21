@@ -11,7 +11,7 @@
 //! - AdvanceSlow: recursive exact-gen advance (8x8 grid of segments)
 
 use ahash::AHashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 // Coord pack/unpack: u64 coords packed into u128
 pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
@@ -170,9 +170,19 @@ pub struct HashLifeCache {
     next_idx: u32,
     /// Freed indices from last GC (reused before incrementing next_idx)
     freed: Vec<u32>,
+    /// Second freelist buffer, filled by the freelist worker thread. At the
+    /// GC boundary it is swapped with `freed`, so the active freelist is the
+    /// worker's freshly built buffer (built off the main thread).
+    freed2: Vec<u32>,
     /// Number of freed indices recovered during last GC.
     /// Used by step_n() to pre-grow freelist when step count increases.
     pub last_gc_freed_len: usize,
+    /// Handoff to the freelist worker: (freed_vec, buffer, start, needed).
+    /// The worker appends freed_vec to buffer, extends with fresh indices
+    /// [start, start+needed), and sends the buffer back via `freelist_res`.
+    freelist_req: mpsc::Sender<(Vec<u32>, Vec<u32>, u32, u32)>,
+    /// Return channel from the worker: the filled second buffer.
+    freelist_res: Mutex<mpsc::Receiver<Vec<u32>>>,
 }
 
 impl HashLifeCache {
@@ -186,13 +196,21 @@ impl HashLifeCache {
         Self::new_with_freed((population * 4).max(4000000))
     }
 
-    /// Grow freelist to at least `target` entries.
+    /// Grow freelist to at least `target` entries. Grows BOTH buffers so the
+    /// GC swap always hands the main thread a large-enough active freelist.
     pub fn grow_freed(&mut self, target: usize) {
-        if self.freed.len() >= target { return; }
-        let needed = target - self.freed.len();
-        let start = self.next_idx;
-        self.next_idx += needed as u32;
-        self.freed.extend(start..self.next_idx);
+        if self.freed.len() < target {
+            let needed = (target - self.freed.len()) as u32;
+            let start = self.next_idx;
+            self.next_idx += needed;
+            self.freed.extend(start..self.next_idx);
+        }
+        if self.freed2.len() < target {
+            let needed = (target - self.freed2.len()) as u32;
+            let start = self.next_idx;
+            self.next_idx += needed;
+            self.freed2.extend(start..self.next_idx);
+        }
     }
 
     /// Create cache with a specific freelist size.
@@ -205,16 +223,40 @@ impl HashLifeCache {
         // Index 1 = TRUE_NODE
         arena.insert([1,1,1,1], 1);
         nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
-        let freed: Vec<u32> = (2..(freelist_size as u32 + 2)).collect();
+        let fs = freelist_size as u32;
+        // Two disjoint pre-filled ranges: `freed` (active, main pops) and
+        // `freed2` (worker buffer). Disjoint so the first GC swap is safe and
+        // there is no cold-start empty buffer.
+        let freed: Vec<u32> = (2..(fs + 2)).collect();
+        let freed2: Vec<u32> = ((fs + 2)..(2 * fs + 2)).collect();
+        // Background worker: fills the second buffer (freed_vec + fresh) off
+        // the main thread so the GC freelist refill doesn't block stepping.
+        let (req_tx, req_rx) = mpsc::channel::<(Vec<u32>, Vec<u32>, u32, u32)>();
+        let (res_tx, res_rx) = mpsc::channel::<Vec<u32>>();
+        std::thread::Builder::new()
+            .name("freelist".into())
+            .spawn(move || {
+                for (mut freed_vec, mut buffer, start, needed) in req_rx {
+                    buffer.append(&mut freed_vec);
+                    if needed > 0 {
+                        buffer.extend(start..start + needed);
+                    }
+                    let _ = res_tx.send(buffer);
+                }
+            })
+            .expect("spawn freelist worker");
         Self {
             arena,
             nodes,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
-            next_idx: freelist_size as u32 + 2,
+            next_idx: 2 * fs + 2,
             freed,
+            freed2,
             last_gc_freed_len: 0,
+            freelist_req: req_tx,
+            freelist_res: Mutex::new(res_rx),
         }
     }
 
@@ -374,51 +416,64 @@ impl HashLifeCache {
         let live = self.walk_tree_threaded(root, slow_cache_n1);
         let live_len = live.len();
 
-        std::thread::scope(|s| {
-            // Thread 1: split nodes into live + freed
+        // Thread 1 computes the freed indices and hands them back; the actual
+        // freelist fill (append + fresh top-up) is done by the background
+        // worker so it does not block the main thread. Threads 2-4 do the
+        // cache retains concurrently (unchanged from the baseline).
+        // Shared reference to `live` so the closures borrow (not move) the Vec;
+        // the `move` closure below copies this `&Vec` (Copy) cheaply.
+        let live_ref: &ahash::AHashSet<u32> = &live;
+        let freed_vec = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
-            let freed = &mut self.freed;
-            let next_idx = &mut self.next_idx;
-            s.spawn(|| {
-                let mut freed_vec: Vec<u32> = nodes.extract_if(|idx, _| !live.contains(idx))
+            let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
+            s.spawn(move || {
+                let fv: Vec<u32> = nodes.extract_if(|idx, _| !live_ref.contains(idx))
                     .map(|(idx, _)| idx)
                     .collect();
-                //nodes.shrink_to_fit();
-                let target = freed_vec.len() * 2;
-                freed.append(&mut freed_vec);
-                // Ensure freelist has at least 2x the freed count.
-                // If step size drastically increases, step_n() pre-grows the freelist
-                // using freed_len * (log2(new_step) - log2(old_step) + 1).
-                if freed.len() < target {
-                    let needed = target - freed.len();
-                    let start = *next_idx;
-                    *next_idx += needed as u32;
-                    freed.extend(start..*next_idx);
-                }
+                let _ = tx1.send(fv);
             });
 
             // Thread 2: remove dead entries from fast_cache_n1
             let fast_cache_n1 = &mut self.fast_cache_n1;
             s.spawn(|| {
-                fast_cache_n1.retain(|&(nidx, _), ridx| live.contains(&nidx) && live.contains(ridx));
-                //fast_cache_n1.shrink_to_fit();
+                fast_cache_n1.retain(|&(nidx, _), ridx| live_ref.contains(&nidx) && live_ref.contains(ridx));
             });
 
             // Thread 3: remove dead entries from arena, add sentinels
             let arena = &mut self.arena;
             s.spawn(|| {
-                arena.retain(|_, idx| live.contains(idx));
+                arena.retain(|_, idx| live_ref.contains(idx));
                 arena.entry([0,0,0,0]).or_insert(0);
                 arena.entry([1,1,1,1]).or_insert(1);
-                //arena.shrink_to_fit();
             });
 
             // Thread 4: retain live entries in count_cache
             let count_cache = &mut self.count_cache;
             s.spawn(|| {
-                count_cache.retain(|&(nidx, _), _| live.contains(&nidx));
+                count_cache.retain(|&(nidx, _), _| live_ref.contains(&nidx));
             });
+
+            rx1.recv().unwrap()
         });
+
+        // Pick up the worker's finished buffer if ready (else keep the
+        // previously built one — the swap below is still safe).
+        if let Ok(built) = self.freelist_res.lock().unwrap().try_recv() {
+            self.freed2 = built;
+        }
+
+        // Swap the active freelist with the worker's buffer, then hand the old
+        // active list (residual) to the worker to rebuild with this GC's freed
+        // indices plus a fresh top-up.
+        std::mem::swap(&mut self.freed, &mut self.freed2);
+
+        let target = freed_vec.len() * 2;
+        let cur = self.freed2.len() + freed_vec.len();
+        let needed = if cur < target { (target - cur) as u32 } else { 0 };
+        let start = self.next_idx;
+        self.next_idx += needed;
+        let buffer = std::mem::take(&mut self.freed2);
+        self.freelist_req.send((freed_vec, buffer, start, needed)).unwrap();
 
         // Store freelist size after GC for step_n() to use when step count increases.
         self.last_gc_freed_len = self.freed.len();
