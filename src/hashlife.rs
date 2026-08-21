@@ -233,9 +233,12 @@ impl HashLifeCache {
         // the main thread so the GC freelist refill doesn't block stepping.
         let (req_tx, req_rx) = mpsc::channel::<(Vec<u32>, Vec<u32>, u32, u32)>();
         let (res_tx, res_rx) = mpsc::channel::<Vec<u32>>();
+        let freed2_initial = freed2.clone();
         std::thread::Builder::new()
             .name("freelist".into())
             .spawn(move || {
+                // Prime the worker with an initial 4M buffer so the first blocking recv succeeds
+                let _ = res_tx.send(freed2_initial);
                 for (mut freed_vec, mut buffer, start, needed) in req_rx {
                     buffer.append(&mut freed_vec);
                     if needed > 0 {
@@ -456,11 +459,10 @@ impl HashLifeCache {
             rx1.recv().unwrap()
         });
 
-        // Pick up the worker's finished buffer if ready (else keep the
-        // previously built one — the swap below is still safe).
-        if let Ok(built) = self.freelist_res.lock().unwrap().try_recv() {
-            self.freed2 = built;
-        }
+        // Pick up the worker's finished buffer, blocking until ready.
+        // This removes the race where try_recv missed the refill.
+        let built = self.freelist_res.lock().unwrap().recv().expect("freelist worker died");
+        self.freed2 = built;
 
         // Swap the active freelist with the worker's buffer, then hand the old
         // active list (residual) to the worker to rebuild with this GC's freed
@@ -2741,10 +2743,10 @@ mod tests {
     #[test]
     fn test_freelist_gc() {
         // Test that freelist doesn't corrupt patterns across GC boundaries
+        // Acorn pattern RLE: bo5b$3bo3b$2o2b3o!
         let pattern = [
-            (100, 100), (101, 100),
-            (100, 101), (101, 101), (102, 101),
-            (100, 102), (101, 102),
+            (101, 100), (103, 101),
+            (100, 102), (101, 102), (104, 102), (105, 102), (106, 102),
         ];
         let cells: Vec<u128> = pattern.iter().map(|&(x,y)| coord_pack(x,y)).collect();
 
