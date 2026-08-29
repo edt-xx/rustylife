@@ -145,6 +145,64 @@ pub struct LifeNode {
 }
 
 // ============================================================================
+// Freelist buffer (fixed-length) + handoff
+// ============================================================================
+
+/// Free indices per freelist buffer. 256K = 1 MB. A buffer must be at least as
+/// big as a step's worst-case allocation or the main drains mid-step; 256K
+/// covers a growing methuselah with room to spare.
+const BUF: usize = 262_144;
+/// Number of buffers the worker keeps queued (the main's runway). ~8 MB.
+/// The worker tops the queue up to this watermark on every message (minting
+/// fresh buffers as needed) so a drain `recv` on the main never blocks.
+const WATERMARK: usize = 8;
+
+/// A fixed-length freelist buffer: a `Box<[u32; BUF]>` slot array plus a live
+/// count (`count`). The main pops from the end (decrementing `count`); when
+/// `count` hits 0 it is drained and the main receives the next buffer from the
+/// worker. Fresh buffers are full (`count == BUF`); recovered (GC) buffers may
+/// be partial. Allocated on demand in the worker thread (off the critical path).
+struct Buffer {
+    data: Box<[u32; BUF]>,
+    count: usize,
+}
+
+impl Buffer {
+    /// Number of live indices (mirrors `Vec::len`).
+    fn len(&self) -> usize { self.count }
+    fn is_empty(&self) -> bool { self.count == 0 }
+    /// Pop the next free index from the end. `None` when drained.
+    fn pop(&mut self) -> Option<u32> {
+        if self.count == 0 { return None; }
+        self.count -= 1;
+        Some(self.data[self.count])
+    }
+    /// A fresh buffer of `count` new indices `start..start+count`. The worker
+    /// mints these from its fresh-index counter (off the main thread).
+    fn fresh(start: u32, count: usize) -> Buffer {
+        let mut data: Box<[u32; BUF]> = Box::new([0u32; BUF]);
+        for (i, slot) in data.iter_mut().enumerate().take(count) {
+            *slot = start.wrapping_add(i as u32);
+        }
+        Buffer { data, count: count.min(BUF) }
+    }
+    /// Split recovered indices into fixed buffers (the last may be partial).
+    /// One or more buffers; empty input yields none.
+    fn from_freed(freed: &[u32]) -> Vec<Buffer> {
+        let mut bufs = Vec::new();
+        let mut off = 0usize;
+        while off < freed.len() {
+            let n = (freed.len() - off).min(BUF);
+            let mut data: Box<[u32; BUF]> = Box::new([0u32; BUF]);
+            data[..n].copy_from_slice(&freed[off..off + n]);
+            bufs.push(Buffer { data, count: n });
+            off += n;
+        }
+        bufs
+    }
+}
+
+// ============================================================================
 // Arena + Cache
 // ============================================================================
 
@@ -166,55 +224,45 @@ pub struct HashLifeCache {
     /// Memoizes count_cells — same canonical node at same depth always has same count.
     /// Cleared on arena GC (deleted nodes leave stale entries).
     pub count_cache: ahash::AHashMap<(u32, u32), usize>,
-    /// Next available index (incremented on each new node)
-    next_idx: u32,
-    /// Freed indices from last GC (reused before incrementing next_idx)
-    freed: Vec<u32>,
-    /// Second freelist buffer, filled by the freelist worker thread. At the
-    /// GC boundary it is swapped with `freed`, so the active freelist is the
-    /// worker's freshly built buffer (built off the main thread).
-    freed2: Vec<u32>,
+    /// The main's current freelist buffer. Popped in `find_or_create`; when
+    /// drained (`len == 0`) the main receives the next buffer from the worker
+    /// (which keeps a queue of buffers at the watermark). Exactly one buffer
+    /// is in the main's hands at a time — the rest are queued at the worker.
+    freed: Buffer,
     /// Number of freed indices recovered during last GC.
     /// Used by step_n() to pre-grow freelist when step count increases.
     pub last_gc_freed_len: usize,
-    /// Handoff to the freelist worker: (freed_vec, buffer, start, needed).
-    /// The worker appends freed_vec to buffer, extends with fresh indices
-    /// [start, start+needed), and sends the buffer back via `freelist_res`.
-    freelist_req: mpsc::Sender<(Vec<u32>, Vec<u32>, u32, u32)>,
-    /// Return channel from the worker: the filled second buffer.
-    freelist_res: Mutex<mpsc::Receiver<Vec<u32>>>,
+    /// Handoff to the freelist worker (see `FreelistReq`).
+    freelist_req: mpsc::Sender<FreelistReq>,
+    /// Return channel from the worker: the next buffer (queued, or a brief
+    /// block only if the queue ever runs dry).
+    freelist_res: Mutex<mpsc::Receiver<Buffer>>,
+}
+
+/// Handoff messages to the freelist worker. The worker exclusively owns the
+/// fresh-index counter (a plain `u32` in its closure — no `Arc`/atomic, no
+/// second writer) and the queue of buffers; buffers cross the channel by move
+/// so each buffer has exactly one owner at every moment. The main's current
+/// buffer is NOT bounced back through the worker anymore — it is drained and
+/// discarded by the main, and the worker keeps its own queue (recovered +
+/// fresh buffers) topped up to the watermark.
+enum FreelistReq {
+    /// GC boundary: the recovered (dead node) indices. The worker splits them
+    /// into fixed buffers, appends them to the queue, tops up to the watermark
+    /// (minting fresh buffers as needed), and sends the next buffer.
+    /// Non-blocking on the main — the heavy work (append + mint + send) is
+    /// async on the worker.
+    Gc { freed_vec: Vec<u32> },
+    /// The main drained a buffer: top the queue back up to the watermark (mint
+    /// fresh buffers as needed) so the main's next drain `recv` never blocks.
+    QueueMore,
 }
 
 impl HashLifeCache {
+    /// Create the cache. The worker exclusively owns the fresh-index counter
+    /// and the buffer queue; there is no reservoir floor — the worker mints
+    /// fresh buffers as needed to keep the queue at the watermark.
     pub fn new() -> Self {
-        Self::new_for_population(0)
-    }
-
-    /// Create cache with initial freelist, sized to max(4*population, 4000000).
-    /// The freelist is resized dynamically after each GC based on arena growth.
-    pub fn new_for_population(population: usize) -> Self {
-        Self::new_with_freed((population * 4).max(4000000))
-    }
-
-    /// Grow freelist to at least `target` entries. Grows BOTH buffers so the
-    /// GC swap always hands the main thread a large-enough active freelist.
-    pub fn grow_freed(&mut self, target: usize) {
-        if self.freed.len() < target {
-            let needed = (target - self.freed.len()) as u32;
-            let start = self.next_idx;
-            self.next_idx += needed;
-            self.freed.extend(start..self.next_idx);
-        }
-        if self.freed2.len() < target {
-            let needed = (target - self.freed2.len()) as u32;
-            let start = self.next_idx;
-            self.next_idx += needed;
-            self.freed2.extend(start..self.next_idx);
-        }
-    }
-
-    /// Create cache with a specific freelist size.
-    fn new_with_freed(freelist_size: usize) -> Self {
         let mut arena = ahash::AHashMap::with_capacity(65536);
         let mut nodes = ahash::AHashMap::with_capacity(65536);
         // Index 0 = FALSE_NODE
@@ -223,40 +271,72 @@ impl HashLifeCache {
         // Index 1 = TRUE_NODE
         arena.insert([1,1,1,1], 1);
         nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
-        let fs = freelist_size as u32;
-        // Two disjoint pre-filled ranges: `freed` (active, main pops) and
-        // `freed2` (worker buffer). Disjoint so the first GC swap is safe and
-        // there is no cold-start empty buffer.
-        let freed: Vec<u32> = (2..(fs + 2)).collect();
-        let freed2: Vec<u32> = ((fs + 2)..(2 * fs + 2)).collect();
-        // Background worker: fills the second buffer (freed_vec + fresh) off
-        // the main thread so the GC freelist refill doesn't block stepping.
-        let (req_tx, req_rx) = mpsc::channel::<(Vec<u32>, Vec<u32>, u32, u32)>();
-        let (res_tx, res_rx) = mpsc::channel::<Vec<u32>>();
-        let freed2_initial = freed2.clone();
+        // The worker exclusively owns the fresh-index counter (a plain u32,
+        // starts at 2 — sentinels are 0 and 1) and the queue of buffers. There
+        // is no reservoir floor: the worker mints fresh buffers as needed to
+        // keep the queue at the watermark.
+        let (req_tx, req_rx) = mpsc::channel::<FreelistReq>();
+        let (res_tx, res_rx) = mpsc::channel::<Buffer>();
         std::thread::Builder::new()
             .name("freelist".into())
             .spawn(move || {
-                // Prime the worker with an initial 4M buffer so the first blocking recv succeeds
-                let _ = res_tx.send(freed2_initial);
-                for (mut freed_vec, mut buffer, start, needed) in req_rx {
-                    buffer.append(&mut freed_vec);
-                    if needed > 0 {
-                        buffer.extend(start..start + needed);
+                let mut next_idx: u32 = 2;
+                // Buffers the worker has sent that are still out there (at the
+                // main or in the channel). Kept at WATERMARK-1 so a drain recv
+                // never blocks.
+                let mut in_flight = 0usize;
+
+                // Prime WATERMARK fresh buffers; the first becomes the main's
+                // initial buffer, the rest queue in the channel.
+                for _ in 0..WATERMARK {
+                    let start = next_idx;
+                    let end = start.saturating_add(BUF as u32);
+                    if end <= start { break; }
+                    if res_tx.send(Buffer::fresh(start, BUF)).is_err() { return; }
+                    next_idx = end;
+                    in_flight += 1;
+                }
+
+                for msg in req_rx {
+                    match msg {
+                        FreelistReq::Gc { freed_vec } => {
+                            // Append the recovered indices (split into fixed
+                            // buffers) to the channel (recycled for reuse).
+                            let recovered = Buffer::from_freed(&freed_vec);
+                            let k = recovered.len();
+                            for b in recovered {
+                                if res_tx.send(b).is_err() { return; }
+                            }
+                            in_flight += k;
+                        }
+                        FreelistReq::QueueMore => {}
                     }
-                    let _ = res_tx.send(buffer);
+                    // The main drained a buffer to produce this message.
+                    in_flight = in_flight.saturating_sub(1);
+                    // Top up to the watermark: mint fresh buffers as needed
+                    // only when the recovered buffers did not keep the runway
+                    // full. No floor — the fresh-index counter (u32) has 4B of
+                    // headroom, far more than any advance needs.
+                    while in_flight < WATERMARK.saturating_sub(1) {
+                        let start = next_idx;
+                        let end = start.saturating_add(BUF as u32);
+                        if end <= start { break; }
+                        if res_tx.send(Buffer::fresh(start, BUF)).is_err() { return; }
+                        next_idx = end;
+                        in_flight += 1;
+                    }
                 }
             })
             .expect("spawn freelist worker");
+        // The main's initial buffer is the first one the worker sent (prime).
+        let freed = res_rx.recv().expect("freelist worker died");
         Self {
             arena,
             nodes,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
-            next_idx: 2 * fs + 2,
             freed,
-            freed2,
             last_gc_freed_len: 0,
             freelist_req: req_tx,
             freelist_res: Mutex::new(res_rx),
@@ -301,7 +381,17 @@ impl HashLifeCache {
             is_e(nw) && is_e(ne) && is_e(sw) && is_e(se)
         };
 
-        let idx = self.freed.pop().unwrap(); // Safety belt — panic if freelist exhausted
+        let idx = match self.freed.pop() {
+            Some(i) => i,
+            None => {
+                // Drained: receive the next buffer from the worker (the channel
+                // is kept filled to the watermark, so this is non-blocking in
+                // practice) and ask the worker to top the queue back up.
+                self.freed = self.freelist_res.lock().unwrap().recv().expect("freelist worker died");
+                self.freelist_req.send(FreelistReq::QueueMore).unwrap();
+                self.freed.pop().expect("worker sent an empty buffer")
+            }
+        };
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
         self.nodes.insert(idx, node);
         self.arena.insert(key, idx);
@@ -459,26 +549,13 @@ impl HashLifeCache {
             rx1.recv().unwrap()
         });
 
-        // Pick up the worker's finished buffer, blocking until ready.
-        // This removes the race where try_recv missed the refill.
-        let built = self.freelist_res.lock().unwrap().recv().expect("freelist worker died");
-        self.freed2 = built;
-
-        // Swap the active freelist with the worker's buffer, then hand the old
-        // active list (residual) to the worker to rebuild with this GC's freed
-        // indices plus a fresh top-up.
-        std::mem::swap(&mut self.freed, &mut self.freed2);
-
-        let target = freed_vec.len() * 2;
-        let cur = self.freed2.len() + freed_vec.len();
-        let needed = if cur < target { (target - cur) as u32 } else { 0 };
-        let start = self.next_idx;
-        self.next_idx += needed;
-        let buffer = std::mem::take(&mut self.freed2);
-        self.freelist_req.send((freed_vec, buffer, start, needed)).unwrap();
-
-        // Store freelist size after GC for step_n() to use when step count increases.
-        self.last_gc_freed_len = self.freed.len();
+        // Hand the recovered indices to the worker (non-blocking). The worker
+        // appends them to the channel (recycled for reuse) and tops the queue
+        // back up to the watermark. The main's current buffer stays in place —
+        // it is drained by find_or_create, which receives the next buffer.
+        let freed_len = freed_vec.len();
+        self.freelist_req.send(FreelistReq::Gc { freed_vec }).unwrap();
+        self.last_gc_freed_len = freed_len;
 
         live_len as u32
     }
@@ -1542,7 +1619,7 @@ impl HashLife {
         // For large spans, grid allocation would OOM. Build quadtree directly from cells.
         if size > 4096 {
             let depth = size.trailing_zeros();
-            let mut cache = HashLifeCache::new_for_population(data.len());
+            let mut cache = HashLifeCache::new();
             let tree = build_quadtree_from_cells(&mut cache, data, min_x, min_y, size as u32, depth);
             let mut hf = HashLife {
                 cache,
@@ -1558,10 +1635,6 @@ impl HashLife {
                 last_step_count: 0,
                 rotate_count: 0,
             };
-            // Grow freelist
-            let arena_size = hf.cache.nodes.len();
-            let freelist_target = (arena_size * 4).max(4000000);
-            hf.cache.grow_freed(freelist_target);
             hf.shrink_caches();
             return hf;
         }
@@ -1576,7 +1649,7 @@ impl HashLife {
             grid_2d[(y - min_y + oy as u64) as usize][(x - min_x + ox as u64) as usize] = 1;
         }
 
-        let mut cache = HashLifeCache::new_for_population(data.len());
+        let mut cache = HashLifeCache::new();
         let mut tree = build_quadtree(&mut cache, &grid_2d, 0, 0, size, size);
         let mut depth = size.trailing_zeros();
 
@@ -1585,11 +1658,6 @@ impl HashLife {
             tree = expand_node(&mut cache, tree, depth);
             depth += 1;
         }
-
-        // Size freelist based on actual arena usage after tree build
-        let arena_size = cache.nodes.len();
-        let freelist_target = (arena_size * 4).max(4000000);
-        cache.grow_freed(freelist_target);
 
         let origin_x = min_x as i64 - (ox as i64);
         let origin_y = min_y as i64 - (oy as i64);
@@ -1825,22 +1893,6 @@ pub fn step(&mut self) {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        // Pre-grow freelist if step count increased significantly since last call.
-        // GC recovers N nodes and grows freelist to 2*N. Node churn scales with
-        // tree depth (log2 of step count), so scale freelist by log2(new/old) + 1.
-        if self.last_step_count == 0 {
-            // First step — use max(4M, arena.len() * log2(step_size))
-            let arena_len = self.cache.nodes.len() as u64;
-            let target = (arena_len * (n.ilog2() as u64)).max(4_000_000);
-            self.cache.grow_freed(target as usize);
-        } else if n > self.last_step_count {
-            let freed_len = self.cache.last_gc_freed_len;
-            if freed_len > 0 {
-                let scale = ((n / self.last_step_count).ilog2() + 1) as u64;
-                let target = (freed_len as u64) * scale;
-                self.cache.grow_freed(target as usize);
-            }
-        }
         self.last_step_count = n;
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
