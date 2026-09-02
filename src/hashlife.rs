@@ -181,19 +181,6 @@ impl Buffer {
         let data: Vec<u32> = (0..count).map(|i| start.wrapping_add(i as u32)).collect();
         Buffer { data }
     }
-    /// Split recovered indices into buffers of at most `BUF` (the last may be
-    /// partial). One or more buffers; empty input yields none.
-    fn from_freed(freed: &[u32]) -> Vec<Buffer> {
-        let mut bufs = Vec::new();
-        let mut off = 0usize;
-        while off < freed.len() {
-            let n = (freed.len() - off).min(BUF);
-            let data: Vec<u32> = freed[off..off + n].to_vec();
-            bufs.push(Buffer { data });
-            off += n;
-        }
-        bufs
-    }
 }
 
 // ============================================================================
@@ -301,17 +288,18 @@ impl HashLifeCache {
                 for msg in req_rx {
                     match msg {
                         FreelistReq::Gc { freed_vec } => {
-                            // Recovered (freed) buffers go to the HEAD
-                            // (push_front) so the main reuses freed indices
-                            // before fresh ones. (Split into <=BUF buffers
-                            // first.)
-                            let recovered = Buffer::from_freed(&freed_vec);
-                            let mut guard = worker_queue.0.lock().unwrap();
-                            for b in recovered.into_iter().rev() {
-                                guard.push_front(b);
+                            // Recovered indices go to the HEAD (push_front) as
+                            // ONE buffer so the main reuses freed indices
+                            // before fresh ones. A Buffer is a Vec<u32> and
+                            // holds the whole vec — the <=BUF chunking was
+                            // only needed when Buffer was a fixed
+                            // Box<[u32; BUF]>.
+                            if !freed_vec.is_empty() {
+                                let mut guard = worker_queue.0.lock().unwrap();
+                                guard.push_front(Buffer { data: freed_vec });
+                                drop(guard);
+                                worker_queue.1.notify_all();
                             }
-                            drop(guard);
-                            worker_queue.1.notify_all();
                         }
                         FreelistReq::QueueMore => {}
                     }
