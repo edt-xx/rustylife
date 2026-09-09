@@ -351,6 +351,8 @@ impl HashLifeCache {
                     match msg {
                         FreelistReq::Gc { freed_vec } => {
                             if !freed_vec.is_empty() {
+                                // Queue this GC's recovered buffer for reuse.
+                                reuse.push_back(Buffer::recovered(freed_vec));
                                 // Recovered indices must reach the main before any
                                 // fresh one. You only enter here when a FRESH
                                 // buffer is in flight — a recovered in-flight
@@ -362,28 +364,12 @@ impl HashLifeCache {
                                 // after every recovered one. A fresh buffer is
                                 // never routed into `reuse`.
                                 if worker_count.load(Ordering::SeqCst) == 1
-                                    && inflight != Some(BufferKind::Recovered)
+                                    && inflight == Some(BufferKind::Fresh)
                                 {
                                     if let Ok(b) = worker_rx.try_recv() {
                                         worker_count.fetch_sub(1, Ordering::SeqCst);
                                         inflight = None;
                                         new.push_front(b);
-                                    }
-                                }
-                                // Queue this GC's recovered buffer for reuse.
-                                reuse.push_back(Buffer::recovered(freed_vec));
-                                // If the channel is empty, put a buffer in flight
-                                // (reuse → new). A recovered buffer goes out
-                                // before the displaced fresh one now sitting at
-                                // the front of `new`.
-                                if worker_count.load(Ordering::SeqCst) == 0 {
-                                    if let Some(b) = reuse
-                                        .pop_front()
-                                        .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
-                                    {
-                                        inflight = Some(b.kind);
-                                        buf_tx.send(b).unwrap();
-                                        worker_count.fetch_add(1, Ordering::SeqCst);
                                     }
                                 }
                             }
@@ -394,20 +380,26 @@ impl HashLifeCache {
                             // topped; if the channel is now empty, put one buffer
                             // in flight (reuse → new) so the main's next recv
                             // never blocks.
-                            top_up_new(&mut new, &mut next_idx);
-                            if worker_count.load(Ordering::SeqCst) == 0 {
-                                if let Some(b) = reuse
-                                    .pop_front()
-                                    .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
-                                {
-                                    inflight = Some(b.kind);
-                                    buf_tx.send(b).unwrap();
-                                    worker_count.fetch_add(1, Ordering::SeqCst);
-                                }
-                            }
+                            // top_up_new(&mut new, &mut next_idx);
                         }
                     }
+                    // If the channel is empty, put a buffer in flight
+                    // (reuse → new). A recovered buffer goes out
+                    // before the displaced fresh one now sitting at
+                    // the front of `new`.
+                    if worker_count.load(Ordering::SeqCst) == 0 {
+                        if let Some(b) = reuse
+                            .pop_front()
+                            .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
+                        {
+                            inflight = Some(b.kind);
+                            buf_tx.send(b).unwrap();
+                            worker_count.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+
                 }
+
             })
             .expect("spawn freelist worker");
         // The main's initial buffer: the first one the worker sent (blocks
