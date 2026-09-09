@@ -12,7 +12,8 @@
 
 use ahash::AHashMap;
 use std::collections::VecDeque;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+use crossbeam_channel::Receiver;
 
 // Coord pack/unpack: u64 coords packed into u128
 pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
@@ -158,12 +159,25 @@ const BUF: usize = 262_144;
 /// fresh buffers as needed) so a drain `recv` on the main never blocks.
 const WATERMARK: usize = 8;
 
+/// What a buffer holds. The worker uses this to keep recovered indices ahead of
+/// fresh ones: a recovered in-flight buffer is never displaced, and a buffer is
+/// only ever sent to the main as (reuse → new).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BufferKind {
+    /// New indices minted by the worker (the fresh pool).
+    Fresh,
+    /// Indices recovered by a GC (dead nodes) — always reused before fresh.
+    Recovered,
+}
+
 /// A freelist buffer: a `Vec<u32>` of live indices. The main pops from the end;
 /// when it is empty it is drained and the main receives the next buffer from the
 /// worker. Fresh buffers are full (`len == BUF`); recovered (GC) buffers may be
-/// partial. Allocated on demand in the worker thread (off the critical path).
+/// partial. `kind` is worker-internal bookkeeping — the main never inspects it.
+/// Allocated on demand in the worker thread (off the critical path).
 struct Buffer {
     data: Vec<u32>,
+    kind: BufferKind,
 }
 
 impl Buffer {
@@ -179,7 +193,11 @@ impl Buffer {
     fn fresh(start: u32, count: usize) -> Buffer {
         let count = count.min(BUF);
         let data: Vec<u32> = (0..count).map(|i| start.wrapping_add(i as u32)).collect();
-        Buffer { data }
+        Buffer { data, kind: BufferKind::Fresh }
+    }
+    /// A recovered (GC) buffer of the given indices, tagged `Recovered`.
+    fn recovered(freed: Vec<u32>) -> Buffer {
+        Buffer { data: freed, kind: BufferKind::Recovered }
     }
 }
 
@@ -215,32 +233,57 @@ pub struct HashLifeCache {
     pub last_gc_freed_len: usize,
     /// Handoff to the freelist worker (see `FreelistReq`).
     freelist_req: mpsc::Sender<FreelistReq>,
-    /// Shared buffer queue with the worker: a `VecDeque` behind a `Mutex`
-    /// (+`Condvar` so the main blocks when it is empty). Recovered (GC)
-    /// buffers are pushed to the HEAD (`push_front`) so the main reuses freed
-    /// indices before fresh ones; fresh (grow) buffers are pushed to the TAIL
-    /// (`push_back`). The main pops from the HEAD. The lock is only taken per
-    /// drained buffer / per GC (infrequent), so it is off the per-node path.
-    freelist_res: Arc<(Mutex<VecDeque<Buffer>>, Condvar)>,
+    /// Channel from the freelist worker: at most ONE buffer is in flight. The
+    /// worker (sole producer) sends a buffer; the main recvs it when it drains
+    /// its current one. A recovered (freed) buffer always displaces any fresh
+    /// one in flight, so a fresh index is never handed out ahead of a recovered
+    /// one. The `Receiver` sits in a `Mutex` only so the thread-shared cache
+    /// stays `Sync` — it is locked on the main thread alone, so it never
+    /// contends.
+    freelist_res: Mutex<Receiver<Buffer>>,
+    /// Shared channel-fullness counter (0 or 1) — `Arc` so BOTH receivers can
+    /// keep it true: the main decrements on its `recv`, the worker decrements
+    /// on its `try_recv`, and only the worker increments (on `send`).
+    buffer_count: Arc<AtomicUsize>,
 }
 
 /// Handoff messages to the freelist worker. The worker exclusively owns the
-/// fresh-index counter (a plain `u32` in its closure — no `Arc`/atomic, no
-/// second writer) and the queue of buffers; buffers cross the channel by move
-/// so each buffer has exactly one owner at every moment. The main's current
-/// buffer is NOT bounced back through the worker anymore — it is drained and
-/// discarded by the main, and the worker keeps its own queue (recovered +
-/// fresh buffers) topped up to the watermark.
+/// fresh-index counter (a plain `u32` in its closure — no second writer).
+/// Buffers cross a crossbeam SPMC channel by move so each buffer has exactly
+/// one owner at every moment (the worker produces; the worker and the main
+/// both consume). At most ONE buffer is in flight; a recovered buffer always
+/// displaces a fresh one, so the main drains recovered indices before fresh.
+/// The main's current buffer is NOT bounced back through the worker — it is
+/// drained and discarded by the main.
 enum FreelistReq {
-    /// GC boundary: the recovered (dead node) indices. The worker splits them
-    /// into fixed buffers and pushes them to the HEAD of the shared queue
-    /// (`push_front`) so the main reuses freed indices before fresh ones, then
-    /// tops up to the watermark (minting fresh at the tail as needed).
-    /// Non-blocking on the main — the heavy work is async on the worker.
+    /// GC boundary: the recovered (dead node) indices. The worker pulls any
+    /// in-flight FRESH buffer out of the channel (try_recv) and pushes it to the
+    /// front of the fresh runway, then sends the recovered buffer in — a fresh
+    /// index is never queued ahead of a recovered one. Non-blocking on the
+    /// main; the heavy work is async on the worker.
     Gc { freed_vec: Vec<u32> },
-    /// The main drained a buffer: top the queue back up to the watermark (mint
-    /// fresh buffers as needed) so the main's next drain `recv` never blocks.
+    /// The main drained a buffer (its recv already decremented the shared
+    /// counter): top the fresh pool back up and, if the channel is now empty,
+    /// send one buffer (a recovered one before a fresh one) so the main's next
+    /// `recv` never blocks.
     QueueMore,
+}
+
+/// Refill the worker's fresh runway back up to `WATERMARK`, minting fresh
+/// buffers as it is drawn down. Recovered (freed) buffers are NOT minted here —
+/// they are queued in the reuse queue on a Gc and sent from there, always ahead
+/// of any fresh buffer. A u32 fresh-index space exhaustion breaks the loop
+/// (never a tight loop).
+fn top_up_new(new: &mut VecDeque<Buffer>, next_idx: &mut u32) {
+    while new.len() < WATERMARK {
+        let start = *next_idx;
+        let end = start.saturating_add(BUF as u32);
+        if end <= start {
+            break; // u32 fresh-index space exhausted
+        }
+        *next_idx = end;
+        new.push_back(Buffer::fresh(start, BUF));
+    }
 }
 
 impl HashLifeCache {
@@ -262,75 +305,117 @@ impl HashLifeCache {
         // floor: the worker mints fresh buffers as needed to keep the queue at
         // the watermark.
         let (req_tx, req_rx) = mpsc::channel::<FreelistReq>();
-        let queue: Arc<(Mutex<VecDeque<Buffer>>, Condvar)> =
-            Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
-        let worker_queue = queue.clone();
+        // Buffer channel: crossbeam unbounded SPMC — the worker is the sole
+        // producer and the worker AND the main are both consumers (the worker's
+        // try_recv on a Gc needs a second consumer). At most one buffer is ever
+        // in flight (enforced by the shared counter); unbounded so an over-send
+        // can never block.
+        let (buf_tx, buf_rx) = crossbeam_channel::unbounded::<Buffer>();
+        let worker_rx = buf_rx.clone();
+        // Shared channel-fullness counter (0 or 1): the main decrements on its
+        // recv, the worker decrements on its try_recv, and only the worker
+        // increments (on send). Clone for the worker; the original goes in the
+        // struct.
+        let buffer_count = Arc::new(AtomicUsize::new(0));
+        let worker_count = buffer_count.clone();
         std::thread::Builder::new()
             .name("freelist".into())
             .spawn(move || {
+                // Reuse queue (FIFO): recovered (GC) buffers, oldest first.
+                // Always sent before a fresh buffer — a recovered index is never
+                // handed out behind a fresh one.
+                let mut reuse: VecDeque<Buffer> = VecDeque::new();
+                // Fresh runway: pre-minted buffers (FIFO, oldest first) plus,
+                // pushed LIFO to the front, any fresh buffer a Gc yanks out of
+                // the in-flight slot — so a displaced buffer goes out before the
+                // pre-minted runway. Kept at WATERMARK (pre-minted).
+                let mut new: VecDeque<Buffer> = VecDeque::new();
+                // Fresh-index counter (worker-owned; starts at 2 — sentinels
+                // are 0 and 1).
                 let mut next_idx: u32 = 2;
+                // Kind of the buffer currently in the channel (valid when
+                // `worker_count == 1`). Lets the worker tell a fresh in-flight
+                // buffer from a recovered one instead of guessing.
+                let mut inflight: Option<BufferKind> = None;
 
-                // Prime WATERMARK fresh buffers (push_back, tail). The first
-                // becomes the main's initial buffer (popped from the head).
-                {
-                    let mut guard = worker_queue.0.lock().unwrap();
-                    for _ in 0..WATERMARK {
-                        let start = next_idx;
-                        let end = start.saturating_add(BUF as u32);
-                        if end <= start { break; }
-                        guard.push_back(Buffer::fresh(start, BUF));
-                        next_idx = end;
-                    }
-                    drop(guard);
-                    worker_queue.1.notify_all();
+                // Pre-mint the fresh runway to WATERMARK.
+                top_up_new(&mut new, &mut next_idx);
+                // Initial buffer: put one in flight (the main's first buffer).
+                if let Some(b) = new.pop_front() {
+                    inflight = Some(b.kind);
+                    buf_tx.send(b).unwrap();
+                    worker_count.fetch_add(1, Ordering::SeqCst);
                 }
 
                 for msg in req_rx {
                     match msg {
                         FreelistReq::Gc { freed_vec } => {
-                            // Recovered indices go to the HEAD (push_front) as
-                            // ONE buffer so the main reuses freed indices
-                            // before fresh ones. A Buffer is a Vec<u32> and
-                            // holds the whole vec — the <=BUF chunking was
-                            // only needed when Buffer was a fixed
-                            // Box<[u32; BUF]>.
                             if !freed_vec.is_empty() {
-                                let mut guard = worker_queue.0.lock().unwrap();
-                                guard.push_front(Buffer { data: freed_vec });
-                                drop(guard);
-                                worker_queue.1.notify_all();
+                                // Recovered indices must reach the main before any
+                                // fresh one. You only enter here when a FRESH
+                                // buffer is in flight — a recovered in-flight
+                                // buffer is left in the channel (it is already
+                                // ahead of every fresh buffer, so displacing it
+                                // would only strand it). Pull the fresh buffer
+                                // out and push it LIFO to the front of `new` so
+                                // it is re-sent before the pre-minted runway but
+                                // after every recovered one. A fresh buffer is
+                                // never routed into `reuse`.
+                                if worker_count.load(Ordering::SeqCst) == 1
+                                    && inflight != Some(BufferKind::Recovered)
+                                {
+                                    if let Ok(b) = worker_rx.try_recv() {
+                                        worker_count.fetch_sub(1, Ordering::SeqCst);
+                                        inflight = None;
+                                        new.push_front(b);
+                                    }
+                                }
+                                // Queue this GC's recovered buffer for reuse.
+                                reuse.push_back(Buffer::recovered(freed_vec));
+                                // If the channel is empty, put a buffer in flight
+                                // (reuse → new). A recovered buffer goes out
+                                // before the displaced fresh one now sitting at
+                                // the front of `new`.
+                                if worker_count.load(Ordering::SeqCst) == 0 {
+                                    if let Some(b) = reuse
+                                        .pop_front()
+                                        .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
+                                    {
+                                        inflight = Some(b.kind);
+                                        buf_tx.send(b).unwrap();
+                                        worker_count.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                }
                             }
                         }
-                        FreelistReq::QueueMore => {}
-                    }
-                    // The main popped a buffer to produce this message: top up
-                    // to the watermark by minting fresh (push_back, tail) while
-                    // the queue is short. No floor — the fresh-index counter
-                    // (u32) has 4B of headroom.
-                    loop {
-                        let mut guard = worker_queue.0.lock().unwrap();
-                        if guard.len() >= WATERMARK { break; }
-                        let start = next_idx;
-                        let end = start.saturating_add(BUF as u32);
-                        if end <= start { break; }
-                        guard.push_back(Buffer::fresh(start, BUF));
-                        next_idx = end;
-                        drop(guard);
-                        worker_queue.1.notify_all();
+                        FreelistReq::QueueMore => {
+                            // The main just drained a buffer (its recv
+                            // decremented the counter): keep the fresh runway
+                            // topped; if the channel is now empty, put one buffer
+                            // in flight (reuse → new) so the main's next recv
+                            // never blocks.
+                            top_up_new(&mut new, &mut next_idx);
+                            if worker_count.load(Ordering::SeqCst) == 0 {
+                                if let Some(b) = reuse
+                                    .pop_front()
+                                    .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
+                                {
+                                    inflight = Some(b.kind);
+                                    buf_tx.send(b).unwrap();
+                                    worker_count.fetch_add(1, Ordering::SeqCst);
+                                }
+                            }
+                        }
                     }
                 }
             })
             .expect("spawn freelist worker");
-        // The main's initial buffer: the first one the worker primed, popped
-        // from the head of the shared queue (waits if the worker has not
-        // primed yet).
-        let freed = {
-            let mut guard = queue.0.lock().unwrap();
-            while guard.is_empty() {
-                guard = queue.1.wait(guard).unwrap();
-            }
-            guard.pop_front().unwrap()
-        };
+        // The main's initial buffer: the first one the worker sent (blocks
+        // until the worker sends it). This recv decrements the shared counter;
+        // then kick off the worker's first refill.
+        let freed = buf_rx.recv().unwrap();
+        buffer_count.fetch_sub(1, Ordering::SeqCst);
+        req_tx.send(FreelistReq::QueueMore).unwrap();
         Self {
             arena,
             nodes,
@@ -340,19 +425,20 @@ impl HashLifeCache {
             freed,
             last_gc_freed_len: 0,
             freelist_req: req_tx,
-            freelist_res: queue,
+            freelist_res: Mutex::new(buf_rx),
+            buffer_count,
         }
     }
 
-    /// Pop the next buffer from the head of the shared queue, blocking (on the
-    /// condvar) until one is available. Off the per-node path — called once per
-    /// drained buffer.
+    /// Receive the next buffer from the worker, blocking until it arrives.
+    /// Off the per-node path — called once per drained buffer.
     fn recv_buffer(&self) -> Buffer {
-        let mut guard = self.freelist_res.0.lock().unwrap();
-        while guard.is_empty() {
-            guard = self.freelist_res.1.wait(guard).unwrap();
-        }
-        guard.pop_front().unwrap()
+        let b = self.freelist_res.lock().unwrap().recv().unwrap();
+        // The main consumed the in-flight buffer: decrement the shared counter
+        // (the worker also decrements on its own try_recv, so it stays true in
+        // both threads).
+        self.buffer_count.fetch_sub(1, Ordering::SeqCst);
+        b
     }
 
     pub fn get_node(&self, idx: u32) -> LifeNode {
@@ -396,9 +482,10 @@ impl HashLifeCache {
         let idx = match self.freed.pop() {
             Some(i) => i,
             None => {
-                // Drained: receive the next buffer from the worker (the channel
-                // is kept filled to the watermark, so this is non-blocking in
-                // practice) and ask the worker to top the queue back up.
+                // Drained: take the next buffer FIRST (its recv decrements the
+                // shared counter to 0), then tell the worker to refill one item
+                // if the channel is now empty. Recv-before-send so the channel
+                // is empty when the worker checks — never two in flight.
                 self.freed = self.recv_buffer();
                 self.freelist_req.send(FreelistReq::QueueMore).unwrap();
                 self.freed.pop().expect("worker sent an empty buffer")
@@ -530,6 +617,8 @@ impl HashLifeCache {
         let live_ref: &ahash::AHashSet<u32> = &live;
         let freed_vec = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
+            // Sending Gc msg to worker directly (modified to just add to front) is 3-4% slower
+            // It is critical to performance to use freed nodes asap avoiding 'new' nodes...
             let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
             s.spawn(move || {
                 let fv: Vec<u32> = nodes.extract_if(|idx, _| !live_ref.contains(idx))
