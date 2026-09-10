@@ -154,10 +154,10 @@ pub struct LifeNode {
 /// big as a step's worst-case allocation or the main drains mid-step; 256K
 /// covers a growing methuselah with room to spare.
 const BUF: usize = 262_144;
-/// Number of buffers the worker keeps queued (the main's runway). ~8 MB.
+/// Number of buffers the worker keeps queued (the main's runway). ~2 MB.
 /// The worker tops the queue up to this watermark on every message (minting
 /// fresh buffers as needed) so a drain `recv` on the main never blocks.
-const WATERMARK: usize = 8;
+const WATERMARK: usize = 2;
 
 /// What a buffer holds. The worker uses this to keep recovered indices ahead of
 /// fresh ones: a recovered in-flight buffer is never displaced, and a buffer is
@@ -275,6 +275,9 @@ enum FreelistReq {
 /// of any fresh buffer. A u32 fresh-index space exhaustion breaks the loop
 /// (never a tight loop).
 fn top_up_new(new: &mut VecDeque<Buffer>, next_idx: &mut u32) {
+    //if new.len() < 1 {
+    //    eprintln!("top_up_new: {} buffer(s) available at start", new.len());
+    //}
     while new.len() < WATERMARK {
         let start = *next_idx;
         let end = start.saturating_add(BUF as u32);
@@ -390,11 +393,14 @@ impl HashLifeCache {
                     if worker_count.load(Ordering::SeqCst) == 0 {
                         if let Some(b) = reuse
                             .pop_front()
-                            .or_else(|| { top_up_new(&mut new, &mut next_idx); new.pop_front() })
+                            .or_else(|| { new.pop_front() })
                         {
                             inflight = Some(b.kind);
                             buf_tx.send(b).unwrap();
                             worker_count.fetch_add(1, Ordering::SeqCst);
+                            if  inflight != Some(BufferKind::Recovered) {
+                                top_up_new(&mut new, &mut next_idx);
+                            }
                         }
                     }
 
