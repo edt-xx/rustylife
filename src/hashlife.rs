@@ -253,8 +253,9 @@ pub struct HashLifeCache {
 /// one owner at every moment (the worker produces; the worker and the main
 /// both consume). At most ONE buffer is in flight; a recovered buffer always
 /// displaces a fresh one, so the main drains recovered indices before fresh.
-/// The main's current buffer is NOT bounced back through the worker — it is
-/// drained and discarded by the main.
+/// A FRESH current buffer is returned via `ReturnFresh` at a GC boundary
+/// (the main swaps the recovered indices into itself); a RECOVERED current
+/// buffer is drained and discarded by the main.
 enum FreelistReq {
     /// GC boundary: the recovered (dead node) indices. The worker pulls any
     /// in-flight FRESH buffer out of the channel (try_recv) and pushes it to the
@@ -262,6 +263,13 @@ enum FreelistReq {
     /// index is never queued ahead of a recovered one. Non-blocking on the
     /// main; the heavy work is async on the worker.
     Gc { freed_vec: Vec<u32> },
+    /// The main's current buffer was FRESH at a GC boundary: the main has
+    /// swapped this GC's recovered indices into itself locally and returns
+    /// the fresh buffer. The worker re-queues it LIFO at the front of the
+    /// fresh runway — out before the pre-minted runway, after any recovered
+    /// buffer. No reuse queueing, no yank: the main already holds the
+    /// recovered indices.
+    ReturnFresh { buf: Buffer },
     /// The main drained a buffer (its recv already decremented the shared
     /// counter): top the fresh pool back up and, if the channel is now empty,
     /// send one buffer (a recovered one before a fresh one) so the main's next
@@ -376,6 +384,15 @@ impl HashLifeCache {
                                     }
                                 }
                             }
+                        }
+                        FreelistReq::ReturnFresh { buf } => {
+                            // The main swapped a recovered buffer into itself
+                            // at the GC boundary and returned its FRESH
+                            // buffer: re-queue it LIFO at the front of `new`
+                            // so it goes out before the pre-minted runway.
+                            // No reuse queueing, no yank — the main already
+                            // holds this GC's recovered indices.
+                            new.push_front(buf);
                         }
                         FreelistReq::QueueMore => {
                             // The main just drained a buffer (its recv
@@ -650,11 +667,24 @@ impl HashLifeCache {
 
         // Hand the recovered indices to the worker (non-blocking). The worker
         // pushes them to the HEAD of the shared queue (recycled for reuse) and
-        // tops the queue back up to the watermark. The main's current buffer
-        // stays in place — it is drained by find_or_create, which pops the next
-        // buffer from the head (reused freed indices first).
+        // tops the queue back up to the watermark.
+        //
+        // If the main's current buffer is FRESH, swap instead: the recovered
+        // indices become the main's new current buffer in place (std::mem::swap
+        // — no data copy) and the fresh buffer goes back to the worker via
+        // ReturnFresh (re-queued at the front of the fresh runway). The main
+        // never blocks on a recv and freed_vec never round-trips. Without the
+        // swap the main would allocate the buffer's unused fresh tail into the
+        // node space, ratcheting the fresh-index high-water mark by up to a
+        // full buffer per GC.
         let freed_len = freed_vec.len();
-        self.freelist_req.send(FreelistReq::Gc { freed_vec }).unwrap();
+        if self.freed.kind == BufferKind::Fresh && !self.freed.is_empty() && freed_len > 0 {
+            let mut recovered = Buffer::recovered(freed_vec);
+            std::mem::swap(&mut self.freed, &mut recovered);
+            self.freelist_req.send(FreelistReq::ReturnFresh { buf: recovered }).unwrap();
+        } else {
+            self.freelist_req.send(FreelistReq::Gc { freed_vec }).unwrap();
+        }
         self.last_gc_freed_len = freed_len;
 
         live_len as u32
