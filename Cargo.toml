@@ -20,8 +20,6 @@ serde_json = "1"
 sysinfo = "0.37"
 ahash = "0.8"
 crossbeam-channel = "0.5"
-
-[target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
