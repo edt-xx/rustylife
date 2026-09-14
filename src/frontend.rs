@@ -164,8 +164,17 @@ function parseRLE(text) {
 
         if (c === 'o') {
             for (var j = 0; j < n; j++) { cells.push([x, y]); x++; }
-        } else if (c === 'b') {
+        } else if (c === 'b' || c === '.') {
             x += n;
+        } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+            // Extended RLE (Golly): letters are non-zero states — the reader
+            // permits o and A interchangeably, A..X = states 1..24, pA..yO =
+            // states 25..255. In a two-state rule any non-zero state is a live
+            // cell. A lowercase prefix p..y paired with the next uppercase
+            // letter is ONE multi-state cell, so skip the partner.
+            if (c >= 'p' && c <= 'y' && i + 1 < text.length &&
+                text[i+1] >= 'A' && text[i+1] <= 'Z') i++;
+            for (var j = 0; j < n; j++) { cells.push([x, y]); x++; }
         } else if (c === '$') {
             x = 0; y += n;
         } else if (c === '!') {
