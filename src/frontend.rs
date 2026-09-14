@@ -179,6 +179,8 @@ function parseRLE(text) {
             x = 0; y += n;
         } else if (c === '!') {
             break;
+        } else if (c === '@') {
+            break; // trailing @RULE data (Golly): not pattern data, stop here
         }
     }
     return cells;
@@ -284,10 +286,12 @@ function parseMacrocell(text) {
     var rootNode = nodes[rootNum];
     var rootLevel = rootNode.type === 'leaf' ? 3 : rootNode.level;
     var rootSize = Math.pow(2, rootLevel);
-    // Use explicit origin if present, otherwise fall back to Golly convention
+    // Use explicit origin if present, otherwise fall back to the Golly
+    // convention: upper-left of the root's SE child at (0,1), i.e. the root
+    // top-left is at (-S/2, 1-S/2) for a root of size S.
     if (originX === null) {
-        originX = -rootSize;
-        originY = -rootSize + 1;
+        originX = -rootSize / 2;
+        originY = 1 - rootSize / 2;
     }
     expandNode(rootNum, originX, originY, rootSize);
 
