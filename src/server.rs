@@ -257,7 +257,7 @@ fn serve_state(
     data.extend(alive_count.to_be_bytes());
     if g.hashlife_mode {
         if let Some(ref hf) = g.hashlife {
-            data.extend((hf.cache.nodes.len() as u32).to_be_bytes());
+            data.extend(hf.last_gc_live_len.to_be_bytes());
         } else {
             data.extend(0u32.to_be_bytes());
         }

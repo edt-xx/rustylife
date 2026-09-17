@@ -146,6 +146,13 @@ pub struct LifeNode {
     pub is_empty: bool,
 }
 
+/// Zeroed node: all children FALSE, marked empty. Fills unallocated slots of
+/// the dense `nodes` Vec and any slot zeroed at GC, so a slot never reads as
+/// a live node once freed.
+pub const EMPTY_NODE: LifeNode = LifeNode {
+    north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true,
+};
+
 // ============================================================================
 // Freelist buffer (fixed-length) + handoff
 // ============================================================================
@@ -211,8 +218,20 @@ impl Buffer {
 pub struct HashLifeCache {
     /// Canonicalization map: children tuple → node index
     pub arena: ahash::AHashMap<[u32; 4], u32>,
-    /// Node storage: idx → LifeNode
-    pub nodes: ahash::AHashMap<u32, LifeNode>,
+    /// Node storage: dense Vec indexed by idx. The Vec's RANGE is not the
+    /// allocated set — fresh buffers are minted in BUF chunks and popped
+    /// top-down, so the first alloc of a buffer grows the Vec to the buffer's
+    /// top while the rest of the range stays EMPTY_NODE until allocated.
+    /// Slots freed at GC are zeroed to EMPTY_NODE.
+    pub nodes: Vec<LifeNode>,
+    /// One bit per idx: tracks the CURRENTLY-allocated set. Set when the idx
+    /// is handed out of a freelist buffer (find_or_create), cleared when GC
+    /// frees it. A freed or never-allocated slot has its bit clear, so the GC
+    /// scan never re-frees it. (A map's extract_if removes the entry — the
+    /// Vec keeps the slot, so the bit must be cleared explicitly.) The
+    /// `nodes` range is not the allocated set (fresh buffers are minted in
+    /// BUF chunks, popped top-down); this bit is.
+    pub issued: Vec<u8>,
     /// Fast cache: two-tier generational for advance_fast results.
     /// n = old tier (survives one cycle), n1 = current tier.
     /// On hit in n, promote to n1. New keys go in n1.
@@ -303,13 +322,20 @@ impl HashLifeCache {
     /// fresh buffers as needed to keep the queue at the watermark.
     pub fn new() -> Self {
         let mut arena = ahash::AHashMap::with_capacity(65536);
-        let mut nodes = ahash::AHashMap::with_capacity(65536);
+        // Dense node storage: sentinels at idx 0/1. find_or_create resizes
+        // `nodes` lazily as new high-water indices are allocated and sets
+        // the matching `issued` bit — the bit IS the allocated set.
+        let nodes = vec![
+            EMPTY_NODE,
+            LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false },
+        ];
+        let mut issued = vec![0u8; 2];
+        issued[0] = 1;
+        issued[1] = 1;
         // Index 0 = FALSE_NODE
         arena.insert([0,0,0,0], 0);
-        nodes.insert(0, LifeNode { north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true });
         // Index 1 = TRUE_NODE
         arena.insert([1,1,1,1], 1);
-        nodes.insert(1, LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false });
         // The worker exclusively owns the fresh-index counter (a plain u32,
         // starts at 2 — sentinels are 0 and 1). The buffer queue is shared
         // (worker pushes, main pops from the head). There is no reservoir
@@ -434,6 +460,7 @@ impl HashLifeCache {
         Self {
             arena,
             nodes,
+            issued,
             fast_cache_n: ahash::AHashMap::new(),
             fast_cache_n1: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
@@ -457,9 +484,7 @@ impl HashLifeCache {
     }
 
     pub fn get_node(&self, idx: u32) -> LifeNode {
-        *self.nodes.get(&idx).unwrap_or(&LifeNode {
-            north_west: 0, north_east: 0, south_west: 0, south_east: 0, is_empty: true,
-        })
+        self.nodes.get(idx as usize).copied().unwrap_or(EMPTY_NODE)
     }
 
     #[inline] pub fn nw(&self, idx: u32) -> u32 { self.get_node(idx).north_west }
@@ -488,7 +513,7 @@ impl HashLifeCache {
         let is_empty = {
             let is_e = |i: u32| -> bool {
                 if i == FALSE_NODE { true }
-                else if let Some(node) = self.nodes.get(&i) { node.is_empty }
+                else if let Some(node) = self.nodes.get(i as usize) { node.is_empty }
                 else { true }
             };
             is_e(nw) && is_e(ne) && is_e(sw) && is_e(se)
@@ -507,7 +532,19 @@ impl HashLifeCache {
             }
         };
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
-        self.nodes.insert(idx, node);
+        // Dense storage: lazily extend `nodes` on a new high-water idx (a
+        // top-down buffer's first pop jumps ahead of the Vec end) and set
+        // that idx's `issued` bit (GC clears it on free). So the GC scan can
+        // tell currently-allocated (bit set) from freed/never-allocated (bit
+        // clear). The allocation itself (freed.pop / recv_buffer / QueueMore)
+        // is unchanged.
+        let i = idx as usize;
+        if i >= self.nodes.len() {
+            self.nodes.resize(i + 1, EMPTY_NODE);
+            self.issued.resize(i + 1, 0);
+        }
+        self.issued[i] |= 1;
+        self.nodes[i] = node;
         self.arena.insert(key, idx);
         idx
     }
@@ -522,7 +559,7 @@ impl HashLifeCache {
             }
             if live.contains(&idx) { continue; }
             live.insert(idx);
-            if let Some(node) = self.nodes.get(&idx) {
+            if let Some(node) = self.nodes.get(idx as usize) {
                 if node.is_empty { 
                     continue; 
                 }
@@ -567,7 +604,7 @@ impl HashLifeCache {
                             continue;
                         }
                         local_live.insert(idx);
-                        if let Some(node) = self.nodes.get(&idx) {
+                        if let Some(node) = self.nodes.get(idx as usize) {
                             if node.is_empty {
                                 continue;
                             }
@@ -603,7 +640,7 @@ impl HashLifeCache {
                     continue;
                 }
                 live.insert(idx);
-                if let Some(node) = self.nodes.get(&idx) {
+                if let Some(node) = self.nodes.get(idx as usize) {
                     if node.is_empty {
                         continue;
                     }
@@ -632,13 +669,34 @@ impl HashLifeCache {
         let live_ref: &ahash::AHashSet<u32> = &live;
         let freed_vec = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
+            let issued = &mut self.issued;
             // Sending Gc msg to worker directly (modified to just add to front) is 3-4% slower
             // It is critical to performance to use freed nodes asap avoiding 'new' nodes...
             let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
             s.spawn(move || {
-                let fv: Vec<u32> = nodes.extract_if(|idx, _| !live_ref.contains(idx))
-                    .map(|(idx, _)| idx)
-                    .collect();
+                // Dense Vec: no extract (removing an element would shift
+                // every index). Scan instead. A slot is freeable ONLY if
+                // issued (handed out of a buffer) and not live. Never-issued
+                // slots (the Vec's range always outruns the allocated set)
+                // are skipped: freeing them would double-allocate an index
+                // still held in its original buffer. Dead slots are zeroed
+                // so a freed slot never reads as a live node (the map's
+                // extract_if made freed slots simply absent).
+                let mut fv: Vec<u32> = Vec::new();
+                for i in 0..nodes.len() {
+                    if issued[i] == 0 { continue; }
+                    if !live_ref.contains(&(i as u32)) {
+                        // Free: zero the slot AND clear the issued bit. The
+                        // clear is the key — the Vec keeps the slot (a map's
+                        // extract_if removed it), so without clearing, the
+                        // next GC would see issued still set and free the
+                        // same idx again → double-allocation → clobbered
+                        // children → corruption.
+                        nodes[i] = EMPTY_NODE;
+                        issued[i] = 0;
+                        fv.push(i as u32);
+                    }
+                }
                 let _ = tx1.send(fv);
             });
 
@@ -1671,6 +1729,10 @@ pub struct HashLife {
     pub last_cache_size: u32,
     /// Last step's cache hit rate * 10 (e.g., 45.2% → 452)
     pub last_cache_hit_rate: u32,
+    /// Live node count from the last gc() (rotate_caches runs after every
+    /// step/step_n). Feeds the snapshot header "active" field — the dense
+    /// nodes Vec len is the high-water mark, not the live count.
+    pub last_gc_live_len: u32,
     /// Step count used in last step_n() call (for freelist pre-grow scaling)
     pub last_step_count: u32,
     /// Total number of rotate_caches() calls since construction
@@ -1691,6 +1753,7 @@ impl HashLife {
             slow_cache_misses: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
+            last_gc_live_len: 0,
             last_step_count: 0,
             rotate_count: 0,
         }
@@ -1762,6 +1825,7 @@ impl HashLife {
                 slow_cache_misses: 0,
                 last_cache_size: 0,
                 last_cache_hit_rate: 0,
+                last_gc_live_len: 0,
                 last_step_count: 0,
                 rotate_count: 0,
             };
@@ -1803,6 +1867,7 @@ impl HashLife {
             slow_cache_misses: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
+            last_gc_live_len: 0,
             last_step_count: 0,
             rotate_count: 0,
         };
@@ -2099,7 +2164,7 @@ pub fn step(&mut self) {
     pub fn rotate_caches(&mut self, n: u32) {
         self.rotate_count += 1;
         // Always run GC
-        self.cache.gc(self.root, &self.slow_cache_n1);
+        self.last_gc_live_len = self.cache.gc(self.root, &self.slow_cache_n1);
 
         // Rotate both caches after GC
         if n == 1 || self.rotate_count > 999998/n {
@@ -2257,13 +2322,13 @@ mod tests {
                      flat_only({}): {:?}\n\
                      hf_only({}): {:?}",
                     name, i, i+1, flat_next.len(), hf_result.len(),
-                    hf.depth, hf.center, hf.cache.nodes.len(),
+                    hf.depth, hf.center, hf.last_gc_live_len,
                     only_flat.len(), only_flat.iter().take(5).map(|&c| unpack(*c)).collect::<Vec<_>>(),
                     only_hf.len(), only_hf.iter().take(5).map(|&c| unpack(*c)).collect::<Vec<_>>()
                 );
             }
             println!("{} gen {} OK ({} cells) depth={} nodes={}",
-                name, i+1, flat_next.len(), hf.depth, hf.cache.nodes.len());
+                name, i+1, flat_next.len(), hf.depth, hf.last_gc_live_len);
             flat = flat_next;
         }
     }
