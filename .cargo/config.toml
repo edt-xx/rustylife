@@ -1,2 +1,9 @@
-[build]
+# Per-target rustflags so a fresh clone builds on all three platforms
+# without edits. x86-64 stays the standing target-cpu for Linux and
+# Windows (perf-validated). No entry for aarch64-apple-darwin: rustc's
+# default there is apple-m1, which runs on M1-M4.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64"]
+
+[target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "target-cpu=x86-64"]
