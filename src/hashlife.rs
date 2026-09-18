@@ -1404,7 +1404,8 @@ fn build_quadtree(cache: &mut HashLifeCache, grid: &[Vec<u8>], x0: usize, y0: us
 
 fn count_cells(cache: &mut HashLifeCache, node_idx: u32, depth: u32) -> usize {
     if node_idx == FALSE_NODE { return 0; }
-    if node_idx == TRUE_NODE { return 1usize << depth; }
+    // A depth-d block is 2^d x 2^d = 4^d cells (leaves are 1x1 sentinels).
+    if node_idx == TRUE_NODE { return 1usize << (2 * depth); }
     if depth == 0 { return 1; }
     // Check memoization cache
     if let Some(&c) = cache.count_cache.get(&(node_idx, depth)) {
@@ -3039,6 +3040,32 @@ mod tests {
         let cells2 = hf2.to_flat();
 
         assert_eq!(cells1, cells2, "Freelist GC corruption");
+    }
+
+    #[test]
+    fn test_block_population() {
+        // An all-alive 2x2 ("block") compresses to a TRUE node at depth 1,
+        // a full 8x8 root compresses to a TRUE node at depth 3. These
+        // validate the 1 << (2*depth) formula (the old 1 << depth counted
+        // the block as 2 and the 8x8 as 8).
+        let pattern = [(100u64, 100u64), (101, 100), (100, 101), (101, 101)];
+        let cells: Vec<u128> = pattern.iter().map(|&(x, y)| coord_pack(x, y)).collect();
+        let mut hf = HashLife::from_flat(&cells);
+        assert_eq!(hf.alive_count(), 4, "fresh block population");
+        // The block is a still life: population must hold across gc
+        for g in 1..=3u32 {
+            hf.step();
+            assert_eq!(hf.alive_count(), 4, "block population after gen {}", g);
+        }
+        // Full 8x8 (depth-3 TRUE root) = 64 cells
+        let mut full: Vec<u128> = Vec::new();
+        for y in 0..8u64 {
+            for x in 0..8u64 {
+                full.push(coord_pack(100 + x, 100 + y));
+            }
+        }
+        let mut hf2 = HashLife::from_flat(&full);
+        assert_eq!(hf2.alive_count(), 64, "full 8x8 population");
     }
 
     #[test]
