@@ -1589,6 +1589,40 @@ fn set_cell_at(cache: &mut HashLifeCache, node_idx: u32, depth: u32, x: u32, y: 
     cache.find_or_create(nw, ne, sw, se)
 }
 
+// Profiling hook (candidate 4, SSE2 TRUE fill): cumulative bytes written by
+// the TRUE_NODE fill branch of fill_viewport, across all threads. Cheap: one
+// relaxed atomic add per TRUE visit, no clock reads.
+static TRUE_FILL_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Take and reset the accumulated TRUE_NODE fill byte count.
+pub fn take_true_fill_bytes() -> u64 {
+    TRUE_FILL_BYTES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+// Candidate 4: SSE2 fast path for the TRUE_NODE middle-bytes fill.
+// The buffer is zeroed at call entry and nothing clears bits, so for 16-byte
+// chunks `v | (v == 0)` is exact: zero lane -> 0xFF, nonzero lane -> unchanged
+// — identical to the scalar `if bits[b] == 0 { bits[b] = 0xFF; }` loop.
+// Processes [lo, hi) in 16-byte chunks and returns the next byte to handle.
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::{
+    _mm_cmpeq_epi8, _mm_loadu_si128, _mm_or_si128, _mm_setzero_si128, _mm_storeu_si128, __m128i,
+};
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn true_fill_sse2(base: *mut u8, mut lo: usize, hi: usize) -> usize {
+    unsafe {
+        let zero = _mm_setzero_si128();
+        while hi - lo >= 16 {
+            let ptr = base.add(lo) as *mut __m128i;
+            let v = _mm_loadu_si128(ptr);
+            let z = _mm_cmpeq_epi8(v, zero);
+            _mm_storeu_si128(ptr, _mm_or_si128(v, z));
+            lo += 16;
+        }
+    }
+    lo
+}
+
 fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: u64, vx: u64, vy: u64, vw: u32, vh: u32, bits: &mut [u8]) {
     if node_idx == FALSE_NODE { return; }
     let size = 1u32 << depth;
@@ -1602,6 +1636,7 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: 
         let rx2 = (ox + size as u64).min(vx + vw as u64);
         let ry2 = (oy + size as u64).min(vy + vh as u64);
         // Iterate by row, then by byte: skip non-zero bytes, set zero bytes to 0xFF
+        let mut tf_bytes: u64 = 0;
         for y in ry..ry2 {
             let row_base = ((y - vy) * vw as u64) as usize;
             let start_idx = row_base + (rx - vx) as usize;
@@ -1618,7 +1653,17 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: 
                     }
                 }
             } else {
-                for b in (sb + 1)..eb {
+                // Middle bytes: SSE2 16-at-a-time on x86_64, scalar remainder
+                // (and the whole range on non-x86_64).
+                #[cfg(target_arch = "x86_64")]
+                let mid_lo = {
+                    let mut b = sb + 1;
+                    b = unsafe { true_fill_sse2(bits.as_mut_ptr(), b, eb) };
+                    b
+                };
+                #[cfg(not(target_arch = "x86_64"))]
+                let mid_lo = sb + 1;
+                for b in mid_lo..eb {
                     if bits[b] == 0 { bits[b] = 0xFF; }
                 }
                 {
@@ -1628,13 +1673,16 @@ fn fill_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u64, oy: 
                 }
                 {
                     let bit = end_idx & 7;
-                    if bit > 0 {
-                        let mask = (1u8 << bit) - 1;
-                        if bits[eb] == 0 { bits[eb] = mask; } else { bits[eb] |= mask; }
-                    }
+                    // bit == 0: region ends exactly on a byte boundary — eb is
+                    // fully covered but the middle loop stopped at eb-1, so
+                    // write it here (0xFF) instead of skipping it.
+                    let mask = if bit == 0 { 0xFF } else { (1u8 << bit) - 1 };
+                    if bits[eb] == 0 { bits[eb] = mask; } else { bits[eb] |= mask; }
                 }
             }
+            tf_bytes += (eb - sb + 1) as u64;
         }
+        TRUE_FILL_BYTES.fetch_add(tf_bytes, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     if depth == 0 {
@@ -1706,10 +1754,11 @@ fn fill_aggregated_viewport(cache: &HashLifeCache, node_idx: u32, depth: u32, ox
                 // Handle end byte
                 {
                     let bit = end_idx & 7;
-                    if bit > 0 {
-                        let mask = (1u8 << bit) - 1;
-                        if agg[eb] == 0 { agg[eb] = mask; } else { agg[eb] |= mask; }
-                    }
+                    // bit == 0: region ends exactly on a byte boundary — eb is
+                    // fully covered but the middle loop stopped at eb-1, so
+                    // write it here (0xFF) instead of skipping it.
+                    let mask = if bit == 0 { 0xFF } else { (1u8 << bit) - 1 };
+                    if agg[eb] == 0 { agg[eb] = mask; } else { agg[eb] |= mask; }
                 }
             }
         }
@@ -3128,5 +3177,86 @@ mod tests {
         assert_eq!(vw_a % 8, 0, "vw_a not multiple of 8");
         assert!(hvx_a <= 12345, "hvx_a should be <= hvx");
         assert!(hvx_a + vw_a as u64 >= 12345 + 1000, "aligned viewport should cover requested x");
+    }
+
+    // ---- Candidate 4: exact-bitmap tests for the TRUE_NODE fill path ----
+
+    #[test]
+    fn test_true_fill_exact_small_aligned() {
+        // Full 32x32 block -> root (depth 5) is a TRUE node; 128-byte buffer
+        // -> single path. The whole viewport must be all ones.
+        let mut cells = Vec::new();
+        for y in 0..32u64 { for x in 0..32u64 { cells.push(coord_pack(x, y)); } }
+        let hf = HashLife::from_flat(&cells);
+        let (vx, vy, vw, vh) = hf.aligned_viewport(0, 0, 32, 32, 1);
+        let mut bits = vec![0u8; (vw as usize) * (vh as usize) / 8];
+        hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+        assert_eq!(bits, vec![0xFFu8; bits.len()], "32x32 true block must fill viewport fully");
+    }
+
+    #[test]
+    fn test_true_fill_exact_offset_head_tail() {
+        // 32x32 block offset by (3,5) in a 30x30 viewport: exercises the
+        // head/tail byte masks and scalar middle remainder.
+        let mut cells = Vec::new();
+        for y in 0..32u64 { for x in 0..32u64 { cells.push(coord_pack(x + 3, y + 5)); } }
+        let hf = HashLife::from_flat(&cells);
+        let (vx, vy, vw, vh) = hf.aligned_viewport(0, 0, 30, 30, 1);
+        let mut bits = vec![0u8; (vw as usize) * (vh as usize) / 8];
+        hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+        let mut exp = vec![0u8; bits.len()];
+        // Block occupies tree coords [3,35)x[5,35); expected region is the
+        // intersection with the viewport, relative to the returned origin.
+        // Note: vw=30 here (no alignment under 64KB) so rows use a 30-bit
+        // stride — the expected bit position is (y*vw+x) absolute, not
+        // (x & 7) within its row byte.
+        let x0 = 3u64.max(vx) - vx;
+        let x1 = 35u64.min(vx + vw as u64) - vx;
+        let y0 = 5u64.max(vy) - vy;
+        let y1 = 35u64.min(vy + vh as u64) - vy;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = y * vw as u64 + x;
+                exp[(p as usize) >> 3] |= 1 << (p & 7);
+            }
+        }
+        assert_eq!(bits, exp, "offset true block: head/tail byte masks wrong");
+    }
+
+    #[test]
+    fn test_true_fill_exact_single_path_sse2() {
+        // 256x256 full block in a 256x256 viewport: 8KB buffer (single path),
+        // 32 bytes per row -> middle run of 30 bytes >= 16 -> SSE2 executes.
+        let mut cells = Vec::new();
+        for y in 0..256u64 { for x in 0..256u64 { cells.push(coord_pack(x, y)); } }
+        let hf = HashLife::from_flat(&cells);
+        let (vx, vy, vw, vh) = hf.aligned_viewport(0, 0, 256, 256, 1);
+        let mut bits = vec![0u8; (vw as usize) * (vh as usize) / 8];
+        hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+        assert_eq!(bits, vec![0xFFu8; bits.len()], "256x256 true block (SSE2 middle) must be all 0xFF");
+    }
+
+    #[test]
+    fn test_true_fill_exact_parallel_sse2() {
+        // 256x256 full block in a 1024x1024 viewport: 128KB buffer ->
+        // 4-thread parallel path; the block region must be all ones and the
+        // rest of the viewport must stay zero.
+        let mut cells = Vec::new();
+        for y in 0..256u64 { for x in 0..256u64 { cells.push(coord_pack(x, y)); } }
+        let hf = HashLife::from_flat(&cells);
+        let (vx, vy, vw, vh) = hf.aligned_viewport(0, 0, 1024, 1024, 1);
+        let mut bits = vec![0u8; (vw as usize) * (vh as usize) / 8];
+        hf.populate_viewport(vx, vy, vw, vh, &mut bits);
+        let mut exp = vec![0u8; bits.len()];
+        let x0 = 0u64.max(vx) - vx;
+        let x1 = 256u64.min(vx + vw as u64) - vx;
+        let y0 = 0u64.max(vy) - vy;
+        let y1 = 256u64.min(vy + vh as u64) - vy;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                exp[((y * vw as u64 + x) as usize) >> 3] |= 1 << (x as u32 & 7);
+            }
+        }
+        assert_eq!(bits, exp, "parallel-path true fill: block must be 0xFF, rest zero");
     }
 }
