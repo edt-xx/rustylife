@@ -542,6 +542,10 @@ impl HashLifeCache {
                 // if the channel is now empty. Recv-before-send so the channel
                 // is empty when the worker checks — never two in flight.
                 self.freed = self.recv_buffer();
+                if self.freed.kind == BufferKind::Fresh {
+                    self.nodes.reserve(self.freed.data.len());
+                    self.issued.reserve(self.freed.data.len());
+                }
                 self.freelist_req.send(FreelistReq::QueueMore).unwrap();
                 self.freed.pop().expect("worker sent an empty buffer")
             }
@@ -554,11 +558,11 @@ impl HashLifeCache {
         // clear). The allocation itself (freed.pop / recv_buffer / QueueMore)
         // is unchanged.
         let i = idx as usize;
-        if i >= self.nodes.len() {
-            self.nodes.resize(i + 1, EMPTY_NODE);
-            self.issued.resize(i + 1, 0);
-        }
-        self.issued[i] |= 1;
+        if i > self.nodes.len() {
+            self.nodes.resize(i+1, EMPTY_NODE);
+            self.issued.resize(i+1, 0);
+        } 
+        self.issued[i] = 1;
         self.nodes[i] = node;
         self.arena.insert(key, idx);
         idx
@@ -597,24 +601,38 @@ impl HashLifeCache {
             root_node.south_east,
         ];
 
-        // Live bitvector: one byte per idx, sized to the node range at the
-        // start of this gc. Marked with `fetch_or(1)`, which is idempotent —
-        // overlapping quadrants/subtrees can mark the same byte. No hashing
-        // (the old shared AHashSet + Mutex is gone); every GC consumer does a
-        // direct byte load. A node index i is always < nodes.len() (allocated
-        // idxs live in the Vec), and nodes does not grow during this walk,
-        // so the size holds for the whole gc.
-        let live_size = self.nodes.len().max(2);
-        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
-        extend_zeros(&mut live, live_size);
-        live[root as usize].store(1, Ordering::SeqCst);
+        // Setup scope: the live bitvector is prepared in a thread while the
+        // main thread extracts the unique slow-cache node ids — the two
+        // overlap. One byte per idx, sized to the node range; marked
+        // idempotently so overlapping walks can mark the same byte. nodes
+        // never shrinks (freed slots are zeroed, not removed) and does not
+        // grow during the walk, so the size holds for the whole gc.
+        let (live, unique): (Vec<AtomicU8>, ahash::AHashSet<u32>) = std::thread::scope(|scope| {
+            let live_size = self.nodes.len().max(2);
+            let (tx_live, rx_live) = mpsc::channel::<Vec<AtomicU8>>();
+            scope.spawn(move || {
+                let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
+                extend_zeros(&mut live, live_size);
+                live[root as usize].store(1, Ordering::SeqCst);
+                let _ = tx_live.send(live);
+            });
 
-        // Phase 1: 4 quadtree threads + unique extraction (overlapping).
-        // The thread::scope returns the unique_nodes once the quadtree walk is done.
-        let unique: ahash::AHashSet<u32> = std::thread::scope(|scope| {
-            // 4 threads for tree quadrants (started first)
+            // Unique nodeid extraction (main thread, overlaps the live prep).
+            let mut unique = ahash::AHashSet::with_capacity(slow_cache_n1.len());
+            for (&key, _) in slow_cache_n1.iter() {
+                unique.insert((key >> 32) as u32);
+            }
+            (rx_live.recv().unwrap(), unique)
+        });
+
+        // Walk scope: 4 quadtree threads + the slow-cache unique walk, all
+        // pruning on live concurrently. The unique walk races the quadrant
+        // walks: the mark is idempotent (load-check + store), so each node
+        // is expanded by whoever arrives first and the others prune.
+        std::thread::scope(|scope| {
+            let live = &live;
+            // 4 threads for tree quadrants
             for &child in &children {
-                let live = &live;
                 scope.spawn(move || {
                     let mut stack = vec![ child ];
                     while let Some(idx) = stack.pop() {
@@ -635,44 +653,31 @@ impl HashLifeCache {
                 });
             }
 
-            // Unique nodeid extraction (on the main thread, overlaps with the
-            // quadtree threads).
-            let mut unique_set: ahash::AHashSet<u32> = ahash::AHashSet::with_capacity(slow_cache_n1.len());
-            for (&key, _) in slow_cache_n1.iter() {
-                unique_set.insert((key >> 32) as u32);
-            }
-            unique_set
+            // The unique walk, moved in whole (a pointer-sized move).
+            scope.spawn(move || {
+                let mut stack = Vec::<u32>::new();
+                for node in unique {
+                    stack.push(node);
+                    while let Some(idx) = stack.pop() {
+                        let i = idx as usize;
+                        if live[i].load(Ordering::Relaxed) != 0 {
+                            continue;
+                        }
+                        live[i].store(1, Ordering::SeqCst);
+                        if let Some(node) = self.nodes.get(i) {
+                            if node.is_empty {
+                                continue;
+                            }
+                            stack.push(node.north_west);
+                            stack.push(node.north_east);
+                            stack.push(node.south_west);
+                            stack.push(node.south_east);
+                        }
+                    }
+                }
+            });
         });
 
-        // Phase 2: slow_cache walk, seeded with live from the quadtree walk.
-        // Runs on the self.slow_pool (n_slow threads) after the quadtree walk.
-        // Seed each chunk with live to prune shared subtrees.
-        // The slow_cache is pruned with the arena each gc, so its node ids are
-        // in-range; the guard is a safety net only (should never trigger).
-        let mut stack = Vec::<u32>::new();
-        for node in unique {
-            stack.push(node);
-            while let Some(idx) = stack.pop() {
-                let i = idx as usize;
-                if i >= live.len() {
-                    let cur = live.len();
-                    extend_zeros(&mut live, i + 1 - cur);
-                }
-                if live[i].load(Ordering::Relaxed) != 0 {
-                    continue;
-                }
-                live[i].store(1, Ordering::SeqCst);
-                if let Some(node) = self.nodes.get(i) {
-                    if node.is_empty {
-                        continue;
-                    }
-                    stack.push(node.north_west);
-                    stack.push(node.north_east);
-                    stack.push(node.south_west);
-                    stack.push(node.south_east);
-                }
-            }
-        }
         live
     }
 
@@ -680,19 +685,19 @@ impl HashLifeCache {
 /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
         let live = self.walk_tree_threaded(root, slow_cache_n1);
-        let live_len: u64 = live.iter().map(|b| b.load(Ordering::Relaxed) as u64).sum();
 
         // Thread 1 computes the freed indices and hands them back; the actual
         // freelist fill (append + fresh top-up) is done by the background
         // worker so it does not block the main thread. Threads 2-4 do the
-        // cache retains concurrently (unchanged from the baseline).
+        // cache retains concurrently; thread 5 sums the live bitvector,
+        // which used to run sequentially here before the scope.
         // Shared reference to the live bitvector so the closures borrow (not
-        // move) it; the `move` closure below copies this `&Vec` (Copy) cheaply.
-        // Plain loads are fine: every mark happened before this scope spawned
-        // (phase 1's scope join + phase 2 on the main thread both happened-
-        // before), so no atomic ordering is needed at read time.
+        // move) it; the `move` closure copies this `&Vec` (Copy) cheaply.
+        // Plain loads are fine: every mark happened before this scope
+        // spawned (both walk scopes joined), so no atomic ordering is needed
+        // at read time.
         let live_ref: &Vec<AtomicU8> = &live;
-        let freed_vec = std::thread::scope(|s| {
+        let (freed_vec, live_len): (Vec<u32>, u64) = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
             let issued = &mut self.issued;
             // Sending Gc msg to worker directly (modified to just add to front) is 3-4% slower
@@ -749,7 +754,16 @@ impl HashLifeCache {
                 count_cache.retain(|&(nidx, _), _| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            rx1.recv().unwrap()
+            // Thread 5: sum the live bitvector (plain Relaxed loads — all
+            // marks are done). Overlaps with the retains instead of running
+            // sequentially before them.
+            let (tx2, rx2) = mpsc::channel::<u64>();
+            s.spawn(move || {
+                let len: u64 = live_ref.iter().map(|b| b.load(Ordering::Relaxed) as u64).sum();
+                let _ = tx2.send(len);
+            });
+
+            (rx1.recv().unwrap(), rx2.recv().unwrap())
         });
 
         // Hand the recovered indices to the worker (non-blocking). The worker
