@@ -12,6 +12,7 @@ button,label{background:#16213e;color:#e94560;border:1px solid #e94560;padding:5
 button:hover{background:#e94560;color:#1a1a2e}
 input[type=range]{width:90px;vertical-align:middle}
 #speedSlider{width:50px}
+#stepVal{white-space:pre}
 .info{font-size:12px;color:#888;margin-left:4px}
 #topInfo{position:absolute;top:8px;left:16px;right:12px;font-family:monospace;font-size:12px;color:#888;z-index:10;display:flex;flex-direction:column;align-items:center;gap:2px}
 #infoLine1,#infoLine2{white-space:nowrap;text-align:center}
@@ -78,7 +79,7 @@ input[type=range]{width:90px;vertical-align:middle}
     <button id="playBtn">&#9654; Play</button>
     <button id="stepBtn">Step</button>
     <label>Speed <input type="range" id="speedSlider" min="1" max="5" value="3"></label>
-    <label>Step <input type="range" id="stepSlider" min="0" max="13" value="0"> <span id="stepVal">1</span></label>
+    <label>Step <input type="range" id="stepSlider" min="0" max="13" value="0"> <span id="stepVal">     1</span></label>
     <button id="stepPlusBtn">Step+1</button>
 
     <button id="clearBtn">Clear</button>
@@ -94,6 +95,7 @@ input[type=range]{width:90px;vertical-align:middle}
 const canvas = document.getElementById('main'), ctx = canvas.getContext('2d');
 
 const step = [1,4,16,32,64,256,512,1024,4096,16384,65536,131072,262144,524288];
+function fmtStep(n){ return String(n).padStart(6, ' '); }
 
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125,0.00390625,0.001953125,0.0009765625]; // 1/1024
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
@@ -423,7 +425,7 @@ function drawGrid(data) {
         localStorage.removeItem('gol_camY');
         localStorage.removeItem('gol_bookmarks');
         document.getElementById('stepSlider').value = 0;
-        document.getElementById('stepVal').textContent = 1;
+        document.getElementById('stepVal').textContent = fmtStep(1);
         document.getElementById('speedSlider').value = 3;
         tracksEnabled = false;
         document.getElementById('tracksBtn').textContent = 'Tracks';
@@ -1084,7 +1086,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     } else {
         stepCountVal = step[0];
     }
-    document.getElementById('stepVal').textContent = stepCountVal;
+    document.getElementById('stepVal').textContent = fmtStep(stepCountVal);
     stepPlusBtn = document.getElementById('stepPlusBtn');
     stepPlusBtn.textContent = 'Step+1';
     if (savedSpeed !== null) document.getElementById('speedSlider').value = Math.min(5, Math.max(1, Math.round(+savedSpeed / 10)));
@@ -1114,7 +1116,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             stepCountVal = Math.max(1, stepCountVal - 1);
             stepPlusBtn.textContent = 'Step+1';
         }
-        document.getElementById('stepVal').textContent = stepCountVal;
+        document.getElementById('stepVal').textContent = fmtStep(stepCountVal);
     });
 
     document.getElementById('pasteRandomBtn').addEventListener('click', async function() {
@@ -1334,7 +1336,7 @@ document.addEventListener('DOMContentLoaded', async function() {
  // Update step value display when slider changes
     document.getElementById('stepSlider').addEventListener('input', function() {
         stepCountVal = step[+this.value];
-        document.getElementById('stepVal').textContent = stepCountVal;
+        document.getElementById('stepVal').textContent = fmtStep(stepCountVal);
         stepPlusBtn.textContent = 'Step+1';
         localStorage.setItem('gol_step', this.value);
     });
