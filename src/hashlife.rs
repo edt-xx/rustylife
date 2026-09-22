@@ -379,7 +379,7 @@ impl HashLifeCache {
     }
 
     /// Collect all reachable node indices from root using 5 threads (4 quadrants + slow cache).
-    pub fn walk_tree_threaded(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
+    pub fn walk_tree_threaded(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
         let root_node = self.get_node(root);
         let children = [
             root_node.north_west,
@@ -388,34 +388,19 @@ impl HashLifeCache {
             root_node.south_east,
         ];
 
-        // Setup scope: the live bitvector is prepared in a thread while the
-        // main thread extracts the unique slow-cache node ids — the two
-        // overlap. One byte per idx, sized to the node range; marked
+        // Live bitvector: one byte per idx, sized to the node range; marked
         // idempotently so overlapping walks can mark the same byte. nodes
         // never shrinks (freed slots are zeroed, not removed) and does not
         // grow during the walk, so the size holds for the whole gc.
-        let (live, unique): (Vec<AtomicU8>, ahash::AHashSet<u32>) = std::thread::scope(|scope| {
-            let live_size = self.nodes.len().max(2);
-            let (tx_live, rx_live) = mpsc::channel::<Vec<AtomicU8>>();
-            scope.spawn(move || {
-                let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
-                extend_zeros(&mut live, live_size);
-                live[root as usize].store(1, Ordering::SeqCst);
-                let _ = tx_live.send(live);
-            });
+        let live_size = self.nodes.len().max(2);
+        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
+        extend_zeros(&mut live, live_size);
+        live[root as usize].store(1, Ordering::SeqCst);
 
-            // Unique nodeid extraction (main thread, overlaps the live prep).
-            let mut unique = ahash::AHashSet::with_capacity(slow_cache_n1.len());
-            for (&key, _) in slow_cache_n1.iter() {
-                unique.insert((key >> 32) as u32);
-            }
-            (rx_live.recv().unwrap(), unique)
-        });
-
-        // Walk scope: 4 quadtree threads + the slow-cache unique walk, all
-        // pruning on live concurrently. The unique walk races the quadrant
-        // walks: the mark is idempotent (load-check + store), so each node
-        // is expanded by whoever arrives first and the others prune.
+        // Walk scope: 4 quadtree threads + one thread per slow cache, all
+        // pruning on live concurrently. No dedup set: the mark is idempotent
+        // (load-check + store), so a node reached by any walk (quadrant or
+        // cache) is expanded once and the rest prune on the live bit.
         std::thread::scope(|scope| {
             let live = &live;
             // 4 threads for tree quadrants
@@ -440,11 +425,36 @@ impl HashLifeCache {
                 });
             }
 
-            // The unique walk, moved in whole (a pointer-sized move).
+            // slow_cache_n walk: iterate the map, push each referenced node,
+            // walk its subtree. Overlaps the n1 thread; live dedups.
             scope.spawn(move || {
                 let mut stack = Vec::<u32>::new();
-                for node in unique {
-                    stack.push(node);
+                for (&key, _) in slow_cache_n.iter() {
+                    stack.push((key >> 32) as u32);
+                    while let Some(idx) = stack.pop() {
+                        let i = idx as usize;
+                        if live[i].load(Ordering::Relaxed) != 0 {
+                            continue;
+                        }
+                        live[i].store(1, Ordering::SeqCst);
+                        if let Some(node) = self.nodes.get(i) {
+                            if node.is_empty {
+                                continue;
+                            }
+                            stack.push(node.north_west);
+                            stack.push(node.north_east);
+                            stack.push(node.south_west);
+                            stack.push(node.south_east);
+                        }
+                    }
+                }
+            });
+
+            // slow_cache_n1 walk: same shape, other cache.
+            scope.spawn(move || {
+                let mut stack = Vec::<u32>::new();
+                for (&key, _) in slow_cache_n1.iter() {
+                    stack.push((key >> 32) as u32);
                     while let Some(idx) = stack.pop() {
                         let i = idx as usize;
                         if live[i].load(Ordering::Relaxed) != 0 {
@@ -470,8 +480,8 @@ impl HashLifeCache {
 
     /// Garbage collect: walk tree from root, retain only live nodes.
 /// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
-    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>) -> u32 {
-        let live = self.walk_tree_threaded(root, slow_cache_n1);
+    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &mut AHashMap<u64, u32>) -> u32 {
+        let live = self.walk_tree_threaded(root, slow_cache_n1, slow_cache_n);
 
         // Thread 1 computes the freed indices and hands them back; the actual
         // freelist fill (append + fresh top-up) is done by the background
@@ -483,6 +493,7 @@ impl HashLifeCache {
         // Plain loads are fine: every mark happened before this scope
         // spawned (both walk scopes joined), so no atomic ordering is needed
         // at read time.
+        //eprintln!("gc n {} n1 {}",slow_cache_n.len(), slow_cache_n1.len());
         let live_ref: &Vec<AtomicU8> = &live;
         let (freed_vec, live_len): (Vec<u32>, u64) = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
@@ -521,13 +532,18 @@ impl HashLifeCache {
                 let _ = tx1.send(fv);
             });
 
-            // Thread 2: remove dead entries from fast_cache_n1
+            // Thread 2: remove dead entries from slow_cache_n
+            s.spawn(|| {
+                slow_cache_n.retain(|&key, ridx| live_ref.get( (key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
+            });
+
+            // Thread 3: remove dead entries from fast_cache_n1
             let fast_cache_n1 = &mut self.fast_cache_n1;
             s.spawn(|| {
                 fast_cache_n1.retain(|&(nidx, _), ridx| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread 3: remove dead entries from arena, add sentinels
+            // Thread 4: remove dead entries from arena, add sentinels
             let arena = &mut self.arena;
             s.spawn(|| {
                 arena.retain(|_, idx| live_ref.get(*idx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
@@ -535,13 +551,13 @@ impl HashLifeCache {
                 arena.entry([1,1,1,1]).or_insert(1);
             });
 
-            // Thread 4: retain live entries in count_cache
+            // Thread 5: retain live entries in count_cache
             let count_cache = &mut self.count_cache;
             s.spawn(|| {
                 count_cache.retain(|&(nidx, _), _| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread 5: sum the live bitvector (plain Relaxed loads — all
+            // Thread 6: sum the live bitvector (plain Relaxed loads — all
             // marks are done). Overlaps with the retains instead of running
             // sequentially before them.
             let (tx2, rx2) = mpsc::channel::<u64>();
@@ -552,7 +568,7 @@ impl HashLifeCache {
 
             (rx1.recv().unwrap(), rx2.recv().unwrap())
         });
-
+        //eprintln!("slow n {} n1 {}",slow_cache_n.len(), slow_cache_n1.len());
         // gc() returns the recovered indices; from here the GC is main-thread
         // only. Feed them to the freelist state machine:
         //   Index: no recovered buffer in hand (freed is empty) — take this GC's
@@ -565,8 +581,6 @@ impl HashLifeCache {
                 AllocState::Index => {
                     self.freed = freed_vec;
                     self.alloc = AllocState::Reuse;
-                    //self.nodes.reserve(262144);
-                    //self.issued.reserve(262144);
                 }
                 AllocState::Reuse => {
                     self.reuse.push_back(freed_vec);
@@ -938,11 +952,11 @@ fn advance_fast(cache: &mut HashLifeCache,
     if let Some(&cached) = cache.fast_cache_n1.get(&fkey) {
         return cached;
     }
-    if let Some(&cached) = cache.fast_cache_n.get(&fkey) {
-        cache.fast_cache_n1.insert(fkey, cached); // promote
-        //cache.fast_cache_n.remove(&fkey);
-        return cached;
-    }
+    //if let Some(&cached) = cache.fast_cache_n.get(&fkey) {
+    //    cache.fast_cache_n1.insert(fkey, cached); // promote
+    //    //cache.fast_cache_n.remove(&fkey);
+    //    return cached;
+    //}
 
     // Base case: level 3 → advance 2 generations using 8x8 rule table
     if level == 3 {
@@ -1078,7 +1092,7 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     if let Some(&cached) = slow_cache_n.get(&key) {
         *hits += 1;
         slow_cache_n1.insert(key, cached); // promote to current tier
-        //slow_cache_n.remove(&key);          // remove from old tier
+        slow_cache_n.remove(&key);         // remove from old tier
         return cached;
     }
     *misses += 1;
@@ -1945,6 +1959,7 @@ pub fn step(&mut self) {
         // Store cache stats for display
         let total = self.slow_cache_hits + self.slow_cache_misses;
         let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
+        //eprintln!("[step] single-gen  depth={} total={}", self.depth + 1, total);
         if total > 0 {
             self.last_cache_size = cache_size as u32;
             self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
@@ -1998,6 +2013,7 @@ pub fn step(&mut self) {
             }
 
             let target_depth = k;
+            //let dbg_depth = self.depth;
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                       self.root, self.depth, target_depth,
@@ -2011,6 +2027,10 @@ pub fn step(&mut self) {
             // Store cache stats
             let total = self.slow_cache_hits + self.slow_cache_misses;
             let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
+            //eprintln!("[step_n] multi-gen  depth={} k={} advance_gens={} routed={} total={}",
+            //          dbg_depth, k, advance_gens,
+            //          if dbg_depth - 2 > k { "slow(top)->mixed" } else { "fast" },
+            //          total);
             if total > 0 {
                 self.last_cache_size = cache_size as u32;
                 self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
@@ -2043,19 +2063,21 @@ pub fn step(&mut self) {
     pub fn rotate_caches(&mut self, n: u32) {
         self.rotate_count += 1;
         // Always run GC
-        self.last_gc_live_len = self.cache.gc(self.root, &self.slow_cache_n1);
+        self.last_gc_live_len = self.cache.gc(self.root, &self.slow_cache_n1, &mut self.slow_cache_n);
 
         // Rotate both caches after GC
-        if n == 1 || self.rotate_count > 999998/n {
+        // if n == 1 || self.rotate_count > 999998/n {
+        // if self.rotate_count > 32-n.ilog2() {
+        if (self.slow_cache_n.len() < self.slow_cache_n1.len()*3 && self.rotate_count > 16) || self.rotate_count > 32 {
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
-            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-            self.cache.fast_cache_n1.clear();
+            //std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+            //self.cache.fast_cache_n1.clear();
             self.rotate_count = 0;
         } else {
-            std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-            self.cache.fast_cache_n1.clear();
-            self.slow_cache_n.clear(); 
+            //std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
+            //self.cache.fast_cache_n1.clear();
+            //self.slow_cache_n.clear();
         }
     }
 }
