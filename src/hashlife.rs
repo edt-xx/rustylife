@@ -206,12 +206,10 @@ pub struct HashLifeCache {
     /// the bit must be cleared explicitly.) The `nodes` range is not the
     /// allocated set; this bit is.
     pub issued: Vec<u8>,
-    /// Fast cache: two-tier generational for advance_fast results.
-    /// n = old tier (survives one cycle), n1 = current tier.
-    /// On hit in n, promote to n1. New keys go in n1.
-    /// Rotated with arena GC.
-    pub fast_cache_n: ahash::AHashMap<(u32, u32), u32>,
-    pub fast_cache_n1: ahash::AHashMap<(u32, u32), u32>,
+    /// Fast cache for advance_fast results: (node_idx, level) → advanced node.
+    /// Grows with use; pruned (not rotated) by gc, which retains only entries
+    /// whose referenced nodes are still live.
+    pub fast_cache: ahash::AHashMap<(u32, u32), u32>,
     /// Count cache: (node_idx, depth) → alive cell count.
     /// Memoizes count_cells — same canonical node at same depth always has same count.
     /// Cleared on arena GC (deleted nodes leave stale entries).
@@ -259,8 +257,7 @@ impl HashLifeCache {
             arena,
             nodes,
             issued,
-            fast_cache_n: ahash::AHashMap::new(),
-            fast_cache_n1: ahash::AHashMap::new(),
+            fast_cache: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
             // No freelist worker: the fresh-index counter and the recovered
             // buffer queue live in the struct, owned by the main thread. Start
@@ -479,11 +476,11 @@ impl HashLifeCache {
     }
 
     /// Garbage collect: walk tree from root, retain only live nodes.
-/// Also walks subtrees of slow_cache_n1 and fast_cache_n1 referenced nodes.
+    /// Also walks subtrees of slow_cache_n1 and fast_cache referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &mut AHashMap<u64, u32>) -> u32 {
         let live = self.walk_tree_threaded(root, slow_cache_n1, slow_cache_n);
 
-        // Thread 1 computes the freed indices and hands them back; the actual
+        // Thread: computes the freed indices and hands them back; the actual
         // freelist fill (append + fresh top-up) is done by the background
         // worker so it does not block the main thread. Threads 2-4 do the
         // cache retains concurrently; thread 5 sums the live bitvector,
@@ -532,18 +529,13 @@ impl HashLifeCache {
                 let _ = tx1.send(fv);
             });
 
-            // Thread 2: remove dead entries from slow_cache_n
+            // Thread: remove dead entries from fast_cache
+            let fast_cache = &mut self.fast_cache;
             s.spawn(|| {
-                slow_cache_n.retain(|&key, ridx| live_ref.get( (key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
+                fast_cache.retain(|&(nidx, _), ridx| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread 3: remove dead entries from fast_cache_n1
-            let fast_cache_n1 = &mut self.fast_cache_n1;
-            s.spawn(|| {
-                fast_cache_n1.retain(|&(nidx, _), ridx| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
-            });
-
-            // Thread 4: remove dead entries from arena, add sentinels
+            // Thread: remove dead entries from arena, add sentinels
             let arena = &mut self.arena;
             s.spawn(|| {
                 arena.retain(|_, idx| live_ref.get(*idx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
@@ -551,13 +543,13 @@ impl HashLifeCache {
                 arena.entry([1,1,1,1]).or_insert(1);
             });
 
-            // Thread 5: retain live entries in count_cache
+            // Thread: retain live entries in count_cache
             let count_cache = &mut self.count_cache;
             s.spawn(|| {
                 count_cache.retain(|&(nidx, _), _| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread 6: sum the live bitvector (plain Relaxed loads — all
+            // Thread: sum the live bitvector (plain Relaxed loads — all
             // marks are done). Overlaps with the retains instead of running
             // sequentially before them.
             let (tx2, rx2) = mpsc::channel::<u64>();
@@ -947,21 +939,16 @@ fn advance_fast(cache: &mut HashLifeCache,
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
-    // Fast cache: two-tier lookup (n1 first, then n with promotion)
+    // Fast cache lookup
     let fkey = (node_idx, level);
-    if let Some(&cached) = cache.fast_cache_n1.get(&fkey) {
+    if let Some(&cached) = cache.fast_cache.get(&fkey) {
         return cached;
     }
-    //if let Some(&cached) = cache.fast_cache_n.get(&fkey) {
-    //    cache.fast_cache_n1.insert(fkey, cached); // promote
-    //    //cache.fast_cache_n.remove(&fkey);
-    //    return cached;
-    //}
 
     // Base case: level 3 → advance 2 generations using 8x8 rule table
     if level == 3 {
         let result = advance_base_two_gen(cache, node_idx);
-        cache.fast_cache_n1.insert(fkey, result);
+        cache.fast_cache.insert(fkey, result);
         return result;
     }
 
@@ -1011,7 +998,7 @@ fn advance_fast(cache: &mut HashLifeCache,
     let bottom_right = advance_fast(cache, br, level - 1);
 
     let result = cache.find_or_create(top_left, top_right, bottom_left, bottom_right);
-    cache.fast_cache_n1.insert(fkey, result);
+    cache.fast_cache.insert(fkey, result);
     result
 }
 
@@ -1775,8 +1762,7 @@ impl HashLife {
         self.cache.nodes.shrink_to_fit();
         self.cache.arena.shrink_to_fit();
         self.cache.count_cache.shrink_to_fit();
-        self.cache.fast_cache_n.shrink_to_fit();
-        self.cache.fast_cache_n1.shrink_to_fit();
+        self.cache.fast_cache.shrink_to_fit();
         self.slow_cache_n.shrink_to_fit();
         self.slow_cache_n1.shrink_to_fit();
     }
@@ -1971,7 +1957,7 @@ pub fn step(&mut self) {
         self.slow_cache_misses = 0;
 
         // Compress after every step
-        self.rotate_caches(1);
+        self.rotate_caches();
 
         // After shrinking, pattern may touch rim — expand again if needed
         while needs_expansion(&self.cache, self.root, self.depth) {
@@ -2047,37 +2033,31 @@ pub fn step(&mut self) {
 
         // Compress after step_n
         if remaining == 0 {
-            self.rotate_caches(n);
+            self.rotate_caches();
         }
 
         // Fall back to single-gen steps for remainder (these create many more new nodes)
-        // Each self.step() calls rotate_caches(1) internally
+        // Each self.step() calls rotate_caches() internally
         for _ in 0..remaining {
             self.step();
         }
 
     }
 
-    /// Compress caches: run GC + rotate both caches.
-    /// Called after every step() and step_n().
-    pub fn rotate_caches(&mut self, n: u32) {
+    /// Compress caches: run GC, then rotate the slow-cache tiers when needed.
+    /// The fast cache is pruned by gc, not rotated here. Called after every
+    /// step() and step_n().
+    pub fn rotate_caches(&mut self) {
         self.rotate_count += 1;
         // Always run GC
         self.last_gc_live_len = self.cache.gc(self.root, &self.slow_cache_n1, &mut self.slow_cache_n);
 
-        // Rotate both caches after GC
-        // if n == 1 || self.rotate_count > 999998/n {
-        // if self.rotate_count > 32-n.ilog2() {
+        // Rotate the slow-cache tiers when the n tier has shrunk well below
+        // n1 (after a few rotations) or at the rotation cap.
         if (self.slow_cache_n.len() < self.slow_cache_n1.len()*3 && self.rotate_count > 16) || self.rotate_count > 32 {
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
-            //std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-            //self.cache.fast_cache_n1.clear();
             self.rotate_count = 0;
-        } else {
-            //std::mem::swap(&mut self.cache.fast_cache_n, &mut self.cache.fast_cache_n1);
-            //self.cache.fast_cache_n1.clear();
-            //self.slow_cache_n.clear();
         }
     }
 }
