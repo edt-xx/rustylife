@@ -644,15 +644,19 @@ async function refresh() {
     ensureCanvasSize();  // only resizes when dimensions actually changed
     var vp = calcCells(cellSize);
     var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
-    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+    var reqCamX = camX, reqCamY = camY; // viewport this request was made for
+    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
     var seq = ++refreshSeq;
 
     // Wait until gen has advanced (avoid getting stale cached state)
     var initialGen = lblGen;
     while (true) {
+        // Bail if the viewport moved or this request was superseded: a response
+        // fetched at the old position would be painted at the new one (ghost tracks/cells)
+        if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;
         var r = await fetch(url);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
-        if (seq !== refreshSeq) return;   // stale response, discard
+        if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;   // stale response, discard
         var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen || !running) {
@@ -691,10 +695,13 @@ async function syncWithServer() {
     ensureCanvasSize();
     var vp = calcCells(cellSize);
     var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
-    var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+    var reqCamX = camX, reqCamY = camY; // viewport this request was made for
+    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
     try {
         var r = await fetch(url);
         var data = await r.arrayBuffer();
+        // Viewport moved during the fetch — bitmap is for the old position, discard
+        if (camX !== reqCamX || camY !== reqCamY) return;
         drawGrid(data);
     } catch (e) {
         // Server may be down or unreachable, ignore
