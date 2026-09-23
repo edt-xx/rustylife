@@ -400,6 +400,10 @@ impl HashLifeCache {
         // cache) is expanded once and the rest prune on the live bit.
         std::thread::scope(|scope| {
             let live = &live;
+            // Shared reference to the issued bitvector so the `move` closures
+            // borrow (not move) it: `let issued = self.issued` moves out of
+            // `&self` (E0507); the `&` is Copy and each closure copies it.
+            let issued = &self.issued;
             // 4 threads for tree quadrants
             for &child in &children {
                 scope.spawn(move || {
@@ -430,6 +434,13 @@ impl HashLifeCache {
                     stack.push((key >> 32) as u32);
                     while let Some(idx) = stack.pop() {
                         let i = idx as usize;
+                        // Skip nodes not currently issued: a stale cache key
+                        // may reference an idx GC freed (possibly already
+                        // reissued to another node). Plain byte load, put
+                        // before the atomic live check.
+                        if issued[i] == 0 {
+                            continue;
+                        }
                         if live[i].load(Ordering::Relaxed) != 0 {
                             continue;
                         }
@@ -454,6 +465,10 @@ impl HashLifeCache {
                     stack.push((key >> 32) as u32);
                     while let Some(idx) = stack.pop() {
                         let i = idx as usize;
+                        // Same issued guard as the slow_cache_n thread.
+                        if issued[i] == 0 {
+                            continue;
+                        }
                         if live[i].load(Ordering::Relaxed) != 0 {
                             continue;
                         }
@@ -477,7 +492,7 @@ impl HashLifeCache {
 
     /// Garbage collect: walk tree from root, retain only live nodes.
     /// Also walks subtrees of slow_cache_n1 and fast_cache referenced nodes.
-    pub fn gc(&mut self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &mut AHashMap<u64, u32>) -> u32 {
+    pub fn gc(&mut self, root: u32, slow_cache_n1: &mut AHashMap<u64, u32>, slow_cache_n: &mut AHashMap<u64, u32>) -> u32 {
         let live = self.walk_tree_threaded(root, slow_cache_n1, slow_cache_n);
 
         // Thread: computes the freed indices and hands them back; the actual
@@ -533,6 +548,20 @@ impl HashLifeCache {
             let fast_cache = &mut self.fast_cache;
             s.spawn(|| {
                 fast_cache.retain(|&(nidx, _), ridx| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
+            });
+
+            // Thread: drop slow_cache_n entries whose key node or result is
+            // not live (restore of the f6d4df2 retain; dca4da7 dropped it).
+            // Pairs with the walk's issued guard: stale keys are never marked
+            // live, so their entries are pruned here. The `move` moves the
+            // `&mut` param into this one thread; the scope owns its lifetime.
+            s.spawn(move || {
+                slow_cache_n.retain(|&key, ridx| live_ref.get((key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
+            });
+
+            // and n1
+            s.spawn(move || {
+                slow_cache_n1.retain(|&key, ridx| live_ref.get((key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
             // Thread: remove dead entries from arena, add sentinels
@@ -2050,7 +2079,7 @@ pub fn step(&mut self) {
     pub fn rotate_caches(&mut self) {
         self.rotate_count += 1;
         // Always run GC
-        self.last_gc_live_len = self.cache.gc(self.root, &self.slow_cache_n1, &mut self.slow_cache_n);
+        self.last_gc_live_len = self.cache.gc(self.root, &mut self.slow_cache_n1, &mut self.slow_cache_n);
 
         // Rotate the slow-cache tiers when the n tier has shrunk well below
         // n1 (after a few rotations) or at the rotation cap.
