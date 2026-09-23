@@ -2083,7 +2083,7 @@ pub fn step(&mut self) {
 
         // Rotate the slow-cache tiers when the n tier has shrunk well below
         // n1 (after a few rotations) or at the rotation cap.
-        if (self.slow_cache_n.len() < self.slow_cache_n1.len()*3 && self.rotate_count > 16) || self.rotate_count > 32 {
+        if (self.slow_cache_n.len() < self.slow_cache_n1.len()*23/8 && self.rotate_count > 16) || self.rotate_count > 32 {
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
             self.rotate_count = 0;
