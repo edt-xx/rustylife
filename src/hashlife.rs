@@ -945,13 +945,13 @@ fn advance_base_one_gen(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
 fn advance_node(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>,
                  slow_cache_n1: &mut AHashMap<u64, u32>,
                  node_idx: u32, level: u32, target_depth: u32,
-                 hits: &mut u64, misses: &mut u64) -> u32 {
+                 hits: &mut u64, misses: &mut u64, promos: &mut u64) -> u32 {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
     if level - 2 > target_depth {
-        advance_slow(cache, slow_cache_n, slow_cache_n1, node_idx, level, target_depth, hits, misses)
+        advance_slow(cache, slow_cache_n, slow_cache_n1, node_idx, level, target_depth, hits, misses, promos)
     } else {
         advance_fast(cache, node_idx, level)
     }
@@ -1086,7 +1086,7 @@ fn combine_2x2(tl: u16, tr: u16, bl: u16, br: u16) -> u16 {
 fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>,
                  slow_cache_n1: &mut AHashMap<u64, u32>,
                  node_idx: u32, level: u32, target_depth: u32,
-                 hits: &mut u64, misses: &mut u64) -> u32 {
+                 hits: &mut u64, misses: &mut u64, promos: &mut u64) -> u32 {
     if node_idx == FALSE_NODE { return FALSE_NODE; }
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
@@ -1107,6 +1107,7 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     }
     if let Some(&cached) = slow_cache_n.get(&key) {
         *hits += 1;
+        *promos += 1;
         slow_cache_n1.insert(key, cached); // promote to current tier
         slow_cache_n.remove(&key);         // remove from old tier
         return cached;
@@ -1142,10 +1143,10 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
 
     // GOLDE: AdvanceSlow calls AdvanceNode (dispatcher) recursively,
     // NOT AdvanceSlow. This allows routing to AdvanceFast when level-2 <= target_depth.
-    let r00 = advance_node(cache, slow_cache_n, slow_cache_n1, window00, level - 1, target_depth, hits, misses);
-    let r01 = advance_node(cache, slow_cache_n, slow_cache_n1, window01, level - 1, target_depth, hits, misses);
-    let r10 = advance_node(cache, slow_cache_n, slow_cache_n1, window10, level - 1, target_depth, hits, misses);
-    let r11 = advance_node(cache, slow_cache_n, slow_cache_n1, window11, level - 1, target_depth, hits, misses);
+    let r00 = advance_node(cache, slow_cache_n, slow_cache_n1, window00, level - 1, target_depth, hits, misses, promos);
+    let r01 = advance_node(cache, slow_cache_n, slow_cache_n1, window01, level - 1, target_depth, hits, misses, promos);
+    let r10 = advance_node(cache, slow_cache_n, slow_cache_n1, window10, level - 1, target_depth, hits, misses, promos);
+    let r11 = advance_node(cache, slow_cache_n, slow_cache_n1, window11, level - 1, target_depth, hits, misses, promos);
 
     let result = cache.find_or_create(r00, r01, r10, r11);
     slow_cache_n1.insert(key, result);
@@ -1646,8 +1647,22 @@ pub struct HashLife {
     pub last_step_count: u32,
     /// Total number of rotate_caches() calls since construction
     pub rotate_count: u32,
+    /// Promotions (hits in the old tier n) since the last rotation.
+    /// Accumulates across steps/sub-steps; reset to 1 on rotation (the 1
+    /// floors the ratio denominator, so it needs no +1).
+    pub slow_cache_n_promos: u64,
+    /// Running average (EMA) of promos*100/(n.len()+promos): the percent of
+    /// the old tier served this cycle. Reset to 0 on rotation.
+    pub promo_ratio_avg: u64,
+    /// Active steps (slow-cache hits+misses > 0) since the last rotation.
+    pub active_since_rotate: u32,
 }
 
+/// Rotate trigger tuning (see rotate_caches):
+const MIN_CONSIDER_STEPS: u32 = 32;  // active steps before a rotate is considered
+const RATIO_THRESHOLD: u64 = 10;     // rotate if the old tier served < this % this cycle
+const MIN_N_LEN: usize = 1024;         // never rotate to save a tiny old tier
+const CAP_ACTIVE_STEPS: u32 = 64;    // backstop: force rotate after this many active steps
 impl HashLife {
     pub fn new() -> Self {
         let cache = HashLifeCache::new();
@@ -1660,6 +1675,9 @@ impl HashLife {
             slow_cache_n1: AHashMap::new(),
             slow_cache_hits: 0,
             slow_cache_misses: 0,
+            slow_cache_n_promos: 1,
+            promo_ratio_avg: 0,
+            active_since_rotate: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_gc_live_len: 0,
@@ -1732,6 +1750,9 @@ impl HashLife {
                 slow_cache_n1: AHashMap::new(),
                 slow_cache_hits: 0,
                 slow_cache_misses: 0,
+                slow_cache_n_promos: 1,
+                promo_ratio_avg: 0,
+                active_since_rotate: 0,
                 last_cache_size: 0,
                 last_cache_hit_rate: 0,
                 last_gc_live_len: 0,
@@ -1774,6 +1795,9 @@ impl HashLife {
             slow_cache_n1: AHashMap::new(),
             slow_cache_hits: 0,
             slow_cache_misses: 0,
+            slow_cache_n_promos: 1,
+            promo_ratio_avg: 0,
+            active_since_rotate: 0,
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_gc_live_len: 0,
@@ -1968,7 +1992,7 @@ pub fn step(&mut self) {
         // advance_node with target_depth=0 → always uses advance_slow (single-gen)
         self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                   self.root, self.depth, 0,
-                                  &mut self.slow_cache_hits, &mut self.slow_cache_misses);
+                                  &mut self.slow_cache_hits, &mut self.slow_cache_misses, &mut self.slow_cache_n_promos);
         self.depth -= 1;
 
         // Store cache stats for display
@@ -1982,11 +2006,12 @@ pub fn step(&mut self) {
             self.last_cache_size = 0;
             self.last_cache_hit_rate = 0;
         }
+        // Compress after every step (slow-cache activity is passed in before
+        // the per-step counters are reset below)
+        let slow_active = self.slow_cache_hits + self.slow_cache_misses > 0;
+        self.rotate_caches(slow_active);
         self.slow_cache_hits = 0;
         self.slow_cache_misses = 0;
-
-        // Compress after every step
-        self.rotate_caches();
 
         // After shrinking, pattern may touch rim — expand again if needed
         while needs_expansion(&self.cache, self.root, self.depth) {
@@ -2003,6 +2028,7 @@ pub fn step(&mut self) {
         // GOLDE: expand tree, call AdvanceNode, result is at depth-1.
         // Falls back to single-gen steps for the remainder.
         let mut remaining = n;
+        let mut active = false;
 
         while remaining > 0 {
             // Find largest power of 2 that fits in remaining: 2^k <= remaining
@@ -2032,7 +2058,7 @@ pub fn step(&mut self) {
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                       self.root, self.depth, target_depth,
-                                      &mut self.slow_cache_hits, &mut self.slow_cache_misses);
+                                      &mut self.slow_cache_hits, &mut self.slow_cache_misses, &mut self.slow_cache_n_promos);
             // GOLDE always drops 1 level per DoOneJump, regardless of advance depth.
             // advance_fast returns a node at (level - 1), not (level - 2).
             self.depth -= 1;
@@ -2041,6 +2067,7 @@ pub fn step(&mut self) {
 
             // Store cache stats
             let total = self.slow_cache_hits + self.slow_cache_misses;
+            active = total > 0;
             let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
             //eprintln!("[step_n] multi-gen  depth={} k={} advance_gens={} routed={} total={}",
             //          dbg_depth, k, advance_gens,
@@ -2062,7 +2089,7 @@ pub fn step(&mut self) {
 
         // Compress after step_n
         if remaining == 0 {
-            self.rotate_caches();
+            self.rotate_caches(active);
         }
 
         // Fall back to single-gen steps for remainder (these create many more new nodes)
@@ -2075,18 +2102,44 @@ pub fn step(&mut self) {
 
     /// Compress caches: run GC, then rotate the slow-cache tiers when needed.
     /// The fast cache is pruned by gc, not rotated here. Called after every
-    /// step() and step_n().
-    pub fn rotate_caches(&mut self) {
+    /// step() and step_n() with whether that step used the slow cache.
+    ///
+    /// Trigger: a hit in the old tier (n) is a promotion, so
+    /// promos*100/(n.len()+promos) is the percent of the old tier served this
+    /// cycle (denominator ~= n's size at the last rotation; the promos floor
+    /// of 1 keeps it safe at zero length). The running average of that ratio
+    /// stays small only while the old tier is dead weight (e.g. after a
+    /// Step+1 <-> multi-gen switch) -> rotate. Idle steps count toward none
+    /// of it.
+    pub fn rotate_caches(&mut self, slow_active: bool) {
         self.rotate_count += 1;
         // Always run GC
         self.last_gc_live_len = self.cache.gc(self.root, &mut self.slow_cache_n1, &mut self.slow_cache_n);
 
-        // Rotate the slow-cache tiers when the n tier has shrunk well below
-        // n1 (after a few rotations) or at the rotation cap.
-        if (self.slow_cache_n.len() < self.slow_cache_n1.len()*23/8 && self.rotate_count > 16) || self.rotate_count > 32 {
+        // Activity gate: this step used the slow cache not at all.
+        if !slow_active { return; }
+        self.active_since_rotate += 1;
+        // A freshly rotated n is unserved by construction (ratio ~0) - only
+        // consider rotating after MIN_CONSIDER_STEPS active steps.
+        if self.active_since_rotate < MIN_CONSIDER_STEPS { return; }
+
+        let ratio = self.slow_cache_n_promos * 100 / (self.slow_cache_n_promos + self.slow_cache_n.len() as u64);
+        // Running average: halve toward the new sample.
+        self.promo_ratio_avg = (self.promo_ratio_avg + ratio) / 2;
+
+        // Backstop cap, or a stale old tier big enough that it is worth it.
+        if self.active_since_rotate > CAP_ACTIVE_STEPS || (self.slow_cache_n.len() >= MIN_N_LEN && self.promo_ratio_avg < RATIO_THRESHOLD) {
+            // DIAGNOSTIC (temporary): one line per actual rotation, pre-swap state.
+            // eprintln!("[rotate] via={} n={} n1={} ratio_avg={} promos={} active={} hit_rate={}",
+            //    if via_cap { "cap" } else { "ratio" },
+            //    self.slow_cache_n.len(), self.slow_cache_n1.len(),
+            //    self.promo_ratio_avg, self.slow_cache_n_promos,
+            //    self.active_since_rotate, self.last_cache_hit_rate);
             std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
             self.slow_cache_n1.clear();
-            self.rotate_count = 0;
+            self.slow_cache_n_promos = 1;
+            self.promo_ratio_avg = 0;
+            self.active_since_rotate = 0;
         }
     }
 }
@@ -2293,7 +2346,7 @@ mod tests {
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 16, 16);
 
         // Advance with advance_slow at level 4
-        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 4, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 4, 0, &mut 0, &mut 0, &mut 0);
 
         // Result should be a level-3 node (8x8), centered
         // The center 8x8 covers cells (4,4) to (11,11) in the 16x16 grid
@@ -2351,7 +2404,7 @@ mod tests {
         }
         let tree = build_quadtree(&mut cache, &grid_2d, 0, 0, 32, 32);
 
-        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 5, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), tree, 5, 0, &mut 0, &mut 0, &mut 0);
 
         // Result is level-4 (16x16), centered at (8,8) of the 32x32
         // Covers cells (8,8) to (23,23)
@@ -2415,7 +2468,7 @@ mod tests {
         }
 
         // Advance with advance_slow
-        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), root, depth, 0, &mut 0, &mut 0);
+        let result = advance_node(&mut cache, &mut AHashMap::new(), &mut AHashMap::new(), root, depth, 0, &mut 0, &mut 0, &mut 0);
 
         // Result is at level depth-1
         let result_depth = depth - 1;
@@ -2750,7 +2803,7 @@ mod tests {
 
             // advance_slow at level 4 recurses to level 3 base case.
             // The result is a level-3 node (8×8) representing (ax+4 .. ax+11, ay+4 .. ay+11).
-            let result_idx = advance_node(&mut test_cache, &mut AHashMap::new(), &mut AHashMap::new(), copied, 4, 0, &mut 0, &mut 0);
+            let result_idx = advance_node(&mut test_cache, &mut AHashMap::new(), &mut AHashMap::new(), copied, 4, 0, &mut 0, &mut 0, &mut 0);
             let result_cells = collect_alive_helper(&test_cache, result_idx, 3);
 
             // Expected: cells in the flat_next grid at (ax+4 .. ax+11, ay+4 .. ay+11)
