@@ -1642,10 +1642,6 @@ pub struct HashLife {
     /// step/step_n). Feeds the snapshot header "active" field — the dense
     /// nodes Vec len is the high-water mark, not the live count.
     pub last_gc_live_len: u32,
-    /// Step count used in last step_n() call (for freelist pre-grow scaling)
-    pub last_step_count: u32,
-    /// Total number of rotate_caches() calls since construction
-    pub rotate_count: u32,
     /// Active steps (slow-cache hits+misses > 0) since the last rotation.
     pub active_since_rotate: u32,
     /// Active steps until the next rotation. Adapted at each rotation from
@@ -1687,8 +1683,6 @@ impl HashLife {
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_gc_live_len: 0,
-            last_step_count: 0,
-            rotate_count: 0,
         }
     }
 
@@ -1765,8 +1759,6 @@ impl HashLife {
                 last_cache_size: 0,
                 last_cache_hit_rate: 0,
                 last_gc_live_len: 0,
-                last_step_count: 0,
-                rotate_count: 0,
             };
             hf.shrink_caches();
             return hf;
@@ -1813,8 +1805,6 @@ impl HashLife {
             last_cache_size: 0,
             last_cache_hit_rate: 0,
             last_gc_live_len: 0,
-            last_step_count: 0,
-            rotate_count: 0,
         };
         hf.shrink_caches();
         hf
@@ -2036,7 +2026,6 @@ pub fn step(&mut self) {
 
     pub fn step_n(&mut self, n: u32) {
         if self.is_empty() || n == 0 { return; }
-        self.last_step_count = n;
         // GOLDE-style multi-gen advance using AdvanceNode dispatcher.
         // AdvanceFast drops 1 level per call, advancing 2^(level-2) generations.
         // GOLDE: expand tree, call AdvanceNode, result is at depth-1.
@@ -2130,7 +2119,6 @@ pub fn step(&mut self) {
     /// [ROTATE_STEPS_MIN, ROTATE_STEPS_MAX]). Idle steps count
     /// toward none of it.
     pub fn rotate_caches(&mut self, slow_active: bool) {
-        self.rotate_count += 1;
         // Always run GC
         self.last_gc_live_len = self.cache.gc(self.root, &mut self.slow_cache_n1, &mut self.slow_cache_n);
 
@@ -2172,9 +2160,9 @@ pub fn step(&mut self) {
         self.interval_rate_set = true;
 
         // DIAGNOSTIC (temporary): one line per actual rotation, pre-swap state.
-        eprintln!("[rotate] N={} n={} n1={} rate={} prev={} d={}",
-           self.rotate_steps, self.slow_cache_n.len(), self.slow_cache_n1.len(),
-           rate, prev, d);
+        // eprintln!("[rotate] N={} n={} n1={} rate={} prev={} d={}",
+        //    self.rotate_steps, self.slow_cache_n.len(), self.slow_cache_n1.len(),
+        //    rate, prev, d);
         std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
         self.slow_cache_n1.clear();
         self.interval_hits = 0;
