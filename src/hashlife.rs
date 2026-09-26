@@ -2125,7 +2125,7 @@ pub fn step(&mut self) {
     /// d% = (rate-prev)*100/prev (per-mille rate over the steps since the
     /// last rotation): the first rotation only records the baseline; a later
     /// rotation steps N down if the rate rose and up if it fell, with banded
-    /// step size: stable (|d|<5%) tightens by 1 only when d>=0, 5-15% -> 1,
+    /// step size: stable (|d|<5%) tightens by 1 only when d>=3, 5-15% -> 1,
     /// 15-30% -> 2, 30-60% -> 4, >=60% -> 8 (clamped to
     /// [ROTATE_STEPS_MIN, ROTATE_STEPS_MAX]). Idle steps count
     /// toward none of it.
@@ -2148,7 +2148,7 @@ pub fn step(&mut self) {
 
         // First rotation (or a zero baseline) only sets the baseline. After
         // that, the relative delta d% picks the step size: stable (|d|<5%)
-        // tightens by 1 only when d>=0, 5-15% -> 1, 15-30% -> 2, 30-60% -> 4,
+        // tightens by 1 only when d>=3, 5-15% -> 1, 15-30% -> 2, 30-60% -> 4,
         // >=60% -> 8. Rate up tightens N, rate down loosens it.
         let d = if self.interval_rate_set && prev > 0 {
             ((rate as i64 - prev as i64) * 100) / (prev as i64)
@@ -2156,7 +2156,7 @@ pub fn step(&mut self) {
         let ad = d.abs();
         if self.interval_rate_set && prev > 0 {
             if ad < 5 {
-                if d >= 0 {
+                if d >= 3 {
                     self.rotate_steps = self.rotate_steps.saturating_sub(1).max(ROTATE_STEPS_MIN);
                 }
             } else {
