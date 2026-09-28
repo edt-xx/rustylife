@@ -520,3 +520,95 @@ impl Grid {
         self.hashlife = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use game_of_life::hashlife::{coord_unpack, GRID_OFFSET, HASHLIFE_OFFSET};
+
+    /// Classic alive set, normalized to origin-centered i64 coords, sorted.
+    fn classic_cells(g: &Grid) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = g.alive_index.keys().map(|&k| {
+            let (x, y) = Grid::unpack(k);
+            (x as i64 - GRID_OFFSET as i64, y as i64 - GRID_OFFSET as i64)
+        }).collect();
+        v.sort();
+        v
+    }
+
+    /// HashLife alive set, normalized to origin-centered i64 coords, sorted.
+    fn hl_cells(g: &Grid) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = g.hashlife.as_ref().unwrap().to_flat().into_iter().map(|c| {
+            let (hx, hy) = coord_unpack(c);
+            (hx as i64 - HASHLIFE_OFFSET as i64, hy as i64 - HASHLIFE_OFFSET as i64)
+        }).collect();
+        v.sort();
+        v
+    }
+
+    /// Blinker + glider + pi heptamino, spaced far enough apart that they do
+    /// not interact within the test's generation span.
+    fn engine_test_pattern() -> Vec<(i64, i64)> {
+        vec![
+            // blinker
+            (0, 0), (1, 0), (2, 0),
+            // glider
+            (40, 0), (41, 1), (39, 2), (40, 2), (41, 2),
+            // pi heptamino
+            (0, 40), (1, 40), (2, 40), (0, 41), (0, 42), (1, 42), (2, 42),
+        ]
+    }
+
+    /// Load the same pattern into a fresh Grid; the anchor places the pattern
+    /// centered on the origin of the u32 (GRID_OFFSET) space.
+    fn make_grid(hashlife_mode: bool) -> Grid {
+        let mut g = Grid::new();
+        g.hashlife_mode = hashlife_mode;
+        g.load_pattern(&engine_test_pattern(), GRID_OFFSET as i64, GRID_OFFSET as i64);
+        g
+    }
+
+    #[test]
+    fn test_engines_agree() {
+        const N: u32 = 8;
+        let mut classic = make_grid(false);
+        let mut hl = make_grid(true);
+        // Build the quadtree from the identical classic alive set —
+        // both engines provably start from the same state.
+        hl.init_hashlife();
+
+        for i in 0..N {
+            classic.step();
+            hl.step_hashlife();
+            assert_eq!(
+                classic_cells(&classic),
+                hl_cells(&hl),
+                "engines diverged at gen {}",
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn test_engines_agree_with_toggle() {
+        const HALF: u32 = 4;
+        // Path A: 4 classic steps, rebuild the quadtree, 4 hashlife steps.
+        let mut a = make_grid(false);
+        for _ in 0..HALF {
+            a.step();
+        }
+        a.init_hashlife();
+        for _ in 0..HALF {
+            a.step_hashlife();
+        }
+
+        // Control: 8 hashlife steps from the same starting state.
+        let mut b = make_grid(true);
+        b.init_hashlife();
+        for _ in 0..HALF * 2 {
+            b.step_hashlife();
+        }
+
+        assert_eq!(hl_cells(&a), hl_cells(&b), "toggle path diverged");
+    }
+}
