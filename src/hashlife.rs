@@ -2139,22 +2139,21 @@ pub fn step(&mut self) {
         // tightens by 1 only when d>=3, 5-15% -> 1, 15-30% -> 2, 30-60% -> 4,
         // >=60% -> 8. Rate up tightens N, rate down loosens it.
         let d = if self.interval_rate_set && prev > 0 {
-            ((rate as i64 - prev as i64) * 100) / (prev as i64)
-        } else { 0 };
-        let ad = d.abs();
+               ((rate as i64 - prev as i64) * 100) / (prev as i64)
+            } else { 0 };
         if self.interval_rate_set && prev > 0 {
-            if ad < 5 {
-                if d >= 3 {
-                    self.rotate_steps = self.rotate_steps.saturating_sub(1).max(ROTATE_STEPS_MIN);
-                }
-            } else {
-                let step = if ad >= 60 { 8 } else if ad >= 30 { 4 } else if ad >= 15 { 2 } else { 1 };
-                if d > 0 {
-                    self.rotate_steps = self.rotate_steps.saturating_sub(step).max(ROTATE_STEPS_MIN);
-                } else {
-                    self.rotate_steps = (self.rotate_steps + step).min(ROTATE_STEPS_MAX);
-                }
-            }
+            let step:i32 = match d {
+                 60..    =>  8,
+                 30..60  =>  4,
+                 15..30  =>  2,
+                  5..15  =>  1,
+                 -5..5   =>  0,
+                -15..-5  => -1,
+                -30..-15 => -2,
+                -60..-30 => -4,
+                   ..-60 => -8,
+            };
+            self.rotate_steps = self.rotate_steps.checked_add_signed(step).expect("Underflow").max(ROTATE_STEPS_MIN).min(ROTATE_STEPS_MAX);
         }
         self.prev_interval_rate = rate;
         self.interval_rate_set = true;

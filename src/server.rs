@@ -1,9 +1,16 @@
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tiny_http::{Server, Response, StatusCode, Header};
 use serde_json::Value;
 use crate::grid::{Grid, Coord};
+
+fn lock_grid(grid: &Arc<Mutex<Grid>>) -> MutexGuard<'_, Grid> {
+    // Even if a previous request panicked while holding the lock, keep
+    // serving instead of unwrapping a poisoned mutex forever.
+    grid.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 pub fn run(grid: Arc<Mutex<Grid>>) {
     let server = Server::http("0.0.0.0:7654").expect("Failed to start server");
@@ -27,14 +34,22 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
 
         let path = url.split('?').next().unwrap_or("");
 
-        let response = match (method.as_str(), path) {
-            ("GET", "/") => serve_index(),
-            ("GET", "/state") => serve_state(&grid, &params),
-            ("POST", "/action") => handle_action(&grid, &mut request),
-            ("POST", "/toggle") => handle_toggle(&grid, &mut request),
-            ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
-            ("GET", "/export-pattern") => handle_export_pattern(&grid),
-            _ => serve_404(),
+        let response = match catch_unwind(AssertUnwindSafe(|| {
+            match (method.as_str(), path) {
+                ("GET", "/") => serve_index(),
+                ("GET", "/state") => serve_state(&grid, &params),
+                ("POST", "/action") => handle_action(&grid, &mut request),
+                ("POST", "/toggle") => handle_toggle(&grid, &mut request),
+                ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
+                ("GET", "/export-pattern") => handle_export_pattern(&grid),
+                _ => serve_404(),
+            }
+        })) {
+            Ok(resp) => resp,
+            Err(_) => {
+                eprintln!("request to {path} panicked; serving 500");
+                serve_error()
+            }
         };
 
         let _ = request.respond(response);
@@ -51,6 +66,17 @@ fn serve_404() -> Response<Cursor<Vec<u8>>> {
     Response::new(
         StatusCode(404),
         vec![],
+        Cursor::new(body),
+        Some(9),
+        None,
+    )
+}
+
+fn serve_error() -> Response<Cursor<Vec<u8>>> {
+    let body = b"internal error".to_vec();
+    Response::new(
+        StatusCode(500),
+        vec![Header::from_bytes(&b"Content-Type"[..], &b"text/plain"[..]).unwrap()],
         Cursor::new(body),
         Some(9),
         None,
@@ -101,7 +127,7 @@ fn serve_state(
     let scale: u32 = params.get("scale").and_then(|s| s.parse().ok()).unwrap_or(1);
 
     // Lock grid for snapshot
-    let mut g = grid.lock().unwrap();
+    let mut g = lock_grid(grid);
 
     let alive_count = if g.hashlife_mode {
         if let Some(ref mut hf) = g.hashlife { hf.alive_count() as u32 } else { 0 }
@@ -303,7 +329,7 @@ fn handle_action(
 
     match action {
         "step" => {
-            let mut g = grid.lock().unwrap();
+            let mut g = lock_grid(grid);
             // eprintln!("SERVER step: hashlife_mode={}", g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife();
@@ -313,7 +339,7 @@ fn handle_action(
         }
         "batch-step" => {
             let count = json.get("count").and_then(|v| v.as_u64()).unwrap_or(1);
-            let mut g = grid.lock().unwrap();
+            let mut g = lock_grid(grid);
             // eprintln!("SERVER batch-step: count={}, hashlife_mode={}", count, g.hashlife_mode);
             if g.hashlife_mode {
                 g.step_hashlife_n(count as u32);
@@ -324,7 +350,7 @@ fn handle_action(
             }
         }
         "toggle-hashlife" => {
-            let mut g = grid.lock().unwrap();
+            let mut g = lock_grid(grid);
             g.hashlife_mode = !g.hashlife_mode;
             if g.hashlife_mode {
                 // Switching to hashlife: init from alive set only if quadtree doesn't exist or is empty
@@ -343,7 +369,7 @@ fn handle_action(
             let cy = json.get("cy").and_then(|v| v.as_i64()).unwrap_or(150);
             let size = json.get("size").and_then(|v| v.as_i64()).unwrap_or(100);
             let density = json.get("density").and_then(|v| v.as_f64()).unwrap_or(0.3);
-            let mut g = grid.lock().unwrap();
+            let mut g = lock_grid(grid);
             if g.hashlife_mode {
                 // Frontend sends frontend-space coords; convert to hashlife-space
                 let (hc, hy) = game_of_life::hashlife::frontend_to_hashlife(cx as u64, cy as u64);
@@ -370,7 +396,7 @@ fn handle_action(
             }
         }
      "clear" => {
-            let mut g = grid.lock().unwrap();
+            let mut g = lock_grid(grid);
             g.clear();
             if g.hashlife_mode {
                 // Clear hashlife quadtree too
@@ -394,7 +420,7 @@ fn handle_action(
 fn handle_export_pattern(
     grid: &Arc<Mutex<Grid>>,
 ) -> Response<Cursor<Vec<u8>>> {
-    let g = grid.lock().unwrap();
+    let g = lock_grid(grid);
 
     // Collect alive cells
     let cells: Vec<(u64, u64)> = if g.hashlife_mode {
@@ -512,7 +538,7 @@ fn handle_toggle(
     let y = json.get("y").and_then(|v| v.as_f64()).map(|f| f as i64);
 
     if let (Some(x), Some(y)) = (x, y) {
-        let mut g = grid.lock().unwrap();
+        let mut g = lock_grid(grid);
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
                 let (hx, hy) = game_of_life::hashlife::frontend_to_hashlife(x as u64, y as u64);
@@ -549,7 +575,7 @@ fn handle_load_pattern(
                 }
             })
             .collect();
-        let mut g = grid.lock().unwrap();
+        let mut g = lock_grid(grid);
         if g.hashlife_mode {
             if let Some(ref mut hf) = g.hashlife {
                 // Frontend sends frontend-space coords; convert to hashlife-space
