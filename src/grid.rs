@@ -225,14 +225,12 @@ pub const TILE_NBR_MASK: [[TileNbrInfo; 4]; 4] = [
     ],
 ];
 
-pub struct Grid {
+/// Conventional (cell-list) engine state — bit-accurate vs the HashLife quadtree.
+pub struct Classic {
     /// Contiguous Vec for parallel chunked iteration
     pub alive: Vec<u64>,
     /// Maps key -> Vec index for O(1) swap-remove deletes
     pub alive_index: LifeHashMap<u64, usize>,
-    pub generation: u32,
-    pub births: u32,
-    pub deaths: u32,
     pub heap: u32,
     pub active_tiles: LifeHashSet<u64>,
     pub active_count: u32,
@@ -245,24 +243,71 @@ pub struct Grid {
     // Pre-allocated buffers for births/deaths — cleared and reused each generation
     pub(crate) births_buf: Vec<u64>,
     pub(crate) deaths_buf: Vec<u64>,
-    // Bloom filter for expanded active tiles — active_tiles + 1-tile neighborhood
-    // pub(crate) expanded_bloom: BloomFilter,
     // Bloom filter for active tile keys — replaces HashSet.contains for speed
     pub(crate) active_bloom: BloomFilter,
-    /// HashLife mode flag — when true, uses quadtree-based stepping instead of conventional
-    pub hashlife_mode: bool,
-    /// Persistent HashLife instance (source of truth when hashlife_mode is true)
-    pub hashlife: Option<game_of_life::hashlife::HashLife>,
+}
+
+/// The two stepping engines. Grid holds exactly one at a time.
+pub enum Engine {
+    Classic(Classic),
+    HashLife(game_of_life::hashlife::HashLife),
+}
+
+/// Shared server state: the generation counter + header stats both engines
+/// write, plus the live engine.
+pub struct Grid {
+    pub generation: u32,
+    pub births: u32,
+    pub deaths: u32,
+    pub engine: Engine,
 }
 
 impl Grid {
     pub fn new() -> Self {
         Self {
-            alive: Vec::with_capacity(256),
-            alive_index: LifeHashMap::with_capacity_and_hasher(256, LifeBuildHasher),
             generation: 0,
             births: 0,
             deaths: 0,
+            engine: Engine::HashLife(game_of_life::hashlife::HashLife::new()),
+        }
+    }
+
+    #[inline]
+    pub fn is_hashlife(&self) -> bool {
+        self.engine.is_hashlife()
+    }
+
+    /// Switch engines, converting state in whichever direction the toggle goes.
+    pub fn toggle_engine(&mut self) {
+        match std::mem::replace(&mut self.engine, Engine::Classic(Classic::new())) {
+            Engine::Classic(c) => self.engine = Engine::HashLife(c.to_hashlife()),
+            Engine::HashLife(hf) => self.engine = Engine::Classic(Classic::from_hashlife(&hf)),
+        }
+    }
+
+    /// Clear the grid (both engines reset generation/births/deaths).
+    pub fn clear(&mut self) {
+        self.generation = 0;
+        self.births = 0;
+        self.deaths = 0;
+        self.engine.clear();
+    }
+
+    /// Randomize a box around (cx, cy). Classic resets generation (old
+    /// behavior); HashLife does not.
+    pub fn randomize(&mut self, cx: i64, cy: i64, size: i64, density: f64) {
+        if !self.is_hashlife() {
+            self.generation = 0;
+        }
+        self.engine.randomize(cx, cy, size, density);
+    }
+}
+
+impl Classic {
+    pub fn new() -> Self {
+        Self {
+            alive: Vec::with_capacity(256),
+            alive_index: LifeHashMap::with_capacity_and_hasher(256, LifeBuildHasher),
             heap: 0,
             active_tiles: std::collections::HashSet::with_hasher(LifeBuildHasher),
             active_count: 0,
@@ -271,10 +316,7 @@ impl Grid {
             alive_vec: Vec::new(),
             births_buf: Vec::with_capacity(256),
             deaths_buf: Vec::with_capacity(256),
-            // expanded_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
-            hashlife_mode: true,
-            hashlife: None,
         }
     }
 
@@ -434,7 +476,6 @@ impl Grid {
                 }
             }
         }
-        self.generation = 0;
         self.init_active();
     }
 
@@ -446,9 +487,6 @@ impl Grid {
         self.active_bloom.resize(0);
         self.active_count = 0;
         self.active_ratio = 0.0;
-        self.generation = 0;
-        self.births = 0;
-        self.deaths = 0;
         self.heap = 0;
     }
 
@@ -473,63 +511,354 @@ impl Grid {
         self.init_active();
     }
 
-    /// Build HashLife from current alive set if not already present.
-    /// Converts grid's u64 coords (u32,u32) to hashlife's u128 coords (u64,u64)
-    /// with offset remapping: subtract GRID_OFFSET, add HASHLIFE_OFFSET.
-    pub fn init_hashlife(&mut self) {
-        if self.hashlife.is_none() {
-            eprintln!("INIT_HASHLIFE: creating new instance from {} cells", self.alive.len());
-            let cells: Vec<u128> = self.alive.iter().map(|&k| {
-                let (x, y) = Coord::unpack(k);
-                let (hx, hy) = game_of_life::hashlife::grid_to_hashlife(x as u64, y as u64);
-                game_of_life::hashlife::coord_pack(hx, hy)
-            }).collect();
-            self.hashlife = Some(game_of_life::hashlife::HashLife::from_flat(&cells));
-        }
+    /// Build a HashLife quadtree from this classic alive set
+    /// (classic -> hashlife engine switch).
+    pub fn to_hashlife(&self) -> game_of_life::hashlife::HashLife {
+        eprintln!("TO_HASHLIFE: building quadtree from {} cells", self.alive.len());
+        let cells: Vec<u128> = self.alive.iter().map(|&k| {
+            let (x, y) = Coord::unpack(k);
+            let (hx, hy) = game_of_life::hashlife::grid_to_hashlife(x as u64, y as u64);
+            game_of_life::hashlife::coord_pack(hx, hy)
+        }).collect();
+        game_of_life::hashlife::HashLife::from_flat(&cells)
     }
 
-    /// Invalidate HashLife instance (call after clear, randomize, load_pattern).
-    /// Does NOT rebuild alive — caller is responsible for that.
-    pub fn invalidate_hashlife(&mut self) {
-        self.hashlife = None;
-    }
-
-    /// Switch from HashLife to Classic: rebuild alive from quadtree.
-    /// Converts hashlife's u128 coords (u64,u64) back to grid's u64 coords (u32,u32)
-    /// with offset remapping: subtract HASHLIFE_OFFSET, add GRID_OFFSET.
-    pub fn sync_alive_from_hashlife(&mut self) {
-        if let Some(ref hf) = self.hashlife {
-            let alive_u128 = hf.collect_alive();
-            let alive: Vec<u64> = alive_u128.iter().filter_map(|&cell| {
-                let (hx, hy) = game_of_life::hashlife::coord_unpack(cell);
-                let (gx, gy) = game_of_life::hashlife::hashlife_to_grid(hx, hy);
-                // Only include cells that fit in u32
-                if gx <= u32::MAX as u64 && gy <= u32::MAX as u64 {
-                    Some(Coord::pack(gx as u32, gy as u32))
-                } else {
-                    None
-                }
-            }).collect();
-            self.alive = alive;
-            self.alive_index.clear();
-            for (i, &cell) in self.alive.iter().enumerate() {
-                self.alive_index.insert(cell, i);
+    /// Rebuild a classic state from a hashlife quadtree
+    /// (hashlife -> classic engine switch).
+    pub fn from_hashlife(hf: &game_of_life::hashlife::HashLife) -> Self {
+        let alive_u128 = hf.collect_alive();
+        let alive: Vec<u64> = alive_u128.iter().filter_map(|&cell| {
+            let (hx, hy) = game_of_life::hashlife::coord_unpack(cell);
+            let (gx, gy) = game_of_life::hashlife::hashlife_to_grid(hx, hy);
+            // Only include cells that fit in u32
+            if gx <= u32::MAX as u64 && gy <= u32::MAX as u64 {
+                Some(Coord::pack(gx as u32, gy as u32))
+            } else {
+                None
             }
-            eprintln!("SYNC_HASHLIFE->CLASSIC: rebuilt {} cells from quadtree", self.alive.len());
+        }).collect();
+        eprintln!("FROM_HASHLIFE: rebuilt {} cells from quadtree", alive.len());
+        let mut c = Self::new();
+        c.alive = alive;
+        for (i, &cell) in c.alive.iter().enumerate() {
+            c.alive_index.insert(cell, i);
         }
-        self.hashlife = None;
+        c.init_active();
+        c
     }
+}
+
+impl Engine {
+    #[inline]
+    pub fn is_hashlife(&self) -> bool {
+        matches!(self, Engine::HashLife(_))
+    }
+
+    pub fn alive_count(&mut self) -> u32 {
+        match self {
+            Engine::Classic(c) => c.alive.len() as u32,
+            Engine::HashLife(hf) => hf.alive_count() as u32,
+        }
+    }
+
+    /// (active, heap, tiles) — the three mode-dependent header fields.
+    pub fn header_stats(&self) -> (u32, u32, u32) {
+        match self {
+            Engine::Classic(c) => (c.active_count, c.heap, c.active_tiles.len() as u32),
+            Engine::HashLife(hf) => (hf.last_gc_live_len, hf.last_cache_size, hf.last_cache_hit_rate),
+        }
+    }
+
+    /// Fill the viewport bitmap (+ overlay) for /state. The request is in
+    /// frontend space; each engine interprets the coords in its own client
+    /// space. Returns (bits, overlay, final_vw, final_vh).
+    pub fn snapshot(&self, vx: u64, vy: u64, vw: u32, vh: u32, scale: u32) -> (Vec<u8>, Vec<u8>, u32, u32) {
+        match self {
+            Engine::HashLife(hf) => {
+                let (hvx, hvy) = game_of_life::hashlife::frontend_to_hashlife(vx, vy);
+                let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(hvx, hvy, vw, vh, scale);
+                let scale_usize = scale as usize;
+                let agg_w = (vw_a as usize + scale_usize - 1) / scale_usize;
+                let agg_h = (vh_a as usize + scale_usize - 1) / scale_usize;
+                let len = (agg_w * agg_h + 7) / 8;
+                let mut bits = vec![0u8; len];
+                if scale > 1 {
+                    hf.populate_aggregated_viewport(hvx_a, hvy_a, vw_a, vh_a, scale, &mut bits);
+                } else {
+                    hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits);
+                }
+                (bits, vec![0u8; len], agg_w as u32, agg_h as u32)
+            }
+            Engine::Classic(c) => {
+                if scale > 1 {
+                    let scale_usize = scale as usize;
+                    let agg_w = (vw as usize + scale_usize - 1) / scale_usize;
+                    let agg_h = (vh as usize + scale_usize - 1) / scale_usize;
+                    let agg_len = (agg_w * agg_h + 7) / 8;
+                    let mut agg_bits = vec![0u8; agg_len];
+                    let mut agg_overlay = vec![0u8; agg_len];
+
+                    for &k in &c.alive {
+                        let (ax, ay) = Coord::unpack(k);
+                        let ax = ax as u64;
+                        let ay = ay as u64;
+                        if ax >= vx && ay >= vy {
+                            let rx = ax - vx;
+                            let ry = ay - vy;
+                            if rx < vw as u64 && ry < vh as u64 {
+                                let aggx = (rx / scale as u64) as usize;
+                                let aggy = (ry / scale as u64) as usize;
+                                let aidx = aggy * agg_w + aggx;
+                                agg_bits[aidx >> 3] |= 1 << (aidx & 7);
+                            }
+                        }
+                    }
+
+                    let ss = STATIC_SIZE as u64;
+                    for &tkey in &c.active_tiles {
+                        let (tx, ty) = Coord::unpack(tkey);
+                        let tx = tx as u64;
+                        let ty = ty as u64;
+                        if tx < vx + vw as u64 && tx + ss > vx
+                            && ty < vy + vh as u64 && ty + ss > vy {
+                            let x_lo = tx.max(vx) - vx;
+                            let x_hi = (tx + ss).min(vx + vw as u64) - vx;
+                            let y_lo = ty.max(vy) - vy;
+                            let y_hi = (ty + ss).min(vy + vh as u64) - vy;
+                            let ax_lo = (x_lo / scale as u64) as usize;
+                            let ax_hi = ((x_hi - 1) / scale as u64) as usize;
+                            let ay_lo = (y_lo / scale as u64) as usize;
+                            let ay_hi = ((y_hi - 1) / scale as u64) as usize;
+                            for ay in ay_lo..=ay_hi {
+                                for ax in ax_lo..=ax_hi {
+                                    let idx = ay * agg_w + ax;
+                                    agg_overlay[idx >> 3] |= 1 << (idx & 7);
+                                }
+                            }
+                        }
+                    }
+
+                    (agg_bits, agg_overlay, agg_w as u32, agg_h as u32)
+                } else {
+                    let bits_len = (vw as usize * vh as usize + 7) / 8;
+                    let mut bits = vec![0u8; bits_len];
+                    for &k in &c.alive {
+                        let (ax, ay) = Coord::unpack(k);
+                        let ax = ax as u64;
+                        let ay = ay as u64;
+                        if ax >= vx && ay >= vy {
+                            let rx = ax - vx;
+                            let ry = ay - vy;
+                            if rx < vw as u64 && ry < vh as u64 {
+                                let idx = (ry * vw as u64 + rx) as usize;
+                                bits[idx >> 3] |= 1 << (idx & 7);
+                            }
+                        }
+                    }
+
+                    let ss = STATIC_SIZE as u64;
+                    let mut overlay = vec![0u8; bits_len];
+                    for &tkey in &c.active_tiles {
+                        let (tx, ty) = Coord::unpack(tkey);
+                        let tx = tx as u64;
+                        let ty = ty as u64;
+                        if tx < vx + vw as u64 && tx + ss > vx
+                            && ty < vy + vh as u64 && ty + ss > vy {
+                            let x_lo = tx.max(vx) - vx;
+                            let x_hi = (tx + ss).min(vx + vw as u64) - vx;
+                            let y_lo = ty.max(vy) - vy;
+                            let y_hi = (ty + ss).min(vy + vh as u64) - vy;
+                            for y in y_lo..y_hi {
+                                let row_offset = (y * vw as u64) as usize;
+                                for x in x_lo..x_hi {
+                                    let idx = row_offset + x as usize;
+                                    overlay[idx >> 3] |= 1 << (idx & 7);
+                                }
+                            }
+                        }
+                    }
+                    (bits, overlay, vw, vh)
+                }
+            }
+        }
+    }
+
+    /// Toggle a single cell (frontend-space coords).
+    pub fn toggle_cell(&mut self, x: i64, y: i64) {
+        match self {
+            Engine::Classic(c) => c.toggle(x, y),
+            Engine::HashLife(hf) => {
+                let (hx, hy) = game_of_life::hashlife::frontend_to_hashlife(x as u64, y as u64);
+                hf.set_cell(hx, hy, !hf.get_cell(hx, hy));
+            }
+        }
+    }
+
+    /// Randomize a box around (cx, cy).
+    pub fn randomize(&mut self, cx: i64, cy: i64, size: i64, density: f64) {
+        match self {
+            Engine::Classic(c) => c.randomize(cx, cy, size, density),
+            Engine::HashLife(hf) => {
+                let (hc_x, hc_y) = game_of_life::hashlife::frontend_to_hashlife(cx as u64, cy as u64);
+                let mut new = game_of_life::hashlife::HashLife::new();
+                let half = size / 2;
+                for dx in -half..=half {
+                    for dy in -half..=half {
+                        if fastrand::f64() < density {
+                            new.set_cell(
+                                hc_x.wrapping_add(dx as i64 as u64),
+                                hc_y.wrapping_add(dy as i64 as u64),
+                                true,
+                            );
+                        }
+                    }
+                }
+                *hf = new;
+            }
+        }
+    }
+
+    /// Clear the engine state (generation/births/deaths are reset by Grid).
+    pub fn clear(&mut self) {
+        match self {
+            Engine::Classic(c) => c.clear(),
+            Engine::HashLife(hf) => *hf = game_of_life::hashlife::HashLife::new(),
+        }
+    }
+
+    /// Load a pattern (frontend-space cells, anchored at the origin).
+    pub fn load_pattern(&mut self, cells: &[(i64, i64)], anchor_x: i64, anchor_y: i64) {
+        match self {
+            Engine::Classic(c) => c.load_pattern(cells, anchor_x, anchor_y),
+            Engine::HashLife(hf) => {
+                let (ha_x, ha_y) = game_of_life::hashlife::frontend_to_hashlife(anchor_x as u64, anchor_y as u64);
+                if hf.is_empty() {
+                    let flat: Vec<u128> = cells.iter().map(|&(ccx, ccy)| {
+                        let gx = ha_x.wrapping_add(ccx as i64 as u64);
+                        let gy = ha_y.wrapping_add(ccy as i64 as u64);
+                        game_of_life::hashlife::coord_pack(gx, gy)
+                    }).collect();
+                    *hf = game_of_life::hashlife::HashLife::from_flat(&flat);
+                } else {
+                    for &(ccx, ccy) in cells {
+                        let x = ha_x.wrapping_add(ccx as i64 as u64);
+                        let y = ha_y.wrapping_add(ccy as i64 as u64);
+                        hf.set_cell(x, y, true);
+                    }
+                }
+            }
+        }
+    }
+
+    /// All alive cells in frontend-space coords.
+    pub fn frontend_cells(&self) -> Vec<(u64, u64)> {
+        match self {
+            Engine::Classic(c) => c.alive.iter().map(|&k| {
+                let (x, y) = Coord::unpack(k);
+                (x as u64, y as u64)
+            }).collect(),
+            Engine::HashLife(hf) => hf.to_flat().iter().map(|&p| {
+                let (hx, hy) = game_of_life::hashlife::coord_unpack(p);
+                game_of_life::hashlife::hashlife_to_frontend(hx, hy)
+            }).collect(),
+        }
+    }
+
+    /// Export as MC for large HashLife patterns, RLE otherwise.
+    pub fn export_text(&mut self) -> String {
+        if let Engine::HashLife(hf) = self {
+            if hf.alive_count() > 5000 {
+                return hf.export_mc();
+            }
+        }
+        export_rle(&self.frontend_cells())
+    }
+}
+
+/// Export cells to RLE format.
+fn export_rle(cells: &[(u64, u64)]) -> String {
+    if cells.is_empty() {
+        return "b!".to_string();
+    }
+
+    // Find bounds
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u64::MAX, 0, u64::MAX, 0);
+    for &(x, y) in cells {
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+    }
+
+    // Build a set for O(1) lookup
+    let alive: std::collections::HashSet<(u64, u64)> = cells.iter().copied().collect();
+
+    // Encode header
+    let mut out = String::new();
+    let width = max_x - min_x + 1;
+    let height = max_y - min_y + 1;
+    out.push_str(&format!("x = {}, y = {}, rule = B3/S23\n", width, height));
+
+    // Encode row by row
+    let mut x = min_x;
+    let mut y = min_y;
+    let mut run_len = 0;
+    let mut run_alive = alive.contains(&(min_x, min_y));
+
+    while y <= max_y {
+        while x <= max_x {
+            let is_alive = alive.contains(&(x, y));
+            if is_alive == run_alive {
+                run_len += 1;
+            } else {
+                // Flush current run
+                if run_len > 0 {
+                    if run_len > 1 { out.push_str(&run_len.to_string()); }
+                    out.push(if run_alive { 'o' } else { 'b' });
+                }
+                run_len = 1;
+                run_alive = is_alive;
+            }
+            x += 1;
+        }
+        // Flush remaining run for this row
+        if run_len > 0 {
+            if run_len > 1 { out.push_str(&run_len.to_string()); }
+            out.push(if run_alive { 'o' } else { 'b' });
+            run_len = 0;
+        }
+        out.push('$');
+        y += 1;
+        x = min_x;
+    }
+
+    out.push('!');
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game_of_life::hashlife::{coord_unpack, GRID_OFFSET, HASHLIFE_OFFSET};
+    use game_of_life::hashlife::{coord_unpack, GRID_OFFSET, HASHLIFE_OFFSET, HashLife};
+
+    fn classic_of(g: &Grid) -> &Classic {
+        match &g.engine {
+            Engine::Classic(c) => c,
+            _ => panic!("expected classic engine"),
+        }
+    }
+
+    fn hl_of(g: &Grid) -> &HashLife {
+        match &g.engine {
+            Engine::HashLife(hf) => hf,
+            _ => panic!("expected hashlife engine"),
+        }
+    }
 
     /// Classic alive set, normalized to origin-centered i64 coords, sorted.
-    fn classic_cells(g: &Grid) -> Vec<(i64, i64)> {
-        let mut v: Vec<(i64, i64)> = g.alive_index.keys().map(|&k| {
-            let (x, y) = Grid::unpack(k);
+    fn classic_cells(c: &Classic) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = c.alive_index.keys().map(|&k| {
+            let (x, y) = Classic::unpack(k);
             (x as i64 - GRID_OFFSET as i64, y as i64 - GRID_OFFSET as i64)
         }).collect();
         v.sort();
@@ -537,8 +866,8 @@ mod tests {
     }
 
     /// HashLife alive set, normalized to origin-centered i64 coords, sorted.
-    fn hl_cells(g: &Grid) -> Vec<(i64, i64)> {
-        let mut v: Vec<(i64, i64)> = g.hashlife.as_ref().unwrap().to_flat().into_iter().map(|c| {
+    fn hl_cells(hf: &HashLife) -> Vec<(i64, i64)> {
+        let mut v: Vec<(i64, i64)> = hf.to_flat().into_iter().map(|c| {
             let (hx, hy) = coord_unpack(c);
             (hx as i64 - HASHLIFE_OFFSET as i64, hy as i64 - HASHLIFE_OFFSET as i64)
         }).collect();
@@ -562,10 +891,13 @@ mod tests {
     /// Load the same pattern into a fresh Grid; the anchor places the pattern
     /// centered on the origin of the u32 (GRID_OFFSET) space.
     fn make_grid(hashlife_mode: bool) -> Grid {
-        let mut g = Grid::new();
-        g.hashlife_mode = hashlife_mode;
-        g.load_pattern(&engine_test_pattern(), GRID_OFFSET as i64, GRID_OFFSET as i64);
-        g
+        let mut c = Classic::new();
+        c.load_pattern(&engine_test_pattern(), GRID_OFFSET as i64, GRID_OFFSET as i64);
+        if hashlife_mode {
+            Grid { generation: 0, births: 0, deaths: 0, engine: Engine::HashLife(c.to_hashlife()) }
+        } else {
+            Grid { generation: 0, births: 0, deaths: 0, engine: Engine::Classic(c) }
+        }
     }
 
     #[test]
@@ -573,16 +905,15 @@ mod tests {
         const N: u32 = 8;
         let mut classic = make_grid(false);
         let mut hl = make_grid(true);
-        // Build the quadtree from the identical classic alive set —
-        // both engines provably start from the same state.
-        hl.init_hashlife();
+        // The quadtree was built from the identical classic alive set in
+        // make_grid — both engines provably start from the same state.
 
         for i in 0..N {
             classic.step();
-            hl.step_hashlife();
+            hl.step();
             assert_eq!(
-                classic_cells(&classic),
-                hl_cells(&hl),
+                classic_cells(classic_of(&classic)),
+                hl_cells(hl_of(&hl)),
                 "engines diverged at gen {}",
                 i + 1
             );
@@ -592,24 +923,23 @@ mod tests {
     #[test]
     fn test_engines_agree_with_toggle() {
         const HALF: u32 = 4;
-        // Path A: 4 classic steps, rebuild the quadtree, 4 hashlife steps.
+        // Path A: 4 classic steps, toggle to hashlife, 4 hashlife steps.
         let mut a = make_grid(false);
         for _ in 0..HALF {
             a.step();
         }
-        a.init_hashlife();
+        a.toggle_engine();
         for _ in 0..HALF {
-            a.step_hashlife();
+            a.step();
         }
 
         // Control: 8 hashlife steps from the same starting state.
         let mut b = make_grid(true);
-        b.init_hashlife();
         for _ in 0..HALF * 2 {
-            b.step_hashlife();
+            b.step();
         }
 
-        assert_eq!(hl_cells(&a), hl_cells(&b), "toggle path diverged");
+        assert_eq!(hl_cells(hl_of(&a)), hl_cells(hl_of(&b)), "toggle path diverged");
     }
 
     /// Classic-engine stepping benchmark, gated behind the CLASSIC_BENCH env var
@@ -656,10 +986,11 @@ mod tests {
         }
 
         let mut g = Grid::new();
-        g.hashlife_mode = false;
-        g.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let mut c = Classic::new();
+        c.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let mut g = Grid { generation: 0, births: 0, deaths: 0, engine: Engine::Classic(c) };
         eprintln!("[classic_bench] loaded {} cells from {}", cells.len(), path);
-        eprintln!("[classic_bench] alive={} active_tiles={}", g.alive.len(), g.active_tiles.len());
+        eprintln!("[classic_bench] alive={} active_tiles={}", classic_of(&g).alive.len(), classic_of(&g).active_tiles.len());
 
         let ts = std::time::Instant::now();
         let mut gen_done: u64 = 0;
@@ -671,12 +1002,12 @@ mod tests {
             if mark > last_mark {
                 let el = ts.elapsed().as_secs_f64();
                 eprintln!("[classic_bench] gen={} alive={} active_tiles={} elapsed={:.1}s rate={:.0}/s",
-                    gen_done, g.alive.len(), g.active_tiles.len(), el, gen_done as f64 / el);
+                    gen_done, classic_of(&g).alive.len(), classic_of(&g).active_tiles.len(), el, gen_done as f64 / el);
                 last_mark = mark;
             }
         }
         let el = ts.elapsed().as_secs_f64();
         eprintln!("[classic_bench] DONE gen={} in {:.1}s ({:.0} gens/sec overall) alive={} active_tiles={}",
-            gen_done, el, gen_done as f64 / el, g.alive.len(), g.active_tiles.len());
+            gen_done, el, gen_done as f64 / el, classic_of(&g).alive.len(), classic_of(&g).active_tiles.len());
     }
 }

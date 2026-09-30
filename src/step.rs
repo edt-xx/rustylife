@@ -87,7 +87,7 @@ fn neighbor_count_worker(
  
         // using bloomfilters in this worker is measureably slower 
         if !active_tiles.contains(&tile_key(*k)) {
-            let (mx, my) = Grid::mod_tile(*k);
+            let (mx, my) = Classic::mod_tile(*k);
             // Static cell (hot path): grouped neighbor table — one active_tiles check per unique tile
             let info = &TILE_NBR_MASK[mx as usize][my as usize];
             if info.num_groups == 0 {
@@ -128,10 +128,11 @@ fn neighbor_count_worker(
     (local_nc, work)
 }
 
-impl Grid {
-    pub fn step(&mut self) {
-        if self.alive.is_empty() { return; }
+impl Classic {
+    pub fn step(&mut self, generation: &mut u32) -> (u32, u32) {
+        if self.alive.is_empty() { return (0, 0); }
         let t_start = Instant::now();
+        let (mut births, mut deaths) = (0u32, 0u32);
 
         // Initialize active_tiles and bloom filter on first step
         if self.active_bloom.bits.is_empty() {
@@ -181,7 +182,7 @@ impl Grid {
                 neighbor_count_worker(chunk, &self.active_tiles, hint)
             };
             let nc_us = t_nc.elapsed().as_micros();
-            Self::apply_rules(self, &nc_dict, work, filter_us, nc_us, t_start);
+            Self::apply_rules(self, generation, &mut births, &mut deaths, &nc_dict, work, filter_us, nc_us, t_start);
         } else {
             let (nc_dict, work) = {
                 self.alive_vec.par_chunks(chunk_size)
@@ -197,14 +198,13 @@ impl Grid {
                     .unwrap()
             };
             let nc_us = t_nc.elapsed().as_micros();
-            Self::apply_rules(self, &nc_dict, work, filter_us, nc_us, t_start);
+            Self::apply_rules(self, generation, &mut births, &mut deaths, &nc_dict, work, filter_us, nc_us, t_start);
         }
+        (births, deaths)
     }
 
-    fn apply_rules(grid: &mut Grid, nc_dict: &LifeHashMap<u64, u8>, work: u32, filter_us: u128, nc_us: u128, t_start: Instant) {
+    fn apply_rules(grid: &mut Classic, generation: &mut u32, births: &mut u32, deaths: &mut u32, nc_dict: &LifeHashMap<u64, u8>, work: u32, filter_us: u128, nc_us: u128, t_start: Instant) {
         grid.apply_new_active.clear();
-        grid.deaths = 0;
-        grid.births = 0;
 
         // Collect births and deaths during scan (reused buffers)
         grid.births_buf.clear();
@@ -215,13 +215,13 @@ impl Grid {
         for (&k, &c) in nc_dict {
             if c < 10 {
                 if c == 3 && grid.active_tiles.contains(&tile_key(k)) {
-                    grid.births_buf.push(k);
-                    grid.births += 1;
+                        grid.births_buf.push(k);
+                        *births += 1;
                     Self::mark_active(k, &mut grid.apply_new_active);
                 }
             } else if c < 12 || c > 13 {
-                grid.deaths_buf.push(k);
-                grid.deaths += 1;
+                    grid.deaths_buf.push(k);
+                    *deaths += 1;
                 Self::mark_active(k, &mut grid.apply_new_active);
             }
         }
@@ -229,9 +229,9 @@ impl Grid {
 
         std::mem::swap(&mut grid.active_tiles, &mut grid.apply_new_active);
         grid.active_count = work;
-        let is_first = grid.generation == 0;
-        grid.generation += 1;
-        log_generation_threshold(grid.generation, is_first);
+        let is_first = *generation == 0;
+        *generation += 1;
+        log_generation_threshold(*generation, is_first);
         grid.heap = nc_dict.len() as u32;
 
         // Disjoint field captures (Rust 2021 precise capture) — no unsafe needed; both closures Send.
@@ -346,40 +346,63 @@ impl Grid {
         if timing_on() {
             let total_us = t_start.elapsed().as_micros();
             eprintln!("gen={} ({}) filter={}us ({}) nc={}us ({}) ncscan={}us ({}) join={}/{}us total={}us bloom_bits={} ratio={:.1}",
-                grid.generation, grid.alive.len(), filter_us, grid.active_tiles.len(), nc_us, grid.alive_vec.len(), scan_us, grid.heap, alive_us, bloom_us, total_us,
+                *generation, grid.alive.len(), filter_us, grid.active_tiles.len(), nc_us, grid.alive_vec.len(), scan_us, grid.heap, alive_us, bloom_us, total_us,
                 grid.active_bloom.size_bits, grid.active_ratio);
         }
     }
+}
 
-    pub fn step_hashlife(&mut self) {
-        if self.hashlife.as_ref().map_or(true, |hf| hf.is_empty()) {
-            return;
+impl Grid {
+    pub fn step(&mut self) {
+        match &mut self.engine {
+            Engine::Classic(c) => {
+                if c.alive.is_empty() {
+                    return;
+                }
+                let (b, d) = c.step(&mut self.generation);
+                self.births = b;
+                self.deaths = d;
+            }
+            Engine::HashLife(hf) => {
+                if hf.is_empty() {
+                    return;
+                }
+                let is_first = self.generation == 0;
+                hf.step();
+                self.generation += 1;
+                log_generation_threshold(self.generation, is_first);
+                self.births = 0;
+                self.deaths = 0;
+            }
         }
-
-        self.init_hashlife();
-        let hf = self.hashlife.as_mut().unwrap();
-        let is_first = self.generation == 0;
-        hf.step();
-        self.generation += 1;
-        log_generation_threshold(self.generation, is_first);
-        self.births = 0;
-        self.deaths = 0;
-        self.active_count = 0;
     }
 
-    pub fn step_hashlife_n(&mut self, n: u32) {
-        if self.hashlife.as_ref().map_or(true, |hf| hf.is_empty()) || n == 0 {
+    pub fn step_n(&mut self, n: u32) {
+        if n == 0 {
             return;
         }
-
-        self.init_hashlife();
-        let hf = self.hashlife.as_mut().unwrap();
-        let is_first = self.generation == 0;
-        hf.step_n(n);
-        self.generation += n;
-        log_generation_threshold(self.generation, is_first);
-        self.births = 0;
-        self.deaths = 0;
-        self.active_count = 0;
+        match &mut self.engine {
+            Engine::Classic(c) => {
+                for _ in 0..n {
+                    if c.alive.is_empty() {
+                        break;
+                    }
+                    let (b, d) = c.step(&mut self.generation);
+                    self.births = b;
+                    self.deaths = d;
+                }
+            }
+            Engine::HashLife(hf) => {
+                if hf.is_empty() {
+                    return;
+                }
+                let is_first = self.generation == 0;
+                hf.step_n(n);
+                self.generation += n;
+                log_generation_threshold(self.generation, is_first);
+                self.births = 0;
+                self.deaths = 0;
+            }
+        }
     }
 }
