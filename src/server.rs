@@ -116,6 +116,9 @@ fn serve_octet_stream(data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
     )
 }
 
+/// GET /state handler. Wire format: big-endian u32 header (13 fields,
+/// proto_version = 1 at offset 48) followed by the viewport bitmap and
+/// the overlay. Canonical spec: `docs/protocol.md`.
 fn serve_state(
     grid: &Arc<Mutex<Grid>>,
     params: &HashMap<String, String>,
@@ -274,8 +277,7 @@ fn serve_state(
         (bits, overlay, vw_a, vh_a)
     };
 
-    // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32), proto_version(u32)
-    // Big-endian
+    // Header: 13 big-endian u32 fields — see docs/protocol.md
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
     data.extend((final_vw as u32).to_be_bytes());
