@@ -274,7 +274,7 @@ fn serve_state(
         (bits, overlay, vw_a, vh_a)
     };
 
-    // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32)
+    // Header: gen(u32), vw(u32), vh(u32), pop(u32), active(u32), ol_len(u32), births(u32), deaths(u32), heap(u32), active_tiles(u32), proto_version(u32)
     // Big-endian
     let mut data = Vec::new();
     data.extend(g.generation.to_be_bytes());
@@ -308,6 +308,8 @@ fn serve_state(
     data.extend(scale.to_be_bytes());
     // HashLife mode flag (0 or 1) for frontend sync
     data.extend((if g.hashlife_mode { 1u32 } else { 0u32 }).to_be_bytes());
+    // Protocol version (1 = 13-field header); appended so old clients still parse
+    data.extend(1u32.to_be_bytes());
 
     data.extend(final_bits);
     data.extend(final_overlay);

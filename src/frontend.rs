@@ -322,7 +322,7 @@ var prevBits = null, imgData = null, prevOverlay = null;
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
-var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0, lblFps='Gen/s: 0';
+var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0, lblFps='Gen/s: 0', protoVer=0, protoVerBad=false;
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
 var tracksEnabled = false; // disabled by default, hide active overlay when on
@@ -460,8 +460,13 @@ function drawGrid(data) {
     lblBirths = births; lblDeaths = deaths; lblHeap = heap; lblTiles = tiles;
 
     var bitsLen = ((vw * vh + 7) >> 3);
-    var bits = new Uint8Array(data, 48, bitsLen);
-    var overlayOff = 48 + bitsLen;
+    // Protocol version: v1 appends one u32 (proto_version) after the 12-field header.
+    // Detect new vs old format by exact total length; old = 48-byte header.
+    var hdrLen = (data.byteLength === 52 + bitsLen + ol_len) ? 52 : 48;
+    if (hdrLen === 52) { protoVer = new DataView(data, 48, 4).getUint32(0, false); protoVerBad = (protoVer !== 1); }
+    else { protoVer = 0; protoVerBad = false; }
+    var bits = new Uint8Array(data, hdrLen, bitsLen);
+    var overlayOff = hdrLen + bitsLen;
     var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
 
     // Server-side aggregation: when serverScale > 1, the server sends an already-aggregated bitmap.
@@ -630,6 +635,7 @@ function updateLabels(vw, vh) {
         } else {
             parts.push('Heap: ' + lblHeap + ' (' + lblTiles + ')');
         }
+        if (protoVerBad) { parts.push('\u26a0 proto v' + protoVer); }
         l1.textContent = parts.join('\xa0\xa0');
     }
     var l2 = document.getElementById('infoLine2');
