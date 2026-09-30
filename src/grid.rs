@@ -611,4 +611,72 @@ mod tests {
 
         assert_eq!(hl_cells(&a), hl_cells(&b), "toggle path diverged");
     }
+
+    /// Classic-engine stepping benchmark, gated behind the CLASSIC_BENCH env var
+    /// (a no-op test unless set) so it never runs in the regular suite.
+    ///
+    ///   CLASSIC_BENCH=/path/to/pattern.lif CLASSIC_BENCH_GENS=500000 \
+    ///   cargo test --release -- --test-threads=1 --nocapture classic_bench
+    #[test]
+    fn classic_bench() {
+        let path = match std::env::var("CLASSIC_BENCH") {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let max_gens: u64 = std::env::var("CLASSIC_BENCH_GENS")
+            .ok().and_then(|s| s.parse().ok()).unwrap_or(500_000);
+
+        // Replicates frontend.rs::parseRLE (relative coords, x=col, y=row).
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
+        let mut cells: Vec<(i64, i64)> = Vec::new();
+        let mut x: u64 = 0;
+        let mut y: u64 = 0;
+        let mut count: String = String::new();
+        let cleaned: String = text
+            .lines()
+            .filter(|l| !l.starts_with('#')
+                && !l.trim_start().to_ascii_lowercase().starts_with('x')
+                && !l.trim_start().to_ascii_lowercase().starts_with('y'))
+            .collect::<Vec<_>>()
+            .concat()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        for c in cleaned.chars() {
+            if c.is_ascii_digit() { count.push(c); continue; }
+            let n: u64 = if count.is_empty() { 1 } else { count.parse().unwrap_or(1) };
+            count.clear();
+            match c {
+                'o' => { for _ in 0..n { cells.push((x as i64, y as i64)); x += 1; } }
+                'b' => x += n,
+                '$' => { x = 0; y += n; }
+                '!' => break,
+                _ => {}
+            }
+        }
+
+        let mut g = Grid::new();
+        g.hashlife_mode = false;
+        g.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        eprintln!("[classic_bench] loaded {} cells from {}", cells.len(), path);
+        eprintln!("[classic_bench] alive={} active_tiles={}", g.alive.len(), g.active_tiles.len());
+
+        let ts = std::time::Instant::now();
+        let mut gen_done: u64 = 0;
+        let mut last_mark: u64 = 0;
+        while gen_done < max_gens {
+            g.step();
+            gen_done += 1;
+            let mark = gen_done / 50_000;
+            if mark > last_mark {
+                let el = ts.elapsed().as_secs_f64();
+                eprintln!("[classic_bench] gen={} alive={} active_tiles={} elapsed={:.1}s rate={:.0}/s",
+                    gen_done, g.alive.len(), g.active_tiles.len(), el, gen_done as f64 / el);
+                last_mark = mark;
+            }
+        }
+        let el = ts.elapsed().as_secs_f64();
+        eprintln!("[classic_bench] DONE gen={} in {:.1}s ({:.0} gens/sec overall) alive={} active_tiles={}",
+            gen_done, el, gen_done as f64 / el, g.alive.len(), g.active_tiles.len());
+    }
 }

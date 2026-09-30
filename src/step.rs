@@ -234,24 +234,15 @@ impl Grid {
         log_generation_threshold(grid.generation, is_first);
         grid.heap = nc_dict.len() as u32;
 
-        // Safety: raw pointers to disjoint fields — alive/alive_index/deaths_buf/births_buf
-        // are accessed by closure 1, expanded_bloom/active_bloom/active_tiles by closure 2.
-        // Converted to usize to bypass Send check. rayon::join guarantees no concurrent access.
-        let alive_ptr = &mut grid.alive as *mut Vec<u64> as usize;
-        let alive_index_ptr = &mut grid.alive_index as *mut LifeHashMap<u64, usize> as usize;
-        let deaths_ptr = &grid.deaths_buf as *const Vec<u64> as usize;
-        let births_ptr = &grid.births_buf as *const Vec<u64> as usize;
-        // let bloom_ptr = &mut grid.expanded_bloom as *mut BloomFilter as usize;
-        let active_bloom_ptr = &mut grid.active_bloom as *mut BloomFilter as usize;
-        let active_ptr = &grid.active_tiles as *const LifeHashSet<u64> as usize;
+        // Disjoint field captures (Rust 2021 precise capture) — no unsafe needed; both closures Send.
 
         let (alive_us, bloom_us) = rayon::join(
             || {
                 let t = Instant::now();
-                let alive = unsafe { &mut *(alive_ptr as *mut Vec<u64>) };
-                let alive_index = unsafe { &mut *(alive_index_ptr as *mut LifeHashMap<u64, usize>) };
-                let deaths = unsafe { &*(deaths_ptr as *const Vec<u64>) };
-                let births = unsafe { &*(births_ptr as *const Vec<u64>) };
+                let alive = &mut grid.alive;
+                let alive_index = &mut grid.alive_index;
+                let deaths = &grid.deaths_buf;
+                let births = &grid.births_buf;
 
                 // Parallel lookup — read-only HashMap (indices valid before any mutations)
                 let death_indices: Vec<(u64, usize)> = deaths.par_iter()
@@ -296,8 +287,8 @@ impl Grid {
             || {
                 let t = Instant::now();
                 // let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
-                let active_bloom = unsafe { &mut *(active_bloom_ptr as *mut BloomFilter) };
-                let active = unsafe { &*(active_ptr as *const LifeHashSet<u64>) };
+                let active_bloom = &mut grid.active_bloom;
+                let active = &grid.active_tiles;
                 // max of 15* active.len()
                 // bloom.resize(active.len()*15);
                 // max of active.len() 2* to lower error rate (ER 1.2)
