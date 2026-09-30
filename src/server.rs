@@ -56,9 +56,17 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
     }
 }
 
+/// Cap on the response bitmap of `/state`, in cells after aggregation
+/// (`ceil(vw/scale) x ceil(vh/scale)`). Covers an 8K display at 1px zoom
+/// (33M cells); injected into the frontend as `MAX_BITMAP_CELLS`. A
+/// malformed request must not force a huge allocation — `vec!` aborts on
+/// OOM, which `catch_unwind` cannot catch.
+const MAX_BITMAP_CELLS: u64 = 1 << 26; // 64M cells = 8 MiB bitmap
+
 fn serve_index() -> Response<Cursor<Vec<u8>>> {
     use crate::frontend::FRONTEND;
-    serve_html(FRONTEND)
+    let html = FRONTEND.replace("__MAX_BITMAP_CELLS__", &MAX_BITMAP_CELLS.to_string());
+    serve_html(&html)
 }
 
 fn serve_404() -> Response<Cursor<Vec<u8>>> {
@@ -128,6 +136,26 @@ fn serve_state(
     let vw: u32 = params.get("vw").and_then(|s| s.parse().ok()).unwrap_or(530);
     let vh: u32 = params.get("vh").and_then(|s| s.parse().ok()).unwrap_or(300);
     let scale: u32 = params.get("scale").and_then(|s| s.parse().ok()).unwrap_or(1);
+
+    // Cap the response bitmap (post-aggregation cell count) at MAX_BITMAP_CELLS,
+    // preserving aspect. Legitimate requests never hit the cap (largest is the
+    // window's pixel count at 1px); this only triggers on malformed requests.
+    let scale = scale.max(1);
+    let (vw, vh) = {
+        let aw = if scale > 1 { (vw as u64 + scale as u64 - 1) / scale as u64 } else { vw as u64 };
+        let ah = if scale > 1 { (vh as u64 + scale as u64 - 1) / scale as u64 } else { vh as u64 };
+        // Include the alignment edge buffer from align_viewport, so the
+        // actually-allocated bitmap stays within the budget. Both dims are
+        // padded to a multiple of 8 (adds up to 7), plus the seam shift:
+        // x shifts by up to 8 aggregated columns (byte alignment,
+        // unit_x = 8*scale raw cells) -> x gets +15; y shifts by <1
+        // aggregated row (row alignment, unit_y = scale) -> y gets +8.
+        let (aw, ah) = (aw + 15, ah + 8);
+        let prod = aw * ah;
+        if prod <= MAX_BITMAP_CELLS { (vw, vh) }
+        else if aw >= ah { ((vw as u64 * MAX_BITMAP_CELLS / prod) as u32, vh) }
+        else { (vw, (vh as u64 * MAX_BITMAP_CELLS / prod) as u32) }
+    };
 
     // Lock grid for snapshot
     let mut g = lock_grid(grid);

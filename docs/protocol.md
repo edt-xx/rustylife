@@ -40,6 +40,14 @@ All other fields (`gen`, `pop`, `ol_len`, `scale`, `hashlife_mode`, `proto_versi
 1. **bits** — `(vw*vh+7)/8` bytes. Bit index `idx = y*vw + x`; bit `(idx & 7)` of byte `idx >> 3` (bit 0 of the first byte = leftmost cell of the first row). 1 = cell (vx+x, vy+y) alive.
 2. **overlay** — `ol_len` bytes, same bit layout. Classic: cells inside active 4×4 tiles (`STATIC_SIZE` = 4). HashLife: present but all zeros.
 
+## Response bitmap cap
+
+The server caps the response bitmap — the requested post-aggregation cell count `ceil(vw/scale) x ceil(vh/scale)`, plus the alignment edge buffer (`align_viewport` adds up to 15 aggregated cells on x — byte-alignment seam shift — and 8 on y — row-alignment seam shift — before padding both to multiples of 8) — at `MAX_BITMAP_CELLS` (64M cells = 8 MiB), preserving aspect (the larger dimension is scaled down). This stops a malformed request from forcing a huge allocation: `vec!` aborts on OOM, which the request `catch_unwind` cannot catch.
+
+Legitimate requests never hit the cap: the largest response bitmap is the window's pixel count at 1px zoom, and every sub-pixel zoom level (1/2 ... 1/1024) sends that same window-pixel-sized bitmap (the raw request dims grow, but the server allocates only the aggregated bitmap).
+
+The cap value is sent to the frontend at serve time: the server injects it into the page as the JS constant `MAX_BITMAP_CELLS` (the served HTML contains the resolved number).
+
 ## Version detection (client)
 
 - Old format (no proto_version): 48-byte header.

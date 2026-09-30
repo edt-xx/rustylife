@@ -100,6 +100,7 @@ function fmtStep(n){ return String(n).padStart(6, ' '); }
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125,0.00390625,0.001953125,0.0009765625]; // 1/1024
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
+const MAX_BITMAP_CELLS = __MAX_BITMAP_CELLS__; // server-injected: /state response bitmap cap (docs/protocol.md)
 
 // Format cell size for display (show fractions like 1/2, 1/4 instead of 0.5, 0.25)
 function formatCellSize(size) {
