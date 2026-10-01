@@ -839,7 +839,7 @@ fn export_rle(cells: &[(u64, u64)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use game_of_life::hashlife::{coord_unpack, GRID_OFFSET, HASHLIFE_OFFSET, HashLife};
+    use game_of_life::hashlife::{coord_unpack, FRONTEND_OFFSET, GRID_OFFSET, HASHLIFE_OFFSET, HashLife};
 
     fn classic_of(g: &Grid) -> &Classic {
         match &g.engine {
@@ -940,6 +940,99 @@ mod tests {
         }
 
         assert_eq!(hl_cells(hl_of(&a)), hl_cells(hl_of(&b)), "toggle path diverged");
+    }
+
+    /// Blinker: period 2 — horizontal at gen 0, vertical at gen 1, back at gen 2.
+    #[test]
+    fn test_classic_blinker_period() {
+        let mut c = Classic::new();
+        c.load_pattern(&vec![(0, 0), (1, 0), (2, 0)], GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let mut g = Grid { generation: 0, births: 0, deaths: 0, engine: Engine::Classic(c) };
+        let gen0 = classic_cells(classic_of(&g));
+        assert_eq!(gen0, vec![(0, 0), (1, 0), (2, 0)]);
+        g.step();
+        assert_eq!(classic_cells(classic_of(&g)), vec![(1, -1), (1, 0), (1, 1)],
+            "blinker must be vertical at gen 1");
+        g.step();
+        assert_eq!(classic_cells(classic_of(&g)), gen0, "blinker period-2 broken");
+    }
+
+    /// Glider in this orientation: period 4, translates (+1, +1) per period.
+    #[test]
+    fn test_classic_glider_translation() {
+        let mut c = Classic::new();
+        let glider = vec![(40, 0), (41, 1), (39, 2), (40, 2), (41, 2)];
+        c.load_pattern(&glider, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let mut g = Grid { generation: 0, births: 0, deaths: 0, engine: Engine::Classic(c) };
+        for _ in 0..4 { g.step(); }
+        assert_eq!(classic_cells(classic_of(&g)),
+            vec![(40, 3), (41, 1), (41, 3), (42, 2), (42, 3)],
+            "glider must translate (+1, +1) per 4 generations");
+    }
+
+    /// Classic direct manipulation: toggle on/off, clear, and randomize at
+    /// the density extremes (1.0 = full box, 0.0 = empty).
+    #[test]
+    fn test_classic_toggle_clear_randomize() {
+        let mut c = Classic::new();
+        assert_eq!(c.alive.len(), 0);
+        c.toggle(GRID_OFFSET as i64, GRID_OFFSET as i64);
+        assert_eq!(c.alive.len(), 1);
+        c.toggle(GRID_OFFSET as i64, GRID_OFFSET as i64);
+        assert_eq!(c.alive.len(), 0, "toggling the same cell off must empty the grid");
+        c.clear();
+        assert_eq!(c.alive.len(), 0);
+        c.randomize(GRID_OFFSET as i64, GRID_OFFSET as i64, 11, 1.0);
+        assert_eq!(c.alive.len(), 11 * 11, "density 1.0 fills the whole box");
+        c.randomize(GRID_OFFSET as i64, GRID_OFFSET as i64, 11, 0.0);
+        assert_eq!(c.alive.len(), 0, "density 0.0 produces an empty grid");
+        c.randomize(GRID_OFFSET as i64, GRID_OFFSET as i64, 3, 1.0);
+        assert_eq!(c.alive.len(), 9);
+    }
+
+    /// Classic: load_pattern then frontend_cells must return the exact
+    /// pattern in its u32 (GRID_OFFSET) space — including negative offsets.
+    #[test]
+    fn test_classic_load_frontend_cells_roundtrip() {
+        let cells = vec![(10, -5), (11, 5), (-7, 9)];
+        let mut e = Engine::Classic(Classic::new());
+        e.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let mut got: Vec<(i64, i64)> = e.frontend_cells().iter()
+            .map(|&(x, y)| (x as i64 - GRID_OFFSET as i64, y as i64 - GRID_OFFSET as i64))
+            .collect();
+        got.sort();
+        let mut want = cells;
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// HashLife engine: the same round trip in frontend (2e15) space —
+    /// exercises the production frontend_to_hashlife / hashlife_to_frontend
+    /// path taken by Engine::load_pattern / Engine::frontend_cells.
+    #[test]
+    fn test_hashlife_engine_load_frontend_cells_roundtrip() {
+        let cells = vec![(10, -5), (11, 5), (-7, 9)];
+        let mut e = Engine::HashLife(HashLife::new());
+        e.load_pattern(&cells, FRONTEND_OFFSET as i64, FRONTEND_OFFSET as i64);
+        let mut got: Vec<(i64, i64)> = e.frontend_cells().iter()
+            .map(|&(x, y)| (x as i64 - FRONTEND_OFFSET as i64, y as i64 - FRONTEND_OFFSET as i64))
+            .collect();
+        got.sort();
+        let mut want = cells;
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// Classic -> hashlife -> classic conversion must preserve every cell
+    /// (the engine-switch round trip through to_hashlife / from_hashlife).
+    #[test]
+    fn test_classic_hashlife_roundtrip() {
+        let mut c = Classic::new();
+        c.load_pattern(&engine_test_pattern(), GRID_OFFSET as i64, GRID_OFFSET as i64);
+        let hf = c.to_hashlife();
+        let back = Classic::from_hashlife(&hf);
+        assert_eq!(classic_cells(&back), classic_cells(&c),
+            "classic -> hashlife -> classic must preserve every cell");
     }
 
     /// Classic-engine stepping benchmark, gated behind the CLASSIC_BENCH env var
