@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! GOLDE-style HashLife implementation.
 //!
 //! Core design:
@@ -137,9 +136,6 @@ pub const FALSE_NODE: u32 = 0;
 
 /// TRUE_NODE = index 1 (static alive leaf, children all TRUE_NODE)
 pub const TRUE_NODE: u32 = 1;
-
-/// Sentinel for advance_result meaning "no cached fast result"
-const NO_FAST_CACHE: u32 = u32::MAX;
 
 /// Bitmasks for extracting 2x2 quadrants from a 16-bit 4x4 grid.
 const MASK_NW: u16 = 0xCC00;
@@ -813,56 +809,9 @@ fn decode_level2(cache: &mut HashLifeCache, bits: u16) -> u32 {
     cache.find_or_create(q_nw, q_ne, q_sw, q_se)
 }
 
-/// Decode 16-bit value into a level-1 node (2x2 grid).
-/// GOLDE's DecodeLevel2 does this — creates 4 leaf children from
-/// the center 2x2 of the 4x4 result. Used by advance_base_two_gen.
-fn decode_level1(cache: &mut HashLifeCache, bits: u16) -> u32 {
-    // Center 2x2 of the 4x4 result:
-    // NW quadrant: bits 15,14,11,10 → SE corner is bit 10
-    // NE quadrant: bits 13,12,9,8 → SW corner is bit 9
-    // SW quadrant: bits 7,6,3,2 → NE corner is bit 6
-    // SE quadrant: bits 5,4,1,0 → NW corner is bit 5
-    cache.find_or_create(
-        if ((bits >> 10) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
-        if ((bits >> 9) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
-        if ((bits >> 6) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
-        if ((bits >> 5) & 1) != 0 { TRUE_NODE } else { FALSE_NODE },
-    )
-}
-
 // ============================================================================
 // Advance functions
 // ============================================================================
-
-/// Ensure a node is at exactly level 1 (2x2 of leaf cells)
-fn ensure_level1(cache: &mut HashLifeCache, idx: u32) -> u32 {
-    if idx == FALSE_NODE {
-        cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE)
-    } else if idx == TRUE_NODE {
-        cache.find_or_create(TRUE_NODE, TRUE_NODE, TRUE_NODE, TRUE_NODE)
-    } else {
-        idx // already a proper level-1 node
-    }
-}
-
-/// Ensure a node is at exactly level 2 (4x4 grid)
-fn ensure_level2(cache: &mut HashLifeCache, idx: u32) -> u32 {
-    if idx == FALSE_NODE {
-        let l1 = cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE);
-        cache.find_or_create(l1, l1, l1, l1)
-    } else if idx == TRUE_NODE {
-        let l1 = cache.find_or_create(TRUE_NODE, TRUE_NODE, TRUE_NODE, TRUE_NODE);
-        cache.find_or_create(l1, l1, l1, l1)
-    } else {
-        // Check if grandchildren are at level 1
-        let c = cache.get_node(idx);
-        let nw = ensure_level1(cache, c.north_west);
-        let ne = ensure_level1(cache, c.north_east);
-        let sw = ensure_level1(cache, c.south_west);
-        let se = ensure_level1(cache, c.south_east);
-        cache.find_or_create(nw, ne, sw, se)
-    }
-}
 
 /// Build quadtree directly from packed cell list (no 2D grid allocation).
 /// Partitions cells into quadrants recursively, creating leaf nodes at 8x8 blocks.
@@ -894,30 +843,6 @@ fn build_quadtree_from_cells(cache: &mut HashLifeCache, cells: &[u128], ox: u64,
     let ne = build_quadtree_from_cells(cache, &ne_cells, ox + half as u64, oy, half, depth - 1);
     let sw = build_quadtree_from_cells(cache, &sw_cells, ox, oy + half as u64, half, depth - 1);
     let se = build_quadtree_from_cells(cache, &se_cells, ox + half as u64, oy + half as u64, half, depth - 1);
-    cache.find_or_create(nw, ne, sw, se)
-}
-
-/// Ensure a node is at exactly level 3 (8x8 grid) by expanding collapsed children.
-/// When find_or_create collapses identical children, a node that should be
-/// at level 3 may actually be at a lower level. This function rebuilds the
-/// node to ensure proper level-3 structure.
-fn ensure_level3(cache: &mut HashLifeCache, node_idx: u32) -> u32 {
-    if node_idx == FALSE_NODE {
-        let l1 = cache.find_or_create(FALSE_NODE, FALSE_NODE, FALSE_NODE, FALSE_NODE);
-        let l2 = cache.find_or_create(l1, l1, l1, l1);
-        return cache.find_or_create(l2, l2, l2, l2);
-    }
-    if node_idx == TRUE_NODE {
-        let l1 = cache.find_or_create(TRUE_NODE, TRUE_NODE, TRUE_NODE, TRUE_NODE);
-        let l2 = cache.find_or_create(l1, l1, l1, l1);
-        return cache.find_or_create(l2, l2, l2, l2);
-    }
-
-    let node = cache.get_node(node_idx);
-    let nw = ensure_level2(cache, node.north_west);
-    let ne = ensure_level2(cache, node.north_east);
-    let sw = ensure_level2(cache, node.south_west);
-    let se = ensure_level2(cache, node.south_east);
     cache.find_or_create(nw, ne, sw, se)
 }
 
@@ -1091,8 +1016,8 @@ fn advance_slow(cache: &mut HashLifeCache, slow_cache_n: &mut AHashMap<u64, u32>
     if node_idx == TRUE_NODE { return TRUE_NODE; }
     if level < 3 { return node_idx; }
 
-    // NOTE: advance_slow must NOT read/write advance_result.
-    // That field is exclusively for advance_fast (multi-gen cache).
+    // NOTE: advance_slow must NOT read/write fast_cache.
+    // That cache is exclusively for advance_fast (multi-gen cache).
     // advance_slow only uses slow_cache (persistent, cross-step).
 
     // Check slow cache — packed u64 key: node_idx in high 32 bits,
@@ -1251,12 +1176,14 @@ fn count_cells(cache: &mut HashLifeCache, node_idx: u32, depth: u32) -> usize {
 }
 
 /// Collect alive cells from a node (relative coordinates, no packing)
+#[cfg(test)]
 fn collect_alive_helper(cache: &HashLifeCache, node_idx: u32, depth: u32) -> Vec<(u32, u32)> {
     let mut result = Vec::new();
     collect_alive_rel(cache, node_idx, depth, 0, 0, &mut result);
     result
 }
 
+#[cfg(test)]
 fn collect_alive_rel(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, oy: u32, result: &mut Vec<(u32, u32)>) {
     if node_idx == FALSE_NODE { return; }
     if node_idx == TRUE_NODE {
@@ -1281,6 +1208,7 @@ fn collect_alive_rel(cache: &HashLifeCache, node_idx: u32, depth: u32, ox: u32, 
 }
 
 /// Rebuild tree in new cache by walking old tree
+#[cfg(test)]
 fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: u32, old_cache: &HashLifeCache) -> u32 {
     if old_idx == FALSE_NODE { return FALSE_NODE; }
     if old_idx == TRUE_NODE { return TRUE_NODE; }
