@@ -450,7 +450,7 @@ function drawGrid(data) {
                 bookmarks[key].y += delta;
             }
         }
-        camX = coordOffset; camY = coordOffset;
+        camX += delta; camY += delta;
         imgData = null;
         document.getElementById('hashlifeBtn').textContent = hashlifeMode ? 'Classic' : 'HashLife';
         savePrefs();
@@ -1178,7 +1178,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 bookmarks[key].y += delta;
             }
         }
-        camX = coordOffset; camY = coordOffset;
+        camX += delta; camY += delta;
         savePrefs();
         await call({action:'toggle-hashlife'});
         this.textContent = hashlifeMode ? 'Classic' : 'HashLife';
