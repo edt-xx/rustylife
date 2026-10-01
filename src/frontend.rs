@@ -101,6 +101,7 @@ var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.0
 var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
 var cellSize = ZOOM_LEVELS[zoomIdx];
 const MAX_BITMAP_CELLS = __MAX_BITMAP_CELLS__; // server-injected: /state response bitmap cap (docs/protocol.md)
+function stateMaxCells(){ return (window.innerWidth + 16) * (window.innerHeight + 16); } // per-request budget: window px + server alignment edge budget (+15/+8)
 
 // Format cell size for display (show fractions like 1/2, 1/4 instead of 0.5, 0.25)
 function formatCellSize(size) {
@@ -652,7 +653,7 @@ async function refresh() {
     var vp = calcCells(cellSize);
     var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
     var reqCamX = camX, reqCamY = camY; // viewport this request was made for
-    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
     var seq = ++refreshSeq;
 
     // Wait until gen has advanced (avoid getting stale cached state)
@@ -685,7 +686,7 @@ async function zoomRefresh() {
             ensureCanvasSize();
             var vp = calcCells(cellSize);
             var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
-            var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+            var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
             var r = await fetch(url);
             var data = await r.arrayBuffer();
             drawGrid(data);
@@ -703,7 +704,7 @@ async function syncWithServer() {
     var vp = calcCells(cellSize);
     var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
     var reqCamX = camX, reqCamY = camY; // viewport this request was made for
-    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale;
+    var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
     try {
         var r = await fetch(url);
         var data = await r.arrayBuffer();

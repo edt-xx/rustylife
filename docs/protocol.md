@@ -1,9 +1,9 @@
 # /state wire protocol
 
-Endpoint: `GET /state?vx=<u64>&vy=<u64>&vw=<u32>&vh=<u32>&scale=<u32>`
+Endpoint: `GET /state?vx=<u64>&vy=<u64>&vw=<u32>&vh=<u32>&scale=<u32>` (+ optional `&maxcells=<u64>`)
 Response: `application/octet-stream` — a big-endian u32 header followed by two packed bitmaps.
 
-Defaults: vx=0, vy=0, vw=530, vh=300, scale=1. Coordinates are frontend-space; the server converts them internally in HashLife mode.
+Defaults: vx=0, vy=0, vw=530, vh=300, scale=1. Coordinates are frontend-space; the server converts them internally in HashLife mode. maxcells omitted/malformed → the hard ceiling (64M) applies.
 
 ## Header — 13 fields × 4 bytes (52 bytes), big-endian u32
 
@@ -42,7 +42,7 @@ All other fields (`gen`, `pop`, `ol_len`, `scale`, `hashlife_mode`, `proto_versi
 
 ## Response bitmap cap
 
-The server caps the response bitmap — the requested post-aggregation cell count `ceil(vw/scale) x ceil(vh/scale)`, plus the alignment edge buffer (`align_viewport` adds up to 15 aggregated cells on x — byte-alignment seam shift — and 8 on y — row-alignment seam shift — before padding both to multiples of 8) — at `MAX_BITMAP_CELLS` (64M cells = 8 MiB), preserving aspect (the larger dimension is scaled down). This stops a malformed request from forcing a huge allocation: `vec!` aborts on OOM, which the request `catch_unwind` cannot catch.
+The server caps the response bitmap — the requested post-aggregation cell count `ceil(vw/scale) x ceil(vh/scale)`, plus the alignment edge buffer (`align_viewport` adds up to 15 aggregated cells on x — byte-alignment seam shift — and 8 on y — row-alignment seam shift — before padding both to multiples of 8) — at the effective cap `min(MAX_BITMAP_CELLS, maxcells)` (the optional per-request `maxcells` param is the client's declared window pixel budget; `MAX_BITMAP_CELLS` = 64M cells = 8 MiB is the hard ceiling), preserving aspect (the larger dimension is scaled down). This stops a malformed request from forcing a huge allocation: `vec!` aborts on OOM, which the request `catch_unwind` cannot catch.
 
 Legitimate requests never hit the cap: the largest response bitmap is the window's pixel count at 1px zoom, and every sub-pixel zoom level (1/2 ... 1/1024) sends that same window-pixel-sized bitmap (the raw request dims grow, but the server allocates only the aggregated bitmap).
 

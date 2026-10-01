@@ -137,10 +137,19 @@ fn serve_state(
     let vh: u32 = params.get("vh").and_then(|s| s.parse().ok()).unwrap_or(300);
     let scale: u32 = params.get("scale").and_then(|s| s.parse().ok()).unwrap_or(1);
 
-    // Cap the response bitmap (post-aggregation cell count) at MAX_BITMAP_CELLS,
-    // preserving aspect. Legitimate requests never hit the cap (largest is the
-    // window's pixel count at 1px); this only triggers on malformed requests.
+    // Cap the response bitmap (post-aggregation cell count) at the effective
+    // cap — min(MAX_BITMAP_CELLS, the client's per-request maxcells param) —
+    // preserving aspect. The client declares its window pixel budget so the
+    // cap tracks resizes / dual screens; absent/malformed values fall back to
+    // the hard ceiling (previous behavior). Legitimate requests never hit the
+    // cap (largest is the window's pixel count at 1px); it only triggers on
+    // malformed requests.
     let scale = scale.max(1);
+    let cap: u64 = params.get("maxcells")
+        .and_then(|s| s.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(MAX_BITMAP_CELLS)
+        .min(MAX_BITMAP_CELLS);
     let (vw, vh) = {
         let aw = if scale > 1 { (vw as u64 + scale as u64 - 1) / scale as u64 } else { vw as u64 };
         let ah = if scale > 1 { (vh as u64 + scale as u64 - 1) / scale as u64 } else { vh as u64 };
@@ -152,9 +161,9 @@ fn serve_state(
         // aggregated row (row alignment, unit_y = scale) -> y gets +8.
         let (aw, ah) = (aw + 15, ah + 8);
         let prod = aw * ah;
-        if prod <= MAX_BITMAP_CELLS { (vw, vh) }
-        else if aw >= ah { ((vw as u64 * MAX_BITMAP_CELLS / prod) as u32, vh) }
-        else { (vw, (vh as u64 * MAX_BITMAP_CELLS / prod) as u32) }
+        if prod <= cap { (vw, vh) }
+        else if aw >= ah { ((vw as u64 * cap / prod) as u32, vh) }
+        else { (vw, (vh as u64 * cap / prod) as u32) }
     };
 
     // Lock grid for snapshot
