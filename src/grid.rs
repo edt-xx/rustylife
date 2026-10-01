@@ -70,7 +70,7 @@ pub const STATIC_SIZE: u32 = 4;
 pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] =
     [(-1,-1),(-1,0),(-1,1),(0,-1),(0,1),(1,-1),(1,0),(1,1)];
 
-/// Resizable bloom filter — power-of-2 size, 2 hashes, ~3% FP rate
+/// Resizable bloom filter — power-of-2 size, 2 hashes, ~5% FP rate
 /// Power-of-2 eliminates division (uses bitwise AND). Single hash + split saves multiplies.
 pub struct BloomFilter {
     pub bits: Vec<u64>,
@@ -86,8 +86,8 @@ impl BloomFilter {
         1usize.saturating_mul(2).pow(64 - n.leading_zeros())
     }
 
-    /// Resize bloom filter for `expected_elements` with ~3% false positive rate
-    /// With k=2 hashes: m ≈ 11 * n gives ~3% FP rate
+    /// Resize bloom filter for `expected_elements` with ~5% false positive rate
+    /// With k=2 hashes: m = 8 * n gives ~5% FP rate (rounded up to a power of 2)
     pub fn resize(&mut self, expected_elements: usize) {
         if expected_elements == 0 {
             self.bits.clear();
@@ -332,12 +332,6 @@ impl Classic {
         Coord::unpack(k)
     }
 
-    /// Tile coordinate: round down to nearest STATIC_SIZE boundary.
-    //#[inline]
-    //pub fn tile(x: u32) -> u32 {
-    //    x - x % STATIC_SIZE
-    //}
-
     /// tile
     #[inline]
     pub fn mod_tile(k: u64) -> (u32, u32) {
@@ -412,10 +406,7 @@ impl Classic {
         }
         // Populate active_bloom from active_tiles
         self.active_bloom.resize(self.active_tiles.len());
-
-        // Populate expanded_bloom with cell-level border coordinates
         let ss = STATIC_SIZE as u32;
-        // self.expanded_bloom.resize(self.active_tiles.len() * 15);
         for &tk in &self.active_tiles {
             let (tx, ty) = Self::unpack(tk);
 
@@ -428,34 +419,6 @@ impl Classic {
             self.active_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
             self.active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty));
             self.active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-
-            // Top border (y = ty-1, x = tx-1 .. tx+ss)
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
-
-            // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
-            // self.expanded_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
-
-            // Left border (x = tx-1, y = ty .. ty+ss-1)
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
-
-            // Right border (x = tx+ss, y = ty .. ty+ss-1)
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
-            // self.expanded_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
         }
     }
 
@@ -465,7 +428,6 @@ impl Classic {
         self.alive.clear();
         self.alive_index.clear();
         self.active_tiles.clear();
-        //self.expanded_bloom.resize(0);
         self.active_bloom.resize(0);
         for dx in -(half as i32)..=(half as i32) {
             for dy in -(half as i32)..=(half as i32) {
@@ -483,7 +445,6 @@ impl Classic {
         self.alive.clear();
         self.alive_index.clear();
         self.active_tiles.clear();
-        //self.expanded_bloom.resize(0);
         self.active_bloom.resize(0);
         self.active_count = 0;
         self.active_ratio = 0.0;

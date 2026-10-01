@@ -2057,7 +2057,6 @@ pub fn step(&mut self) {
             }
 
             let target_depth = k;
-            //let dbg_depth = self.depth;
 
             self.root = advance_node(&mut self.cache, &mut self.slow_cache_n, &mut self.slow_cache_n1,
                                       self.root, self.depth, target_depth,
@@ -2072,10 +2071,6 @@ pub fn step(&mut self) {
             let total = self.slow_cache_hits + self.slow_cache_misses;
             active = total > 0;
             let cache_size = self.slow_cache_n.len() + self.slow_cache_n1.len();
-            //eprintln!("[step_n] multi-gen  depth={} k={} advance_gens={} routed={} total={}",
-            //          dbg_depth, k, advance_gens,
-            //          if dbg_depth - 2 > k { "slow(top)->mixed" } else { "fast" },
-            //          total);
             if total > 0 {
                 self.last_cache_size = cache_size as u32;
                 self.last_cache_hit_rate = ((self.slow_cache_hits as f64 / total as f64) * 1000.0).round() as u32;
@@ -2158,10 +2153,6 @@ pub fn step(&mut self) {
         self.prev_interval_rate = rate;
         self.interval_rate_set = true;
 
-        // DIAGNOSTIC (temporary): one line per actual rotation, pre-swap state.
-        // eprintln!("[rotate] N={} n={} n1={} rate={} prev={} d={}",
-        //    self.rotate_steps, self.slow_cache_n.len(), self.slow_cache_n1.len(),
-        //    rate, prev, d);
         std::mem::swap(&mut self.slow_cache_n, &mut self.slow_cache_n1);
         self.slow_cache_n1.clear();
         self.interval_hits = 0;

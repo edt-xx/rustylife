@@ -143,15 +143,11 @@ impl Classic {
         // using a second bloomfilter with 20 surrounding cells also works but ends up slower.
         // One bloomfilter check per cell is measurably faster.
         let t_filter = Instant::now();
-        //let bloom = &self.expanded_bloom;
         let active_bloom = &self.active_bloom;
-        //let active_tiles = &self.active_tiles;
         let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
         let chunk_size = self.alive.len() / n_procs;
         let mut chunks: Vec<Vec<u64>> = self.alive.par_chunks(chunk_size)
             .map(|chunk| chunk.iter()
-                // .filter(|k| active_bloom.contains(tile_key(**k)) || bloom.contains(**k))
-                // .filter(|k| active_bloom.contains(tile_key(**k)) || active_tiles.contains(&tile_key(**k)))
                 .filter(|k| active_bloom.contains(tile_key(**k)))
                 .copied()
                 .collect())
@@ -261,9 +257,6 @@ impl Classic {
 
                 // Remaining deaths — swap-remove (lookup indices fresh)
                 // NOTE: sort approach (sort descending by index, use pre-computed idx) was slower for this pattern
-                // let mut remaining = death_indices[paired..].to_vec();
-                // remaining.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-                // for &(d, idx) in &remaining { ... }
                 for &(d, _) in &death_indices[paired..] {
                     let idx = alive_index.remove(&d).unwrap();
                     let last = alive.len() - 1;
@@ -286,11 +279,9 @@ impl Classic {
             },
             || {
                 let t = Instant::now();
-                // let bloom = unsafe { &mut *(bloom_ptr as *mut BloomFilter) };
                 let active_bloom = &mut grid.active_bloom;
                 let active = &grid.active_tiles;
                 // max of 15* active.len()
-                // bloom.resize(active.len()*15);
                 // max of active.len() 2* to lower error rate (ER 1.2)
                 // 9 unique inserts/tile: 9x ER 4.9%, x15 1.9, x21 1, x27 .5 
                 // 5 unique inserts/tile: 5x ER 4.9%, x9  1.7, x12 1, x17 .5
@@ -309,35 +300,6 @@ impl Classic {
                     active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty));
                     active_bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
                     active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-                    
-
-                    // Top border (y = ty-1, x = tx-1 .. tx+ss)
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_sub(1)));
-                    // bloom.insert(Coord::pack(tx, ty.wrapping_sub(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_sub(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_sub(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_sub(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(1)));
-
-                    // Bottom border (y = ty+ss, x = tx-1 .. tx+ss)
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(ss)));
-                    // bloom.insert(Coord::pack(tx, ty.wrapping_add(ss)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(1), ty.wrapping_add(ss)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(2), ty.wrapping_add(ss)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(3), ty.wrapping_add(ss)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
-
-                    // Left border (x = tx-1, y = ty .. ty+ss-1)
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty));
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(2)));
-                    // bloom.insert(Coord::pack(tx.wrapping_sub(1), ty.wrapping_add(3)));
-
-                    // Right border (x = tx+ss, y = ty .. ty+ss-1)
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(1)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(2)));
-                    // bloom.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(3)));
                 }
                 t.elapsed().as_micros()
             },
