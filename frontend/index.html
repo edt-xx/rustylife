@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Game of Life</title>
+<style>__CSS__</style></head><body>
+<div id="topInfo">
+  <div id="infoLine1">
+    <span id="genLabel"></span>&nbsp;&nbsp;
+    <span id="fpsLabel"></span>&nbsp;&nbsp;
+    <span id="birthsLabel"></span>&nbsp;&nbsp;
+    <span id="deathsLabel"></span>&nbsp;&nbsp;
+    <span id="popLabel"></span>&nbsp;&nbsp;
+    <span id="heapLabel"></span>
+  </div>
+  <div id="infoLine2">
+    <span id="zoomLabel"></span>&nbsp;&nbsp;
+    <span id="camLabel"></span>
+  </div>
+</div>
+<div id="viewport"><canvas id="main"></canvas></div>
+<div id="pasteModal">
+  <div class="modal-content">
+    <textarea id="pasteArea" placeholder="Paste .lif, .rle, or .mc pattern here..."></textarea>
+    <input type="file" id="readFileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
+    <div class="modal-buttons">
+      <button id="pasteSaveBtn">Save</button>
+      <button id="pasteReadBtn">Read</button>
+      <button id="pasteCopyBtn">Copy</button>
+      <button id="pasteRandomBtn">Random</button>
+      <button id="pasteOkBtn">Paste</button>
+      <button id="pasteClearBtn">Clear</button>
+      <button id="pasteCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+<div id="helpModal">
+    <div class="help-text" id="helpText"></div>
+    <div class="modal-buttons">
+      <button id="helpOkBtn">Close</button>
+    </div>
+</div>
+<div id="bookmarkMenu">
+  <button id="bmSaveA">Save A</button>
+  <button id="bmSaveB">Save B</button>
+  <button id="bmSaveC">Save C</button>
+  <button id="bmGotoA">Goto A</button>
+  <button id="bmGotoB">Goto B</button>
+  <button id="bmGotoC">Goto C</button>
+</div>
+<div class="toolbar">
+  <button id="helpBtn">Help</button>
+  <div class="toolbar-content">
+    <button id="playBtn">&#9654; Play</button>
+    <button id="stepBtn">Step</button>
+    <label>Speed <input type="range" id="speedSlider" min="1" max="5" value="3"></label>
+    <label>Step <input type="range" id="stepSlider" min="0" max="13" value="0"> <span id="stepVal">     1</span></label>
+    <button id="stepPlusBtn">Step+1</button>
+
+    <button id="clearBtn">Clear</button>
+    <button id="loadBtn">Load</button>
+    <button id="pasteBtn">Edit</button>
+    <input type="file" id="fileInput" accept=".lif,.txt,.rle,.mc" style="display:none"/>
+    <button id="tracksBtn">Tracks</button>
+    <button id="hashlifeBtn">Classic</button>
+  </div>
+  <button id="quitBtn">Quit</button>
+</div>
+<script>__JS__</script></body></html>

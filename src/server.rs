@@ -64,8 +64,9 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
 const MAX_BITMAP_CELLS: u64 = 1 << 26; // 64M cells = 8 MiB bitmap
 
 fn serve_index() -> Response<Cursor<Vec<u8>>> {
-    use crate::frontend::FRONTEND;
-    let html = FRONTEND.replace("__MAX_BITMAP_CELLS__", &MAX_BITMAP_CELLS.to_string());
+    use crate::frontend::{FRONTEND_CSS, FRONTEND_HTML, FRONTEND_JS};
+    let js = FRONTEND_JS.replace("__MAX_BITMAP_CELLS__", &MAX_BITMAP_CELLS.to_string());
+    let html = FRONTEND_HTML.replace("__JS__", &js).replace("__CSS__", FRONTEND_CSS);
     serve_html(&html)
 }
 
