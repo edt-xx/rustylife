@@ -1,4 +1,29 @@
 //! Coordinate packing and the three-space converters (grid / frontend / hashlife).
+//!
+//! # Coordinate systems
+//!
+//! Three biased coordinate spaces share one convention: a real-world signed
+//! coordinate `r` is stored as `r + OFFSET` in a `u64`. The offset IS the
+//! origin: `x == OFFSET` means real-world `x == 0`.
+//!
+//! | space     | offset            | stored range (real coords) | used by |
+//! |-----------|-------------------|----------------------------|---------|
+//! | grid      | 2e9               | ~±2e9 (coords are u32)     | classic grid engine (`grid.rs`, packed `(u32,u32)` keys) |
+//! | frontend  | 2e15              | browser camera/viewport    | JS side — 2e15 ≪ 2^53, so coords stay exact as JS f64 doubles |
+//! | hashlife  | 9e18              | ~±9e18 (i64 headroom)      | hashlife engine tree coords |
+//!
+//! Converters (all pairs both ways) go through `i64` with `wrapping_add`/
+//! `wrapping_sub`, so they are exact for any real coord inside the hashlife
+//! range and round-trip identically even if a value wraps outside it
+//! (verified in `converter_tests`). Which pair is used where:
+//!
+//! - `frontend_to_hashlife` / `hashlife_to_frontend`: browser viewport
+//!   origin, camera center, paste anchors <-> engine tree coords.
+//! - `grid_to_hashlife` / `hashlife_to_grid`: handing patterns between the
+//!   classic grid engine and the hashlife engine (engine toggle, save/load).
+//!
+//! Never mix spaces: a frontend coord fed to the grid engine (or vice versa)
+//! is off by 2e15 - 2e9 and silently wrong — convert at the boundary.
 
 // Coord pack/unpack: u64 coords packed into u128
 pub fn coord_pack(x: u64, y: u64) -> u128 { (y as u128) << 64 | x as u128 }
