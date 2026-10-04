@@ -1108,4 +1108,43 @@ mod tests {
         eprintln!("[classic_bench] DONE gen={} in {:.1}s ({:.0} gens/sec overall) alive={} active_tiles={}",
             gen_done, el, gen_done as f64 / el, classic_of(&g).alive.len(), classic_of(&g).active_tiles.len());
     }
+
+    /// Proof test for MED #1: `insert_alive` never dedups. The frontend clears
+    /// before every load (app.js loadPattern -> action:'clear'), so an
+    /// *overlapping paste* is NOT a reachable trigger. The one reachable vector
+    /// is a pattern file that lists the SAME coordinate on two lines: a single
+    /// `load_pattern` call then pushes two copies into `alive` while
+    /// `alive_index.insert` overwrites k's entry with the newest index, so the
+    /// Vec and index diverge. Removing the cell leaves an orphan in the Vec that
+    /// the rules/render still iterate -> a "ghost" the index reports dead.
+    #[test]
+    fn test_load_pattern_duplicate_ghost_cell() {
+        let mut c = Classic::new();
+        // A .lif file with a duplicate coordinate line -> one load_pattern call
+        // carrying the same (x,y) twice. This survives the frontend's clear.
+        c.load_pattern(&[(0, 0), (0, 0)], 0, 0);
+
+        // The Vec now holds TWO copies; the index has ONE entry pointing at the
+        // newest copy. This divergence is the bug.
+        assert_eq!(c.alive.len(), 2, "alive Vec got a duplicate copy (insert_alive never dedups)");
+        assert_eq!(c.alive_index.len(), 1, "index has one entry for k (overwritten, orphaning the first copy)");
+
+        // Kill the cell (e.g. a click). remove_alive swap-removes the INDEXED copy only.
+        let k = Classic::k(0, 0);
+        c.remove_alive(k);
+
+        // Index says dead...
+        assert!(!c.contains_alive(k), "index reports the cell dead");
+        // ...but an orphan copy remains in the Vec the rules/render iterate.
+        let orphan = c.alive.iter().filter(|&&kk| kk == k).count();
+        assert_eq!(orphan, 1, "GHOST: orphaned copy still in the alive Vec after removal");
+
+        // CONSEQUENCE (the part that matters at runtime): the ghost is un-killable
+        // by clicking. toggle() checks contains_alive -> false, so it INSERTS again
+        // instead of removing, pushing yet another orphan. The cell keeps rendering
+        // alive (render iterates the Vec) no matter how many times you click it.
+        c.toggle(0, 0);
+        assert_eq!(c.alive.iter().filter(|&&kk| kk == k).count(), 2,
+            "clicking the ghost cell re-inserts it instead of killing it (Vec grows another orphan)");
+    }
 }
