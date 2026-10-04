@@ -698,8 +698,6 @@ async function animLoop() {
     setTimeout(animLoop, remaining > 0 ? remaining : 0);
 }
 
-canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
-
 // Helper: map click coords to grid cell
 // If clamp=true, clicks outside viewport map to nearest edge cell (for right-click center)
 function clickToGrid(e, clamp) {
