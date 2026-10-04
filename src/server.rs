@@ -161,7 +161,7 @@ fn serve_state(
         // unit_x = 8*scale raw cells) -> x gets +15; y shifts by <1
         // aggregated row (row alignment, unit_y = scale) -> y gets +8.
         let (aw, ah) = (aw + 15, ah + 8);
-        let prod = aw * ah;
+        let prod = aw.saturating_mul(ah);
         if prod <= cap { (vw, vh) }
         else if aw >= ah { ((vw as u64 * cap / prod) as u32, vh) }
         else { (vw, (vh as u64 * cap / prod) as u32) }
