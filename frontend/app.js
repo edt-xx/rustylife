@@ -5,7 +5,8 @@ const step = [1,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,1
 function fmtStep(n){ return String(n).padStart(6, ' '); }
 
 var ZOOM_LEVELS = [15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0.5,0.25,0.125,0.0625,0.03125,0.015625,0.0078125,0.00390625,0.001953125,0.0009765625]; // 1/1024
-var zoomIdx = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
+var DEFAULT_ZOOM_IDX = 12; // default to cellSize=3 (ZOOM_LEVELS[12] == 3)
+var zoomIdx = DEFAULT_ZOOM_IDX;
 var cellSize = ZOOM_LEVELS[zoomIdx];
 const MAX_BITMAP_CELLS = __MAX_BITMAP_CELLS__; // server-injected: /state response bitmap cap (docs/protocol.md)
 function stateMaxCells(){ return (window.innerWidth + 16) * (window.innerHeight + 16); } // per-request budget: window px + server alignment edge budget (+15/+8)
@@ -292,6 +293,7 @@ function savePrefs() {
     localStorage.setItem('gol_camX', camX);
     localStorage.setItem('gol_camY', camY);
     localStorage.setItem('gol_bookmarks', JSON.stringify(bookmarks));
+    localStorage.setItem('gol_zoom', zoomIdx);
 }
 
 function cancelRightTimer() {
@@ -1011,7 +1013,12 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('stepVal').textContent = fmtStep(stepCountVal);
     stepPlusBtn = document.getElementById('stepPlusBtn');
     stepPlusBtn.textContent = 'Step+1';
-    if (savedSpeed !== null) document.getElementById('speedSlider').value = Math.min(5, Math.max(1, Math.round(+savedSpeed / 10)));
+    if (savedSpeed !== null) document.getElementById('speedSlider').value = Math.min(5, Math.max(1, Math.round(+savedSpeed)));
+    var savedZoom = localStorage.getItem('gol_zoom');
+    if (savedZoom !== null) {
+        zoomIdx = Math.min(ZOOM_LEVELS.length - 1, Math.max(0, Math.round(+savedZoom)));
+        cellSize = ZOOM_LEVELS[zoomIdx];
+    }
     if (savedTracks !== null) {
         tracksEnabled = savedTracks === '1';
         document.getElementById('tracksBtn').textContent = tracksEnabled ? 'Active' : 'Tracks';
@@ -1094,6 +1101,13 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
     document.getElementById('clearBtn').addEventListener('click', async function() {
        stopAnim(); tracksEnabled = false; document.getElementById('tracksBtn').textContent = 'Tracks';
+       // Clear is a full reset: turn Tracks OFF and reset zoom to default.
+       // Resetting Tracks to OFF on Clear is the expected action (per Ed).
+       // Persist Tracks as '0' (not removeItem) so a reload can't fall back to
+       // a stale '1' and silently re-enable it. Reset zoomIdx in memory BEFORE
+       // savePrefs() below so the default zoom is what gets persisted.
+       localStorage.setItem('gol_tracks', '0');
+       zoomIdx = DEFAULT_ZOOM_IDX; cellSize = ZOOM_LEVELS[zoomIdx];
        lblGen = 0; // prevent false server restart detection
        coordOffset = hashlifeMode ? 2000000000000000 : 2000000000;
        camX = coordOffset; camY = coordOffset;
