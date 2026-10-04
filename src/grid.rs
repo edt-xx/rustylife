@@ -931,6 +931,50 @@ mod tests {
             "glider must translate (+1, +1) per 4 generations");
     }
 
+    /// Proof for SE finding #1 (2026-10-04): step.rs picks `n_procs = max_procs()`
+    /// when `alive.len() > 10 * max_procs()`, but chunks `alive_vec` — the
+    /// bloom-FILTERED vec. Survivors far from activity are deliberately dropped
+    /// by that filter (only tiles near births/deaths stay active), so a large
+    /// still field + a lone glider gives `alive_vec.len()` ≈ glider cells + bloom
+    /// FPs, far below `n_procs`, while `alive.len()` stays above the threshold:
+    /// `chunk_size = total / n_procs == 0` -> `par_chunks(0)` panics
+    /// ("chunk size cannot be 0"). Currently this test panics on step 2.
+    #[test]
+    fn test_sparse_active_region_no_panic() {
+        // Same physical-core count step.rs uses to pick n_procs.
+        let p = sysinfo::System::physical_core_count()
+            .map(|c| c as usize)
+            .unwrap_or_else(|| std::thread::available_parallelism()
+                .map(|n| n.get() / 2).unwrap_or(4));
+        let mut c = Classic::new();
+        // Stable field: 2x2 still-life blocks on a 4-spaced lattice, sized to
+        // ~12*p cells so alive.len() > 10*p at any core count (p=8 -> 105 cells).
+        let side = ((3 * p) as f64).sqrt().ceil() as i64; // ceil(sqrt(3p)) blocks/side
+        let mut field: Vec<(i64, i64)> = Vec::new();
+        for bx in 0..side {
+            for by in 0..side {
+                let (x, y) = (bx * 4, by * 4);
+                field.extend_from_slice(&[(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]);
+            }
+        }
+        c.load_pattern(&field, GRID_OFFSET as i64 + 1000, GRID_OFFSET as i64 + 1000);
+        // Lone glider far from the field — the only region with births/deaths.
+        let glider = vec![(40, 0), (41, 1), (39, 2), (40, 2), (41, 2)];
+        c.load_pattern(&glider, GRID_OFFSET as i64 + 20000, GRID_OFFSET as i64 + 20000);
+        assert!(c.alive.len() > 10 * p,
+            "field+glider ({}) must exceed 10*max_procs ({}) to take the parallel path",
+            c.alive.len(), 10 * p);
+
+        let mut generation = 0u32;
+        for _ in 0..8 {
+            c.step(&mut generation); // currently panics on step 2: par_chunks(0)
+        }
+        // Made it: field intact, glider still alive (population preserved ±FP
+        // cells never die — filter drops are not removals).
+        assert_eq!(c.alive.len(), (side * side) as usize * 4 + 5,
+            "field + glider population must survive 8 generations");
+    }
+
     /// Classic direct manipulation: toggle on/off, clear, and randomize at
     /// the density extremes (1.0 = full box, 0.0 = empty).
     #[test]

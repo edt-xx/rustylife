@@ -164,10 +164,13 @@ impl Classic {
 
         // Bloom filter will be resized (and cleared) at end of apply_rules
 
-        let n_procs = if self.alive.len() > 10 * max_procs() { max_procs() } else { 1 };
-
-        // Split into n_procs contiguous slices
+        // Split into n_procs contiguous slices. Threshold on the FILTERED count:
+        // survivors far from activity are dropped by the bloom filter, so
+        // alive_vec can be far smaller than alive (e.g. still field + lone
+        // glider). Sizing from alive.len() made chunk_size == 0 -> par_chunks(0)
+        // panicked (proof: grid.rs test_sparse_active_region_no_panic).
         let total = self.alive_vec.len();
+        let n_procs = if total > 10 * max_procs() { max_procs() } else { 1 };
         let chunk_size = total / n_procs;
 
         let t_nc = Instant::now();
