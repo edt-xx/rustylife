@@ -68,7 +68,7 @@ pub struct HashLife {
 
 /// Step-count controller tuning (see rotate_caches):
 const ROTATE_STEPS_INIT: u32 = 64;   // initial steps between rotations
-const ROTATE_STEPS_MIN: u32 = 4;     // floor for the adaptive step count
+const ROTATE_STEPS_MIN: u32 = 8;     // floor for the adaptive step count; >= max downward step (8) so checked_add_signed can never underflow
 const ROTATE_STEPS_MAX: u32 = 96;    // ceiling for the adaptive step count
 impl HashLife {
     pub fn new() -> Self {
