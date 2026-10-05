@@ -130,6 +130,9 @@ fn neighbor_count_worker(
 
 impl Classic {
     pub fn step(&mut self, generation: &mut u32) -> (u32, u32) {
+        // MED #3: a caught panic in a prior request may have left derived
+        // state inconsistent; repair from `alive` before touching it.
+        self.rebuild_if_dirty();
         if self.alive.is_empty() { return (0, 0); }
         let t_start = Instant::now();
         let (mut births, mut deaths) = (0u32, 0u32);

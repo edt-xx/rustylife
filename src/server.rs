@@ -4,7 +4,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use tiny_http::{Server, Response, StatusCode, Header};
 use serde_json::Value;
-use crate::grid::Grid;
+use crate::grid::{Engine, Grid};
 
 fn lock_grid(grid: &Arc<Mutex<Grid>>) -> MutexGuard<'_, Grid> {
     // Even if a previous request panicked while holding the lock, keep
@@ -48,6 +48,14 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
             Ok(resp) => resp,
             Err(_) => {
                 eprintln!("request to {path} panicked; serving 500");
+                // MED #3: the panic may have interrupted a mutation
+                // mid-way (e.g. after the active_tiles swap in
+                // apply_rules), leaving alive/alive_index half-updated.
+                // Mark Classic state suspect; the next step() re-derives
+                // every derived structure from `alive`.
+                if let Engine::Classic(c) = &mut lock_grid(&grid).engine {
+                    c.mark_dirty();
+                }
                 serve_error()
             }
         };

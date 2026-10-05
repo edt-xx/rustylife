@@ -245,6 +245,12 @@ pub struct Classic {
     pub(crate) deaths_buf: Vec<u64>,
     // Bloom filter for active tile keys — replaces HashSet.contains for speed
     pub(crate) active_bloom: BloomFilter,
+    /// MED #3: set by the server when a request panics (server.rs catches
+    /// per-request panics and tolerates mutex poisoning, so the process
+    /// survives a panic mid-`apply_rules` — after the `active_tiles` swap —
+    /// with `alive`/`alive_index` half-updated). `alive` is the source of
+    /// truth; the next `step()` re-derives every derived structure from it.
+    pub(crate) dirty: bool,
 }
 
 /// The two stepping engines. Grid holds exactly one at a time.
@@ -317,6 +323,7 @@ impl Classic {
             births_buf: Vec::with_capacity(256),
             deaths_buf: Vec::with_capacity(256),
             active_bloom: BloomFilter { bits: Vec::new(), size_bits: 0, mask: 0 },
+            dirty: false,
         }
     }
 
@@ -420,6 +427,34 @@ impl Classic {
             self.active_bloom.insert(Coord::pack(tx.wrapping_sub(ss), ty));
             self.active_bloom.insert(Coord::pack(tx.wrapping_add(ss), ty));
         }
+    }
+
+    /// MED #3: mark Classic state suspect after a caught mid-request panic.
+    pub(crate) fn mark_dirty(&mut self) { self.dirty = true; }
+
+    /// MED #3: if a prior request panicked mid-mutation (e.g. after the
+    /// `active_tiles` swap in `apply_rules`, leaving `alive`/`alive_index`
+    /// half-updated), re-derive every derived structure from `alive`, which
+    /// is the source of truth. Called at the top of `step()` so the next
+    /// generation starts from a consistent grid.
+    pub(crate) fn rebuild_if_dirty(&mut self) {
+        if !self.dirty { return; }
+        self.dirty = false;
+        // Rebuild alive_index as a bijection onto alive, dropping any
+        // duplicate keys a half-applied birth may have left behind.
+        self.alive_index.clear();
+        let mut write = 0usize;
+        for read in 0..self.alive.len() {
+            let k = self.alive[read];
+            if !self.alive_index.contains_key(&k) {
+                self.alive_index.insert(k, write);
+                self.alive[write] = k;
+                write += 1;
+            }
+        }
+        self.alive.truncate(write);
+        // Re-derive active_tiles + active_bloom from the population.
+        self.init_active();
     }
 
     pub fn randomize(&mut self, cx: i64, cy: i64, size: i64, density: f64) {
@@ -973,6 +1008,49 @@ mod tests {
         // cells never die — filter drops are not removals).
         assert_eq!(c.alive.len(), (side * side) as usize * 4 + 5,
             "field + glider population must survive 8 generations");
+    }
+
+    /// Proof + fix for SE finding #3 (2026-10-05). CORRECTION to the original
+    /// claim: the panic site first cited (step.rs death-processing
+    /// `alive_index.remove(&d).unwrap()`) is UNREACHABLE — the preceding
+    /// filter_map drops death keys missing from the index, and nc_dict keys
+    /// are unique so no death is processed twice. The real "corrupted state
+    /// served as healthy" mechanism needs NO panic at all: any desync
+    /// between `alive` and `alive_index` (e.g. MED #1 duplicate keys, which
+    /// `insert_alive` permits) is silently served and propagated by every
+    /// later step. The dirty-flag repair covers both: a caught request panic
+    /// marks the grid suspect (server.rs), and the next step() re-derives
+    /// every derived structure from `alive` (source of truth).
+    #[test]
+    fn test_dirty_flag_repairs_alive_index_desync() {
+        let cells = vec![(0, 0), (1, 0), (0, 1), (1, 1), (1, 1)]; // duplicate (1,1) — MED #1 path
+        // (a) Without repair: the desync persists silently across steps.
+        let mut c = Classic::new();
+        c.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        assert_eq!(c.alive.len(), 5);
+        assert_eq!(c.alive_index.len(), 4, "insert_alive (MED #1) leaves one ghost slot");
+        let mut generation = 0u32;
+        c.step(&mut generation); // no panic — the corruption is silent
+        assert_ne!(c.alive.len(), c.alive_index.len(),
+            "ghost copy survives un-indexed in `alive` — corrupted state served as healthy");
+
+        // (b) With the dirty flag: next step() re-derives from `alive` —
+        // dedup, bijection restored.
+        let mut c = Classic::new();
+        c.load_pattern(&cells, GRID_OFFSET as i64, GRID_OFFSET as i64);
+        c.mark_dirty();
+        let mut generation = 0u32;
+        c.step(&mut generation);
+        assert_eq!(generation, 1);
+        assert!(!c.dirty, "rebuild clears the suspect flag");
+        assert_eq!(c.alive.len(), c.alive_index.len(), "bijection must hold after rebuild");
+        // Dedup keeps the block (a still life — survives intact) with (1,1)
+        // present exactly once; the ghost slot is gone.
+        assert_eq!(c.alive.len(), 4, "still-life block must survive");
+        let dup = c.alive.iter()
+            .filter(|&k| Classic::unpack(*k) == (GRID_OFFSET as u32 + 1, GRID_OFFSET as u32 + 1))
+            .count();
+        assert_eq!(dup, 1, "the ghost duplicate of (1,1) must be deduped away");
     }
 
     /// Classic direct manipulation: toggle on/off, clear, and randomize at
