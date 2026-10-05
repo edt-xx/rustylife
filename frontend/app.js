@@ -603,9 +603,14 @@ async function zoomRefresh() {
             ensureCanvasSize();
             var vp = calcCells(cellSize);
             var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
-            var url = '/state?vx=' + camX + '&vy=' + camY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
+            var reqCamX = camX, reqCamY = camY; // viewport snapshot for this request
+            var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
             var r = await fetch(url);
             var data = await r.arrayBuffer();
+            // Camera moved during the fetch — bitmap is for the old viewport
+            // (header has no vx/vy, drawGrid assumes current cam). Refetch at
+            // the current position instead of painting a misaligned frame.
+            if (camX !== reqCamX || camY !== reqCamY) continue;
             drawGrid(data);
             // If still panning, keep refreshing with latest cam position
             if (!panning) break;
