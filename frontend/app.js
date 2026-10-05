@@ -1022,7 +1022,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         stepCountVal = step[0];
     }
     document.getElementById('stepVal').textContent = fmtStep(stepCountVal);
-    stepPlusBtn = document.getElementById('stepPlusBtn');
+    var stepPlusBtn = document.getElementById('stepPlusBtn');
     stepPlusBtn.textContent = 'Step+1';
     if (savedSpeed !== null) document.getElementById('speedSlider').value = Math.min(5, Math.max(1, Math.round(+savedSpeed)));
     var savedZoom = localStorage.getItem('gol_zoom');
