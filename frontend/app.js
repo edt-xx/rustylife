@@ -650,7 +650,7 @@ var running = false;
 var lastTime = 0, lastGenNum = 0; // for G/s calculation
 var tracksBeforePan = false; // restore tracks after pan
 
-function stopAnim() { running = false; lblFps = 'Gen/s: 0'; document.getElementById('playBtn').innerHTML = '&#9654; Play'; fetch('/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({action:'stop'})}); }
+function stopAnim() { running = false; lblFps = 'Gen/s: 0'; document.getElementById('playBtn').innerHTML = '&#9654; Play'; }
 
 function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastTime = performance.now(); animLoop(); }
 

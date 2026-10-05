@@ -114,6 +114,21 @@ fn serve_json(body: &str) -> Response<Cursor<Vec<u8>>> {
     )
 }
 
+/// 400 + `{"ok":false,"error":"..."}` — same `ok` key as success responses,
+/// plus an `error` string. Used when a request is malformed or names an
+/// unknown action, instead of silently replying `{"ok":true}` (MED #2).
+fn serve_bad_request(msg: &str) -> Response<Cursor<Vec<u8>>> {
+    let body = serde_json::json!({"ok": false, "error": msg}).to_string();
+    let len = body.len();
+    Response::new(
+        StatusCode(400),
+        vec![Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()],
+        Cursor::new(body.into_bytes()),
+        Some(len),
+        None,
+    )
+}
+
 fn serve_octet_stream(data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
     let len = data.len();
     Response::new(
@@ -210,8 +225,14 @@ fn handle_action(
     let mut reader = request.as_reader();
     std::io::Read::read_to_string(&mut reader, &mut body).ok();
 
-    let json: Value = serde_json::from_str(&body).unwrap_or(Value::Object(serde_json::Map::new()));
-    let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let json: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return serve_bad_request("malformed JSON"),
+    };
+    let action = match json.get("action").and_then(|v| v.as_str()) {
+        Some(a) => a,
+        None => return serve_bad_request("missing action"),
+    };
 
     match action {
         "step" => {
@@ -243,7 +264,11 @@ fn handle_action(
             println!("Quit requested, shutting down...");
             std::process::exit(0);
         }
-        _ => {}
+        other => {
+            // Log to stderr so a broken client is visible even without the network tab.
+            eprintln!("unknown action: {other}");
+            return serve_bad_request(&format!("unknown action: {other}"));
+        }
     }
 
     serve_json(r#"{"ok":true}"#)
@@ -284,10 +309,12 @@ fn handle_toggle(
   let x = json.get("x").and_then(|v| v.as_f64()).map(|f| f as i64);
     let y = json.get("y").and_then(|v| v.as_f64()).map(|f| f as i64);
 
-    if let (Some(x), Some(y)) = (x, y) {
-        let mut g = lock_grid(grid);
-        g.engine.toggle_cell(x, y);
-    }
+    let (x, y) = match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return serve_bad_request("missing x/y"),
+    };
+    let mut g = lock_grid(grid);
+    g.engine.toggle_cell(x, y);
 
     serve_json(r#"{"ok":true}"#)
 }
@@ -300,7 +327,10 @@ fn handle_load_pattern(
     let mut reader = request.as_reader();
     std::io::Read::read_to_string(&mut reader, &mut body).ok();
 
-    let json: Value = serde_json::from_str(&body).unwrap_or(Value::Object(serde_json::Map::new()));
+    let json: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return serve_bad_request("malformed JSON"),
+    };
     let anchor_x = json.get("anchor_x").and_then(|v| v.as_i64()).unwrap_or(0);
     let anchor_y = json.get("anchor_y").and_then(|v| v.as_i64()).unwrap_or(0);
 
@@ -316,6 +346,8 @@ fn handle_load_pattern(
             .collect();
         let mut g = lock_grid(grid);
         g.engine.load_pattern(&cell_list, anchor_x, anchor_y);
+    } else {
+        return serve_bad_request("missing cells");
     }
 
     serve_json(r#"{"ok":true}"#)
