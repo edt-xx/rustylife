@@ -374,28 +374,28 @@ impl Classic {
         tiles.insert(Coord::pack(tx, ty));
 
         if ox == m1 {
-            tiles.insert(Coord::pack(tx + ss, ty));
+            tiles.insert(Coord::pack(tx.wrapping_add(ss), ty));
         }
         if ox == m1 && oy == m1 {
-            tiles.insert(Coord::pack(tx + ss, ty + ss));
+            tiles.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_add(ss)));
         }
         if oy == m1 {
-            tiles.insert(Coord::pack(tx, ty + ss));
+            tiles.insert(Coord::pack(tx, ty.wrapping_add(ss)));
         }
         if ox == 0 && oy == m1 {
-            tiles.insert(Coord::pack(tx - ss, ty + ss));
+            tiles.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_add(ss)));
         }
         if ox == 0 {
-            tiles.insert(Coord::pack(tx - ss, ty));
+            tiles.insert(Coord::pack(tx.wrapping_sub(ss), ty));
         }
         if ox == 0 && oy == 0 {
-            tiles.insert(Coord::pack(tx - ss, ty - ss));
+            tiles.insert(Coord::pack(tx.wrapping_sub(ss), ty.wrapping_sub(ss)));
         }
         if oy == 0 {
-            tiles.insert(Coord::pack(tx, ty - ss));
+            tiles.insert(Coord::pack(tx, ty.wrapping_sub(ss)));
         }
         if ox == m1 && oy == 0 {
-            tiles.insert(Coord::pack(tx + ss, ty - ss));
+            tiles.insert(Coord::pack(tx.wrapping_add(ss), ty.wrapping_sub(ss)));
         }
     }
 
