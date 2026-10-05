@@ -98,6 +98,14 @@ function parseRLE(text) {
     return cells;
 }
 
+// .mc detection — the authoritative test, matching parseMacrocell's own
+// requirement (line 1 starts with [M2]) and what Rust's export_mc always
+// writes. Used by file-input and paste paths (MED #5: replaces the old
+// filename-extension and cells=/Cells= substring checks, which disagreed).
+function detectMc(text) {
+    return text.split('\n')[0].trim().startsWith('[M2]');
+}
+
 // Macrocell (.mc) parser — Golly HashLife format
 // Child-first quadtree: leaf nodes (8x8 grids) and non-leaf nodes (level nw ne sw se)
 function parseMacrocell(text) {
@@ -1148,6 +1156,12 @@ document.addEventListener('DOMContentLoaded', async function() {
         var cells;
         if (isMc) {
             cells = parseMacrocell(text);
+            if (!cells) {
+                // Guard: parseMacrocell returns null when line 1 isn't [M2].
+                // Without this, cells.length below threw a silent TypeError (MED #5).
+                alert('Could not parse .mc pattern — expected [M2] header on line 1.');
+                return;
+            }
             for (var i = 0; i < cells.length; i++) {
                 cells[i][0] += coordOffset;
                 cells[i][1] += coordOffset;
@@ -1188,7 +1202,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         var file = e.target.files[0];
         if (!file) return;
         var text = await file.text();
-        var isMc = file.name.endsWith('.mc');
+        var isMc = detectMc(text);
         await loadPattern(text, isMc);
         e.target.value = ''; // allow re-selecting same file
     });
@@ -1263,7 +1277,7 @@ document.addEventListener('DOMContentLoaded', async function() {
         var text = document.getElementById('pasteArea').value.trim();
         if (!text) { document.getElementById('pasteModal').classList.remove('active'); return; }
         document.getElementById('pasteModal').classList.remove('active');
-        var isMc = text.includes('cells=') || text.includes('Cells=');
+        var isMc = detectMc(text);
         await loadPattern(text, isMc);
     });
 
