@@ -240,6 +240,14 @@ var prevBits = null, imgData = null, prevOverlay = null;
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
+// NOTE (MED #7): lblGen is NOT purely a display value — it doubles as a
+// control flag for server-restart detection. The refresh handler treats
+// `gen < lblGen` as "server restarted" (see :336), and several reset sites
+// set `lblGen = 0` specifically to SUPPRESS a false restart trigger (Clear at
+// :1122, load-pattern at :1160). So it carries two coupled meanings: the last
+// generation shown, and "the last gen we expect the server to be at or above".
+// If this is ever split into a separate lastGen field, update all of those
+// sites together — the display and the control flag must stay in sync.
 var lblGen=0, lblPop=0, lblActive=0, lblBirths=0, lblDeaths=0, lblHeap=0, lblTiles=0, lblFps='Gen/s: 0', protoVer=0, protoVerBad=false;
 var refreshSeq = 0; // sequence guard: discard stale async responses
 var zoomRefreshBusy = false; // serial: only one zoomRefresh at a time
@@ -332,7 +340,13 @@ function drawGrid(data) {
     var expectedScale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
     if (serverScale !== expectedScale) return;
 
-    // Detect server restart: gen went backwards
+    // Detect server restart: gen went backwards. This relies on lblGen's
+    // control-flag role (see declaration note, MED #7): the server only
+    // resets its generation counter on process restart, so gen < lblGen
+    // means "new server, wiped state" — reset prefs and repaint from scratch.
+    // Deliberate client-side clears/loads that also drop the server gen must
+    // pre-set lblGen = 0 (Clear :1122+, load-pattern :1160+), or they would
+    // be misdetected as a restart and wipe the user's saved prefs.
     if (gen < lblGen) {
         lblGen = 0; lblFps = 'Gen/s: 0';
         imgData = null;
