@@ -281,44 +281,90 @@ impl HashLife {
         vh: u32,
         scale: u32,
     ) -> (u64, u64, u32, u32) {
-        let bitmap_len = if scale > 1 {
-            let agg_w = (vw as usize + scale as usize - 1) / scale as usize;
-            let agg_h = (vh as usize + scale as usize - 1) / scale as usize;
-            (agg_w * agg_h + 7) / 8
-        } else {
-            (vw as usize * vh as usize + 7) / 8
-        };
-        if bitmap_len > 64 * 1024 && self.depth >= 3 {
+        // Gate on world-cell area, not buffer bytes — see PARALLEL_FILL_MIN_CELLS.
+        if (vw as u64 * vh as u64) > PARALLEL_FILL_MIN_CELLS && self.depth >= 3 {
             align_viewport(self.center, hvx, hvy, vw, vh, scale)
         } else {
             (hvx, hvy, vw, vh)
         }
     }
+}
 
+// Minimum WORLD-CELL AREA (vw * vh) before a viewport fill is split across 4
+// threads. Must be the SAME predicate in aligned_viewport (which snaps the
+// viewport to quadrant boundaries so the four threads write disjoint bytes),
+// populate_viewport and populate_aggregated_viewport — if they disagree, two
+// threads can OR into the same byte.
+//
+// Keyed on world-cell area, not bitmap bytes: the aggregate path's buffer is
+// one bit per screen pixel, so it stays ~460 KB at every zoom level while the
+// traversal work grows with the world window (measured 34x from scale 1 to
+// scale 128 at a constant buffer). Tuned by measurement (U5); 64M cells is set
+// below this PC's measured crossover (~0.6-0.9 ms of serial work, between
+// scale 8 and 16) so slower machines get the split earlier.
+pub const PARALLEL_FILL_MIN_CELLS: u64 = 64 * 1024 * 1024;
+
+// TEMP U5 instrumentation: cost of the two viewport-fill paths, so the
+// thread threshold can be tuned against measured spawn overhead. Remove after
+// use (reported by fill_timing_report()).
+static FILL_PAR_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FILL_SER_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FILL_PAR_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FILL_SER_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// TEMP U5: returns (parallel_ns, serial_ns, parallel_calls, serial_calls) and
+/// resets the counters.
+pub fn fill_timing_report() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        FILL_PAR_NS.swap(0, Relaxed),
+        FILL_SER_NS.swap(0, Relaxed),
+        FILL_PAR_CALLS.swap(0, Relaxed),
+        FILL_SER_CALLS.swap(0, Relaxed),
+    )
+}
+
+/// TEMP U5: time one viewport fill path and accumulate into the statics.
+fn fill_time_record(parallel: bool, ns: u128) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if parallel {
+        FILL_PAR_NS.fetch_add(ns as u64, Relaxed);
+        FILL_PAR_CALLS.fetch_add(1, Relaxed);
+    } else {
+        FILL_SER_NS.fetch_add(ns as u64, Relaxed);
+        FILL_SER_CALLS.fetch_add(1, Relaxed);
+    }
+}
+
+impl HashLife {
     pub fn populate_viewport(&self, vx: u64, vy: u64, vw: u32, vh: u32, bits: &mut Vec<u8>) {
         let bits_len = (vw as usize * vh as usize + 7) / 8;
         if bits.len() < bits_len { bits.resize(bits_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        // Parallelize when bitmap > 64KB and depth >= 3
-        if bits_len > 64 * 1024 && self.depth >= 3 {
+        // Parallelize on world-cell area (see PARALLEL_FILL_MIN_CELLS) and depth >= 3
+        if (vw as u64 * vh as u64) > PARALLEL_FILL_MIN_CELLS && self.depth >= 3 {
+            let __t0 = std::time::Instant::now(); // TEMP U5
             let node = self.cache.get_node(self.root);
             let half = 1u32 << (self.depth - 1);
             let bits_ptr = bits.as_mut_ptr() as usize;
             let bits_len = bits_len;
-            std::thread::scope(|s| {
-                s.spawn(|| fill_viewport(&self.cache, node.north_west, self.depth - 1,
+            rayon::scope(|s| {
+                s.spawn(|_| fill_viewport(&self.cache, node.north_west, self.depth - 1,
                     origin_x as u64, origin_y as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
-                s.spawn(|| fill_viewport(&self.cache, node.north_east, self.depth - 1,
+                s.spawn(|_| fill_viewport(&self.cache, node.north_east, self.depth - 1,
                     origin_x as u64 + half as u64, origin_y as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
-                s.spawn(|| fill_viewport(&self.cache, node.south_west, self.depth - 1,
+                s.spawn(|_| fill_viewport(&self.cache, node.south_west, self.depth - 1,
                     origin_x as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
-                s.spawn(|| fill_viewport(&self.cache, node.south_east, self.depth - 1,
+                s.spawn(|_| fill_viewport(&self.cache, node.south_east, self.depth - 1,
                     origin_x as u64 + half as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, unsafe { std::slice::from_raw_parts_mut(bits_ptr as *mut u8, bits_len) }));
             });
+            fill_time_record(true, __t0.elapsed().as_nanos()); // TEMP U5
         } else {
+            let __t0 = std::time::Instant::now(); // TEMP U5
             fill_viewport(&self.cache, self.root, self.depth,
                 origin_x as u64, origin_y as u64, vx, vy, vw, vh, &mut bits[..]);
+            fill_time_record(false, __t0.elapsed().as_nanos()); // TEMP U5
         }
     }
 
@@ -331,25 +377,29 @@ impl HashLife {
         if agg.len() < agg_len { agg.resize(agg_len, 0); }
         let origin_x = self.center.0 - (self.size() as i64 / 2);
         let origin_y = self.center.1 - (self.size() as i64 / 2);
-        // Parallelize when bitmap > 64KB and depth >= 3
-        if agg_len > 64 * 1024 && self.depth >= 3 {
+        // Parallelize on world-cell area (see PARALLEL_FILL_MIN_CELLS) and depth >= 3
+        if (vw as u64 * vh as u64) > PARALLEL_FILL_MIN_CELLS && self.depth >= 3 {
+            let __t0 = std::time::Instant::now(); // TEMP U5
             let node = self.cache.get_node(self.root);
             let half = 1u32 << (self.depth - 1);
             let agg_ptr = agg.as_mut_ptr() as usize;
             let agg_len = agg_len;
-            std::thread::scope(|s| {
-                s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_west, self.depth - 1,
+            rayon::scope(|s| {
+                s.spawn(|_| fill_aggregated_viewport(&self.cache, node.north_west, self.depth - 1,
                     origin_x as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
-                s.spawn(|| fill_aggregated_viewport(&self.cache, node.north_east, self.depth - 1,
+                s.spawn(|_| fill_aggregated_viewport(&self.cache, node.north_east, self.depth - 1,
                     origin_x as u64 + half as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
-                s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_west, self.depth - 1,
+                s.spawn(|_| fill_aggregated_viewport(&self.cache, node.south_west, self.depth - 1,
                     origin_x as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
-                s.spawn(|| fill_aggregated_viewport(&self.cache, node.south_east, self.depth - 1,
+                s.spawn(|_| fill_aggregated_viewport(&self.cache, node.south_east, self.depth - 1,
                     origin_x as u64 + half as u64, origin_y as u64 + half as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, unsafe { std::slice::from_raw_parts_mut(agg_ptr as *mut u8, agg_len) }));
             });
+            fill_time_record(true, __t0.elapsed().as_nanos()); // TEMP U5
         } else {
+            let __t0 = std::time::Instant::now(); // TEMP U5
             fill_aggregated_viewport(&self.cache, self.root, self.depth,
                 origin_x as u64, origin_y as u64, vx, vy, vw, vh, scale, agg_w as u32, agg_h as u32, &mut agg[..]);
+            fill_time_record(false, __t0.elapsed().as_nanos()); // TEMP U5
         }
     }
 

@@ -4,7 +4,9 @@
 // call. Reports ms/call plus the TRUE_NODE fill byte attribution from
 // hashlife::take_true_fill_bytes (the candidate-4 instrumentation).
 //
-// Usage: bench_state [path] [max-gens] [vw] [vh] [step]
+// Usage: bench_state [path] [max-gens] [vw] [vh] [step] [scale]
+// scale>1 routes through populate_aggregated_viewport (zoomed-out path);
+// vw/vh are then WORLD cells, and the buffer is ceil(vw/scale) x ceil(vh/scale).
 // Defaults: /home/ed/builds/a_lif/Spiral growth.mc, 196608, 1200, 800, 16384
 // (12 full 16384-steps ~= 200K generations — "about 200K without problems")
 
@@ -164,6 +166,9 @@ fn main() {
     let vw: u32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1200);
     let vh: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(800);
     let step: u32 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(16384);
+    // Zoom-out level: vw/vh are WORLD cells (as the frontend sends them), and
+    // scale>1 routes through populate_aggregated_viewport like the server does.
+    let scale: u32 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(1).max(1);
 
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path, e));
     let is_mc = text.trim_start().starts_with("[M2]");
@@ -224,17 +229,22 @@ fn main() {
 
     let hvx = cx.wrapping_sub(vw as i64 / 2) as u64;
     let hvy = cy.wrapping_sub(vh as i64 / 2) as u64;
-    let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(hvx, hvy, vw, vh, 1);
-    let bits_len = (vw_a as usize * vh_a as usize + 7) / 8;
+    let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(hvx, hvy, vw, vh, scale);
+    let scale_usize = scale as usize;
+    let agg_w = if scale > 1 { (vw_a as usize + scale_usize - 1) / scale_usize } else { vw_a as usize };
+    let agg_h = if scale > 1 { (vh_a as usize + scale_usize - 1) / scale_usize } else { vh_a as usize };
+    let bits_len = (agg_w * agg_h + 7) / 8;
     let depth = (hf.size() as f64).log2().round() as u32;
-    let parallel = bits_len > 64 * 1024 && depth >= 3;
-    eprintln!("viewport aligned: ({},{}) {}x{}, buffer {} bytes, path={}",
-        hvx_a, hvy_a, vw_a, vh_a, bits_len, if parallel { "parallel-4q" } else { "single" });
+    let parallel = (vw_a as u64 * vh_a as u64) > game_of_life::hashlife::PARALLEL_FILL_MIN_CELLS && depth >= 3;
+    eprintln!("viewport aligned: ({},{}) {}x{}, scale {}, agg {}x{}, buffer {} bytes, tree {}x{} (depth {}), path={}",
+        hvx_a, hvy_a, vw_a, vh_a, scale, agg_w, agg_h, bits_len, hf.size(), hf.size(), depth,
+        if parallel { "parallel-4q" } else { "single" });
 
     // Warmup (primes the tree for the measurement window).
     for _ in 0..3 {
         let mut bits = vec![0u8; bits_len];
-        hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits);
+        if scale > 1 { hf.populate_aggregated_viewport(hvx_a, hvy_a, vw_a, vh_a, scale, &mut bits); }
+        else { hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits); }
     }
     take_true_fill_bytes(); // discard warmup attribution
 
@@ -243,20 +253,30 @@ fn main() {
     let mut n: u64 = 0;
     let mut live_bits: u64 = 0;
     let mut tf_bytes: u64 = 0;
+    let mut alloc_ns: u64 = 0; // TEMP U5: fresh-buffer cost, subtractable from ms/call
     while t1.elapsed().as_secs_f64() < 3.0 {
+        let __ta = Instant::now(); // TEMP U5
         let mut bits = vec![0u8; bits_len];
-        hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits);
+        alloc_ns += __ta.elapsed().as_nanos() as u64; // TEMP U5
+        if scale > 1 { hf.populate_aggregated_viewport(hvx_a, hvy_a, vw_a, vh_a, scale, &mut bits); }
+        else { hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits); }
         live_bits += bits.iter().map(|b| b.count_ones() as u64).sum::<u64>();
         tf_bytes += take_true_fill_bytes();
         n += 1;
     }
     let wall = t1.elapsed();
     let ms = wall.as_secs_f64() * 1000.0 / n as f64;
-    eprintln!("[bench_state] gen={} nodes={} alive={} path={} viewport={}x{}",
+    eprintln!("[bench_state] gen={} nodes={} alive={} path={} viewport={}x{} scale={}",
         gen_done, hf.cache.nodes.len(), hf.alive_count(),
-        if parallel { "parallel-4q" } else { "single" }, vw_a, vh_a);
+        if parallel { "parallel-4q" } else { "single" }, vw_a, vh_a, scale);
     eprintln!("[bench_state] populate_viewport: {:.3} ms/call over {} calls ({:.2}s total)",
         ms, n, wall.as_secs_f64());
     eprintln!("[bench_state] TRUE_NODE fill: {:.0} bytes/call of {}-byte buffer; {:.0} live bits/call",
         tf_bytes as f64 / n as f64, bits_len, live_bits as f64 / n as f64);
+    // TEMP U5: split of the per-call time — buffer alloc+zero vs the fill path taken.
+    let (par_ns, ser_ns, par_calls, ser_calls) = game_of_life::hashlife::fill_timing_report();
+    eprintln!("[bench_state] TEMP fill-timing: alloc+zero {:.1} us/call | parallel {:.1} us/call over {} calls | serial {:.1} us/call over {} calls",
+        alloc_ns as f64 / n as f64 / 1000.0,
+        if par_calls > 0 { par_ns as f64 / par_calls as f64 / 1000.0 } else { 0.0 }, par_calls,
+        if ser_calls > 0 { ser_ns as f64 / ser_calls as f64 / 1000.0 } else { 0.0 }, ser_calls);
 }

@@ -867,7 +867,7 @@ fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: u32, old_cache: &HashLif
     fn test_aligned_viewport_small() {
         let cells: Vec<u128> = vec![coord_pack(100, 100)];
         let hf = HashLife::from_flat(&cells);
-        // 100x100 = 10000 cells = 1250 bytes < 64KB → no alignment
+        // 100x100 = 10000 cells < PARALLEL_FILL_MIN_CELLS (64M) → no alignment
         let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(12345, 67890, 100, 100, 1);
         assert_eq!((hvx_a, hvy_a, vw_a, vh_a), (12345, 67890, 100, 100), "small viewport should be unchanged");
     }
@@ -883,13 +883,13 @@ fn rebuild_tree(new_cache: &mut HashLifeCache, old_idx: u32, old_cache: &HashLif
         }
         let hf = HashLife::from_flat(&cells);
         assert!(hf.depth >= 3, "tree should be depth >= 3, got {}", hf.depth);
-        // 1000x1000 = 1M cells = 125000 bytes > 64KB → aligned
-        let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(12345, 67890, 1000, 1000, 1);
+        // 10000x10000 = 100M cells > PARALLEL_FILL_MIN_CELLS (64M) → aligned
+        let (hvx_a, hvy_a, vw_a, vh_a) = hf.aligned_viewport(12345, 67890, 10000, 10000, 1);
         let center = hf.center;
         assert_eq!((center.0 - hvx_a as i64).rem_euclid(8), 0, "vertical seam not byte-aligned");
         assert_eq!(vw_a % 8, 0, "vw_a not multiple of 8");
         assert!(hvx_a <= 12345, "hvx_a should be <= hvx");
-        assert!(hvx_a + vw_a as u64 >= 12345 + 1000, "aligned viewport should cover requested x");
+        assert!(hvx_a + vw_a as u64 >= 12345 + 10000, "aligned viewport should cover requested x");
     }
 
     // ---- Candidate 4: exact-bitmap tests for the TRUE_NODE fill path ----
