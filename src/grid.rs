@@ -583,7 +583,12 @@ impl Engine {
                 } else {
                     hf.populate_viewport(hvx_a, hvy_a, vw_a, vh_a, &mut bits);
                 }
-                (bits, vec![0u8; len], agg_w as u32, agg_h as u32)
+                // No overlay in HashLife mode: the frontend already handles
+                // ol_len == 0 (app.js:403) and skips the per-frame overlay
+                // diff when it is empty, so sending zero-length instead of a
+                // full-size all-zero buffer halves the response body and drops
+                // an alloc+zero per request.
+                (bits, Vec::new(), agg_w as u32, agg_h as u32)
             }
             Engine::Classic(c) => {
                 if scale > 1 {
