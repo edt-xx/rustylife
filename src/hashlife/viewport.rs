@@ -211,8 +211,18 @@ impl FillTarget for AggTarget<'_> {
                     }
                 }
             } else {
-                // Full bytes in the middle: skip non-zero, set zero to 0xFF
-                for b in (sb + 1)..eb {
+                // Full bytes in the middle: skip non-zero, set zero to 0xFF.
+                // SSE2 16-at-a-time on x86_64, scalar remainder (and the whole
+                // range on non-x86_64) — same shape as RawTarget::fill_rect.
+                #[cfg(target_arch = "x86_64")]
+                let mid_lo = {
+                    let mut b = sb + 1;
+                    b = unsafe { true_fill_sse2(self.agg.as_mut_ptr(), b, eb) };
+                    b
+                };
+                #[cfg(not(target_arch = "x86_64"))]
+                let mid_lo = sb + 1;
+                for b in mid_lo..eb {
                     if self.agg[b] == 0 { self.agg[b] = 0xFF; }
                 }
                 // Handle start byte
