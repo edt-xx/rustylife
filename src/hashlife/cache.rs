@@ -29,6 +29,27 @@ pub const MASK_NE: u16 = 0x3300;
 pub const MASK_SW: u16 = 0x00CC;
 pub const MASK_SE: u16 = 0x0033;
 
+// TEMP walk A/B instrumentation: gc() alternates the two walk variants on
+// every call (even = serial walk_tree, odd = walk_tree_threaded) and prints
+// each call's timing with eprintln!. note_idx = nodes.len(), the arena
+// high-water the live bitvector is sized to. Remove after the threshold is
+// found.
+#[allow(dead_code)] // used by the pending per-gc walk diag in gc()
+static GC_ROT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Worker queues for walk_tree_roundrobin. Tunable for the A/B/C sweep without
+/// a rebuild: GOL_WALK_THREADS=n overrides the default. Expected optimum is
+/// 4..8 (8 physical cores; the walk's speedup plateaus around 4 workers).
+pub fn walk_threads() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("GOL_WALK_THREADS").ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v >= 1)
+            .unwrap_or(7)
+    })
+}
+
 
 #[derive(Clone, Copy)]
 pub struct LifeNode {
@@ -225,30 +246,108 @@ impl HashLifeCache {
         idx
     }
 
-    /// Collect all reachable node indices from root.
-    pub fn walk_tree(&self, root: u32, live: &mut ahash::AHashSet<u32>) {
-        let mut stack = vec![root];
-        while let Some(idx) = stack.pop() {
-            if idx == FALSE_NODE || idx == TRUE_NODE {
-                live.insert(idx);
-                continue;
-            }
-            if live.contains(&idx) { continue; }
-            live.insert(idx);
-            if let Some(node) = self.nodes.get(idx as usize) {
-                if node.is_empty { 
-                    continue; 
+    /// Serial twin of walk_tree_threaded: same four quadrant walks, same two    /// slow-cache walks (with the issued guard), same live bitvector — just on
+    /// one thread. Body is duplicated from walk_tree_threaded on purpose so
+    /// the two can be A/B'd against a gc threshold; dedupe during cleanup.
+    pub fn walk_tree(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
+        let root_node = self.get_node(root);
+        let children = [
+            root_node.north_west,
+            root_node.north_east,
+            root_node.south_west,
+            root_node.south_east,
+        ];
+
+        let live_size = self.nodes.len().max(2);
+        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
+        extend_zeros(&mut live, live_size);
+        live[root as usize].store(1, Ordering::SeqCst);
+
+        let issued = &self.issued;
+
+        // 4 quadrant walks, sequentially.
+        for &child in &children {
+            let mut stack = vec![ child ];
+            while let Some(idx) = stack.pop() {
+                if live[idx as usize].load(Ordering::Relaxed) != 0 {
+                    continue;
                 }
-                for &child in &[node.north_west, node.north_east, node.south_west, node.south_east] {
-                    if !live.contains(&child) {
-                        stack.push(child);
+                live[idx as usize].store(1, Ordering::SeqCst);
+                if let Some(node) = self.nodes.get(idx as usize) {
+                    if node.is_empty {
+                        continue;
+                    }
+                    stack.push(node.north_west);
+                    stack.push(node.north_east);
+                    stack.push(node.south_west);
+                    stack.push(node.south_east);
+                }
+            }
+        }
+
+        // slow_cache_n walk: iterate the map, push each referenced node,
+        // walk its subtree.
+        {
+            let mut stack = Vec::<u32>::new();
+            for (&key, _) in slow_cache_n.iter() {
+                stack.push((key >> 32) as u32);
+                while let Some(idx) = stack.pop() {
+                    let i = idx as usize;
+                    // Skip nodes not currently issued (stale cache key may
+                    // reference a freed/reissued idx) — same guard as threaded.
+                    if issued[i] == 0 {
+                        continue;
+                    }
+                    if live[i].load(Ordering::Relaxed) != 0 {
+                        continue;
+                    }
+                    live[i].store(1, Ordering::SeqCst);
+                    if let Some(node) = self.nodes.get(i) {
+                        if node.is_empty {
+                            continue;
+                        }
+                        stack.push(node.north_west);
+                        stack.push(node.north_east);
+                        stack.push(node.south_west);
+                        stack.push(node.south_east);
                     }
                 }
             }
         }
+
+        // slow_cache_n1 walk: same shape, other cache.
+        {
+            let mut stack = Vec::<u32>::new();
+            for (&key, _) in slow_cache_n1.iter() {
+                stack.push((key >> 32) as u32);
+                while let Some(idx) = stack.pop() {
+                    let i = idx as usize;
+                    if issued[i] == 0 {
+                        continue;
+                    }
+                    if live[i].load(Ordering::Relaxed) != 0 {
+                        continue;
+                    }
+                    live[i].store(1, Ordering::SeqCst);
+                    if let Some(node) = self.nodes.get(i) {
+                        if node.is_empty {
+                            continue;
+                        }
+                        stack.push(node.north_west);
+                        stack.push(node.north_east);
+                        stack.push(node.south_west);
+                        stack.push(node.south_east);
+                    }
+                }
+            }
+        }
+
+        live
     }
 
-    /// Collect all reachable node indices from root using 5 threads (4 quadrants + slow cache).
+    /// Collect all reachable node indices from root using a rayon::scope:
+    /// 6 jobs on the shared pool (4 tree quadrants + one per slow cache).
+    /// Was std::thread::scope, which spawned 6 fresh OS threads per gc call.
     pub fn walk_tree_threaded(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
         let root_node = self.get_node(root);
         let children = [
@@ -271,7 +370,7 @@ impl HashLifeCache {
         // pruning on live concurrently. No dedup set: the mark is idempotent
         // (load-check + store), so a node reached by any walk (quadrant or
         // cache) is expanded once and the rest prune on the live bit.
-        std::thread::scope(|scope| {
+        rayon::scope(|scope| {
             let live = &live;
             // Shared reference to the issued bitvector so the `move` closures
             // borrow (not move) it: `let issued = self.issued` moves out of
@@ -279,7 +378,7 @@ impl HashLifeCache {
             let issued = &self.issued;
             // 4 threads for tree quadrants
             for &child in &children {
-                scope.spawn(move || {
+                scope.spawn(move |_| {
                     let mut stack = vec![ child ];
                     while let Some(idx) = stack.pop() {
                         if live[idx as usize].load(Ordering::Relaxed) != 0 {
@@ -301,7 +400,7 @@ impl HashLifeCache {
 
             // slow_cache_n walk: iterate the map, push each referenced node,
             // walk its subtree. Overlaps the n1 thread; live dedups.
-            scope.spawn(move || {
+            scope.spawn(move |_| {
                 let mut stack = Vec::<u32>::new();
                 for (&key, _) in slow_cache_n.iter() {
                     stack.push((key >> 32) as u32);
@@ -332,7 +431,7 @@ impl HashLifeCache {
             });
 
             // slow_cache_n1 walk: same shape, other cache.
-            scope.spawn(move || {
+            scope.spawn(move |_| {
                 let mut stack = Vec::<u32>::new();
                 for (&key, _) in slow_cache_n1.iter() {
                     stack.push((key >> 32) as u32);
@@ -363,10 +462,99 @@ impl HashLifeCache {
         live
     }
 
+    /// C variant, worker half: walk one root's subtree with a private stack.
+    /// Every pop passes the `issued` guard; for tree-reachable nodes issued is
+    /// always 1, so this matches the A/B variants while letting one queue mix
+    /// tree and slow-cache roots (uniform code on every worker).
+    fn walk_node(&self, root: u32, live: &[AtomicU8], issued: &[u8]) {
+        let mut stack = vec![ root ];
+        while let Some(idx) = stack.pop() {
+            let i = idx as usize;
+            if issued[i] == 0 { continue; }
+            if live[i].load(Ordering::Relaxed) != 0 { continue; }
+            live[i].store(1, Ordering::SeqCst);
+            if let Some(node) = self.nodes.get(i) {
+                if node.is_empty { continue; }
+                stack.push(node.north_west);
+                stack.push(node.north_east);
+                stack.push(node.south_west);
+                stack.push(node.south_east);
+            }
+        }
+    }
+
+    /// C variant: one flat root list (4 quadrants + every slow_cache_n and
+    /// slow_cache_n1 key), dealt round-robin into walk_threads() queues, one
+    /// rayon job per queue. Balances by entry count instead of by tree shape.
+    /// Round-robin is acceptable here because most roots are slow_cache
+    /// entries whose arena indices are already scattered, so the quadrant
+    /// split buys little locality anyway.
+    /// NOTE: the queue storage (~|n|+|n1| u32) is allocated per call and is
+    /// inside the measured time — reuse it if this variant wins.
+    pub fn walk_tree_roundrobin(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
+        let root_node = self.get_node(root);
+        let children = [
+            root_node.north_west,
+            root_node.north_east,
+            root_node.south_west,
+            root_node.south_east,
+        ];
+
+        let live_size = self.nodes.len().max(2);
+        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
+        extend_zeros(&mut live, live_size);
+        live[root as usize].store(1, Ordering::SeqCst);
+
+        // Round-robin deal: root i -> queue i % nt. Counts stay within one of
+        // each other, so no worker is left holding most of the work.
+        let nt = walk_threads();
+        let mut queues: Vec<Vec<u32>> = vec![ Vec::with_capacity(self.arena.len() / nt + 8); nt ];
+        let mut rr = 0usize;
+        {
+            let mut push = |idx: u32| {
+                queues[rr].push(idx);
+                rr += 1;
+                if rr == nt { rr = 0; }
+            };
+            for &c in &children { push(c); }
+            for (&key, _) in slow_cache_n.iter() { push((key >> 32) as u32); }
+            for (&key, _) in slow_cache_n1.iter() { push((key >> 32) as u32); }
+        }
+
+        rayon::scope(|scope| {
+            let live = &live;
+            let issued = &self.issued;
+            for q in queues {
+                scope.spawn(move |_| {
+                    for &r in &q {
+                        self.walk_node(r, live, issued);
+                    }
+                });
+            }
+        });
+
+        live
+    }
+
     /// Garbage collect: walk tree from root, retain only live nodes.
     /// Also walks subtrees of slow_cache_n1 and fast_cache referenced nodes.
     pub fn gc(&mut self, root: u32, slow_cache_n1: &mut AHashMap<u64, u32>, slow_cache_n: &mut AHashMap<u64, u32>) -> u32 {
-        let live = self.walk_tree_threaded(root, slow_cache_n1, slow_cache_n);
+        // Walk: round-robin queues. Measured winner over both other variants
+        // (Spiral growth, 400 gc calls: rr7 18.7 ms median vs threaded 52.3 and
+        // serial 67.2; at >=2M nodes 19.9 vs 53.4 / 72.7), and confirmed by Ed
+        // in the UI. p_acorn 5000 gens pinned serial vs rr produced identical
+        // node/alive counts and identical bbox.
+        // walk_tree (serial) and walk_tree_threaded (4 quadrants + 2 slow
+        // caches) are kept for reference and for the pending diag below.
+        let live = self.walk_tree_roundrobin(root, slow_cache_n1, slow_cache_n);
+        // Pending diag: per-gc walk timing + the three-way rotation. Uncomment
+        // to re-run the sweep (GOL_WALK_VARIANT=serial|threaded|rr pins one):
+        // let rot = GC_ROT.fetch_add(1, Ordering::Relaxed);
+        // let t0 = std::time::Instant::now();
+        // eprintln!("[walk] rot={} note_idx={} arena={} ({:.1} MB) rr{} {:.1} us",
+        //     rot, self.nodes.len(), self.arena.len(),
+        //     self.nodes.len() as f64 * std::mem::size_of::<LifeNode>() as f64 / 1e6,
+        //     walk_threads(), t0.elapsed().as_nanos() as f64 / 1e3);
 
         // Thread: computes the freed indices and hands them back; the actual
         // freelist fill (append + fresh top-up) is done by the background
