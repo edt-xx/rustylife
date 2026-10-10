@@ -14,9 +14,12 @@ fn lock_grid(grid: &Arc<Mutex<Grid>>) -> MutexGuard<'_, Grid> {
 
 pub fn run(grid: Arc<Mutex<Grid>>) {
     let frames: StateFramesHandle = Arc::new(Mutex::new(HashMap::new()));
-    let server = Server::http("0.0.0.0:7654").expect("Failed to start server");
+    // GOL_PORT: experiment harness only (lets a second instance run beside the
+    // production one). Uncommitted.
+    let port: u16 = std::env::var("GOL_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(7654);
+    let server = Server::http(format!("0.0.0.0:{port}")).expect("Failed to start server");
 
-    println!("Game of Life running at http://localhost:7654");
+    println!("Game of Life running at http://localhost:{port}");
 
     for mut request in server.incoming_requests() {
         let url = request.url().to_string();
@@ -206,7 +209,12 @@ fn put_varint(mut v: u64, out: &mut Vec<u8>) {
 /// matches (the overwhelmingly common case — a 1200x800 viewport with ~5000
 /// live cells has ~15,000 words and almost all of them repeat) is skipped
 /// whole. It runs outside the grid lock, on a buffer the fill just wrote.
-fn delta_encode(prev: &[u8], cur: &[u8], out: &mut Vec<u8>) -> usize {
+// Encodes `cur` as a byte-delta over `prev` into `out`, returning the number of
+// changed bytes. `limit` is the point past which the delta can no longer win the
+// caller's half-bitmap test: once the entry stream is that long the rest of the
+// scan is pure waste, so bail early and report usize::MAX. `out` is left
+// untouched in that case — the caller must not send it.
+fn delta_encode(prev: &[u8], cur: &[u8], out: &mut Vec<u8>, limit: usize) -> usize {
     let n = prev.len().min(cur.len());
     let mut entries: Vec<u8> = Vec::new();
     let mut last = 0usize;
@@ -226,6 +234,9 @@ fn delta_encode(prev: &[u8], cur: &[u8], out: &mut Vec<u8>) -> usize {
             }
         }
         i += 8;
+        if entries.len() >= limit {
+            return usize::MAX;
+        }
     }
     while i < n {
         if prev[i] != cur[i] {
@@ -233,6 +244,9 @@ fn delta_encode(prev: &[u8], cur: &[u8], out: &mut Vec<u8>) -> usize {
             entries.push(cur[i]);
             last = i;
             changed += 1;
+            if entries.len() >= limit {
+                return usize::MAX;
+            }
         }
         i += 1;
     }
@@ -336,13 +350,16 @@ fn serve_state(
     };
 
     let mut delta: Vec<u8> = Vec::new();
+    let mut encoded = false;
     if let Some(f) = &prev {
-        delta_encode(&f.bits, &final_bits, &mut delta);
+        // Half the bitmap is the break-even point (see use_delta below); past it
+        // there is nothing to learn from finishing the scan.
+        encoded = delta_encode(&f.bits, &final_bits, &mut delta, final_bits.len() / 2) != usize::MAX;
     }
     // A delta has to beat half the bitmap to be sent. That bound also keeps a v3
     // total strictly shorter than the raw total, so the client's exact-length
     // check can never mistake a delta frame for a raw one.
-    let use_delta = prev.is_some() && delta.len() * 2 < final_bits.len();
+    let use_delta = encoded && delta.len() * 2 < final_bits.len();
 
     let tick = FRAME_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let frame = table.entry(cid).or_insert(ClientFrame {
@@ -547,7 +564,7 @@ mod delta_tests {
 
     fn roundtrip(prev: &[u8], cur: &[u8]) {
         let mut delta = Vec::new();
-        let changed = delta_encode(prev, cur, &mut delta);
+        let changed = delta_encode(prev, cur, &mut delta, usize::MAX);
         let (got, next) = delta_apply(prev, &delta);
         assert_eq!(got, cur, "reconstruction differs");
         assert_eq!(next, delta.len(), "decoder consumed {} of {} bytes", next, delta.len());
@@ -562,7 +579,7 @@ mod delta_tests {
     fn no_change_is_one_byte() {
         let a = vec![0u8; 4096];
         let mut delta = Vec::new();
-        assert_eq!(delta_encode(&a, &a, &mut delta), 0);
+        assert_eq!(delta_encode(&a, &a, &mut delta, usize::MAX), 0);
         assert_eq!(delta, vec![0u8]);
         roundtrip(&a, &a);
     }
@@ -587,7 +604,7 @@ mod delta_tests {
         cur[19999] = 0x80;
         roundtrip(&prev, &cur);
         let mut delta = Vec::new();
-        delta_encode(&prev, &cur, &mut delta);
+        delta_encode(&prev, &cur, &mut delta, usize::MAX);
         assert!(delta.len() < 20, "sparse delta should stay tiny, got {}", delta.len());
     }
 
@@ -598,7 +615,7 @@ mod delta_tests {
         let prev = vec![0xAAu8; 8192];
         let cur = vec![0x55u8; 8192];
         let mut delta = Vec::new();
-        assert_eq!(delta_encode(&prev, &cur, &mut delta), 8192);
+        assert_eq!(delta_encode(&prev, &cur, &mut delta, usize::MAX), 8192);
         roundtrip(&prev, &cur);
         assert!(delta.len() * 2 >= cur.len(), "dense delta must be rejected by the size rule");
     }
@@ -619,7 +636,19 @@ mod delta_tests {
         }
         roundtrip(&prev, &cur);
         let mut delta = Vec::new();
-        delta_encode(&prev, &cur, &mut delta);
+        delta_encode(&prev, &cur, &mut delta, usize::MAX);
         assert!(delta.len() * 2 < cur.len(), "sparse delta should win the size rule");
+    }
+
+    #[test]
+    fn bails_once_the_delta_cannot_win() {
+        // Every byte differs, and the caller's limit is half the bitmap: the scan
+        // must stop early, report usize::MAX, and leave `out` untouched so the
+        // caller cannot mistake a truncated stream for a valid delta.
+        let prev = vec![0xAAu8; 8192];
+        let cur = vec![0x55u8; 8192];
+        let mut delta = Vec::new();
+        assert_eq!(delta_encode(&prev, &cur, &mut delta, cur.len() / 2), usize::MAX);
+        assert!(delta.is_empty(), "aborted encode must leave out empty, got {} bytes", delta.len());
     }
 }
