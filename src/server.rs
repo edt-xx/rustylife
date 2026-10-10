@@ -13,6 +13,7 @@ fn lock_grid(grid: &Arc<Mutex<Grid>>) -> MutexGuard<'_, Grid> {
 }
 
 pub fn run(grid: Arc<Mutex<Grid>>) {
+    let frames: StateFramesHandle = Arc::new(Mutex::new(HashMap::new()));
     let server = Server::http("0.0.0.0:7654").expect("Failed to start server");
 
     println!("Game of Life running at http://localhost:7654");
@@ -37,7 +38,7 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
         let response = match catch_unwind(AssertUnwindSafe(|| {
             match (method.as_str(), path) {
                 ("GET", "/") => serve_index(),
-                ("GET", "/state") => serve_state(&grid, &params),
+                ("GET", "/state") => serve_state(&grid, &frames, &params),
                 ("POST", "/action") => handle_action(&grid, &mut request),
                 ("POST", "/toggle") => handle_toggle(&grid, &mut request),
                 ("POST", "/load-pattern") => handle_load_pattern(&grid, &mut request),
@@ -151,8 +152,98 @@ fn serve_octet_stream(data: Vec<u8>) -> Response<Cursor<Vec<u8>>> {
 /// GET /state handler. Wire format: big-endian u32 header (13 fields,
 /// proto_version = 1 at offset 48) followed by the viewport bitmap and
 /// the overlay. Canonical spec: `docs/protocol.md`.
+/// proto_version 3 (HashLife only): the frame the last `/state` response handed
+/// THIS client, so the next response can carry only the bytes that changed.
+///
+/// Keyed by client id (`&cid=`, one per page load), NOT one global slot: a
+/// single shared slot let any second poller (a benchmark run, another tab)
+/// evict the browser's base frame, which made every browser response a full
+/// frame. One entry per client, LRU-capped.
+///
+/// The entry is exactly what we last SENT to that cid, so a diff against it is
+/// exact no matter what the sim did in between — mutations never need to
+/// invalidate it. It is usable only when the viewport key matches AND the
+/// client confirms via `&base=<gen>` that it still holds that frame. Anything
+/// else (pan, zoom, resize, mode switch, server restart, a response the client
+/// discarded) costs one full frame and can never corrupt the picture.
+struct ClientFrame {
+    key: (u64, u64, u32, u32, u32, bool), // vx, vy, final_vw, final_vh, scale, mode
+    base_gen: u32,
+    bits: Vec<u8>,
+    last_use: u64,
+}
+type StateFramesHandle = Arc<Mutex<HashMap<String, ClientFrame>>>;
+
+/// Tabs/reloads get a slot each; older ones age out instead of the map growing
+/// without bound. Each entry costs one viewport bitmap (120 KB at 1200x800).
+const MAX_CLIENT_FRAMES: usize = 4;
+
+/// Below this the delta machinery is not worth it, and it also rules out the
+/// degenerate sizes where a v3 total length could collide with a raw frame's.
+const DELTA_MIN_BYTES: usize = 4096;
+
+static FRAME_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn lock_frames(h: &StateFramesHandle) -> MutexGuard<'_, HashMap<String, ClientFrame>> {
+    h.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Unsigned LEB128. Index deltas are almost always 1-2 bytes.
+fn put_varint(mut v: u64, out: &mut Vec<u8>) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 { out.push(b); break; }
+        out.push(b | 0x80);
+    }
+}
+
+/// proto_version 3 payload: the bytes of `cur` that differ from `prev`, as
+/// `varint(count)` then `count` entries of `varint(index - previous_index)` +
+/// the new byte. Indices ascend, so each delta is >= 1.
+///
+/// The scan is word-wise: eight bytes compared per iteration, and a word that
+/// matches (the overwhelmingly common case — a 1200x800 viewport with ~5000
+/// live cells has ~15,000 words and almost all of them repeat) is skipped
+/// whole. It runs outside the grid lock, on a buffer the fill just wrote.
+fn delta_encode(prev: &[u8], cur: &[u8], out: &mut Vec<u8>) -> usize {
+    let n = prev.len().min(cur.len());
+    let mut entries: Vec<u8> = Vec::new();
+    let mut last = 0usize;
+    let mut changed = 0usize;
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let p = u64::from_le_bytes(prev[i..i + 8].try_into().unwrap());
+        let c = u64::from_le_bytes(cur[i..i + 8].try_into().unwrap());
+        if p != c {
+            for k in 0..8 {
+                if prev[i + k] != cur[i + k] {
+                    put_varint((i + k - last) as u64, &mut entries);
+                    entries.push(cur[i + k]);
+                    last = i + k;
+                    changed += 1;
+                }
+            }
+        }
+        i += 8;
+    }
+    while i < n {
+        if prev[i] != cur[i] {
+            put_varint((i - last) as u64, &mut entries);
+            entries.push(cur[i]);
+            last = i;
+            changed += 1;
+        }
+        i += 1;
+    }
+    put_varint(changed as u64, out);
+    out.append(&mut entries);
+    changed
+}
+
 fn serve_state(
     grid: &Arc<Mutex<Grid>>,
+    frames: &StateFramesHandle,
     params: &HashMap<String, String>,
 ) -> Response<Cursor<Vec<u8>>> {
    let vx: u64 = params.get("vx").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -199,9 +290,14 @@ fn serve_state(
     // request in its own client space); the clamp above keeps it bounded.
     let (final_bits, final_overlay, final_vw, final_vh) = g.engine.snapshot(vx, vy, vw, vh, scale);
 
+    let base_gen = g.generation;
+    let hashlife = g.is_hashlife();
+
     // Header: 13 big-endian u32 fields — see docs/protocol.md
-    let mut data = Vec::new();
-    data.extend(g.generation.to_be_bytes());
+    // Reserved up front: growing this by doubling costs ~20 realloc-and-copy
+    // rounds for a 460 KB response, and it happens while the lock is held.
+    let mut data = Vec::with_capacity(52 + final_bits.len() + final_overlay.len());
+    data.extend(base_gen.to_be_bytes());
     data.extend((final_vw as u32).to_be_bytes());
     data.extend((final_vh as u32).to_be_bytes());
     data.extend(alive_count.to_be_bytes());
@@ -214,13 +310,69 @@ fn serve_state(
     data.extend(tiles.to_be_bytes());
     data.extend(scale.to_be_bytes());
     // Engine mode flag (0 = classic, 1 = hashlife) for frontend sync
-    data.extend((g.is_hashlife() as u32).to_be_bytes());
-    // Protocol version (1 = 13-field header); appended so old clients still parse
-    data.extend(1u32.to_be_bytes());
+    data.extend((hashlife as u32).to_be_bytes());
 
-    data.extend(final_bits);
-    data.extend(final_overlay);
+    // The grid lock ends here. Everything below — the diff against this client's
+    // previous frame and the payload copy — used to run inside it, and `/state`
+    // and the `/action` step take the SAME mutex, so time spent here came
+    // straight out of sim throughput (measured the hard way with the RLE codec;
+    // docs/protocol.md).
+    drop(g);
 
+    let key = (vx, vy, final_vw, final_vh, scale, hashlife);
+    let cid = params.get("cid").cloned().unwrap_or_default();
+    let base: Option<u32> = params.get("base").and_then(|s| s.parse().ok());
+
+    let mut table = lock_frames(frames);
+    // Classic keeps its existing process: full raw frames, no diff.
+    let prev = if hashlife {
+        table.remove(&cid).filter(|f| {
+            f.key == key && Some(f.base_gen) == base && f.bits.len() == final_bits.len()
+                && final_bits.len() >= DELTA_MIN_BYTES
+        })
+    } else {
+        table.remove(&cid);
+        None
+    };
+
+    let mut delta: Vec<u8> = Vec::new();
+    if let Some(f) = &prev {
+        delta_encode(&f.bits, &final_bits, &mut delta);
+    }
+    // A delta has to beat half the bitmap to be sent. That bound also keeps a v3
+    // total strictly shorter than the raw total, so the client's exact-length
+    // check can never mistake a delta frame for a raw one.
+    let use_delta = prev.is_some() && delta.len() * 2 < final_bits.len();
+
+    let tick = FRAME_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let frame = table.entry(cid).or_insert(ClientFrame {
+        key, base_gen: 0, bits: Vec::new(), last_use: 0,
+    });
+    frame.key = key;
+    frame.base_gen = base_gen;
+    frame.bits = final_bits;
+    frame.last_use = tick;
+
+    // proto_version is the 13th header field, so it lands at offset 48 either way
+    data.extend(if use_delta { 3u32 } else { 1u32 }.to_be_bytes());
+    if use_delta {
+        data.extend(delta);
+    } else {
+        data.extend(&frame.bits);
+        data.extend(&final_overlay);
+    }
+
+    if table.len() > MAX_CLIENT_FRAMES {
+        let mut victim: Option<(String, u64)> = None;
+        for (k, f) in table.iter() {
+            if victim.as_ref().map_or(true, |(_, t)| f.last_use < *t) {
+                victim = Some((k.clone(), f.last_use));
+            }
+        }
+        if let Some((k, _)) = victim { table.remove(&k); }
+    }
+
+    drop(table);
     serve_octet_stream(data)
 }
 
@@ -359,4 +511,115 @@ fn handle_load_pattern(
     }
 
     serve_json(r#"{"ok":true}"#)
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    /// Decoder mirroring the app.js / probe-script decoder byte-for-byte, so a
+    /// passing test means the browser will reproduce the frame too.
+    fn read_varint(buf: &[u8], mut off: usize) -> (u64, usize) {
+        let mut v = 0u64;
+        let mut shift = 0u32;
+        loop {
+            let b = buf[off];
+            off += 1;
+            v += ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 { return (v, off); }
+            shift += 7;
+        }
+    }
+
+    fn delta_apply(prev: &[u8], src: &[u8]) -> (Vec<u8>, usize) {
+        let mut out = prev.to_vec();
+        let (count, mut off) = read_varint(src, 0);
+        let mut idx = 0u64;
+        for _ in 0..count {
+            let (d, n) = read_varint(src, off);
+            off = n;
+            idx += d;
+            if (idx as usize) < out.len() { out[idx as usize] = src[off]; }
+            off += 1;
+        }
+        (out, off)
+    }
+
+    fn roundtrip(prev: &[u8], cur: &[u8]) {
+        let mut delta = Vec::new();
+        let changed = delta_encode(prev, cur, &mut delta);
+        let (got, next) = delta_apply(prev, &delta);
+        assert_eq!(got, cur, "reconstruction differs");
+        assert_eq!(next, delta.len(), "decoder consumed {} of {} bytes", next, delta.len());
+        let mut n = 0;
+        let (count, _) = read_varint(&delta, 0);
+        assert_eq!(count as usize, changed, "count field vs return value");
+        for i in 0..prev.len() { if prev[i] != cur[i] { n += 1; } }
+        assert_eq!(changed, n, "changed-byte count");
+    }
+
+    #[test]
+    fn no_change_is_one_byte() {
+        let a = vec![0u8; 4096];
+        let mut delta = Vec::new();
+        assert_eq!(delta_encode(&a, &a, &mut delta), 0);
+        assert_eq!(delta, vec![0u8]);
+        roundtrip(&a, &a);
+    }
+
+    #[test]
+    fn word_boundaries_and_edges() {
+        // Changes at index 0, 7, 8, 15, 16 and the last byte: the word-wise scan
+        // must not miss a byte at a u64 boundary or in the <8-byte tail.
+        let prev = vec![0u8; 130];
+        let mut cur = prev.clone();
+        for i in [0usize, 7, 8, 15, 16, 129] { cur[i] = 0b1000_0001; }
+        roundtrip(&prev, &cur);
+    }
+
+    #[test]
+    fn multi_byte_index_delta() {
+        // Gap of 5000 bytes between changes -> index delta needs 2 varint bytes.
+        let prev = vec![0u8; 20000];
+        let mut cur = prev.clone();
+        cur[1] = 0xff;
+        cur[5001] = 0x01;
+        cur[19999] = 0x80;
+        roundtrip(&prev, &cur);
+        let mut delta = Vec::new();
+        delta_encode(&prev, &cur, &mut delta);
+        assert!(delta.len() < 20, "sparse delta should stay tiny, got {}", delta.len());
+    }
+
+    #[test]
+    fn dense_bitmap_encodes_every_byte() {
+        // Worst case: every byte differs (0xAA -> 0x55). Delta must still decode
+        // back exactly; the caller's half-size rule decides not to send it.
+        let prev = vec![0xAAu8; 8192];
+        let cur = vec![0x55u8; 8192];
+        let mut delta = Vec::new();
+        assert_eq!(delta_encode(&prev, &cur, &mut delta), 8192);
+        roundtrip(&prev, &cur);
+        assert!(delta.len() * 2 >= cur.len(), "dense delta must be rejected by the size rule");
+    }
+
+    #[test]
+    fn pseudo_random_frame_pair() {
+        // Two "frames" from a cheap LCG: ~2% of bytes differ, like a live viewport.
+        let n = 120_000;
+        let mut s = 0x5DEECE66Du64;
+        let mut prev = vec![0u8; n];
+        let mut cur = vec![0u8; n];
+        for i in 0..n {
+            s = (s * 6364136223846793005 + 1442695040888963407) & 0xffff_ffff_ffff_ffff;
+            prev[i] = (s >> 33) as u8;
+            s = (s * 6364136223846793005 + 1442695040888963407) & 0xffff_ffff_ffff_ffff;
+            let b = (s >> 33) as u8;
+            cur[i] = if i % 50 == 0 { b } else { prev[i] };
+        }
+        roundtrip(&prev, &cur);
+        let mut delta = Vec::new();
+        delta_encode(&prev, &cur, &mut delta);
+        assert!(delta.len() * 2 < cur.len(), "sparse delta should win the size rule");
+    }
 }

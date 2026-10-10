@@ -237,6 +237,14 @@ function ensureCanvasSize() {
 
 // Persistent buffers — reused across frames to avoid reallocation
 var prevBits = null, imgData = null, prevOverlay = null;
+// proto 3 (delta) handshake. `stateBits` is the full bitmap of the frame we last
+// PAINTED, `stateBaseGen` its generation, `stateBaseKey` the exact /state URL
+// that produced it. A delta is only requested when that URL is byte-for-byte the
+// one we are about to ask again, so pan/zoom/resize/mode switch simply omit
+// `base` and get a full frame. The server checks the same thing from its side, so
+// a stale base costs one full frame and can never corrupt the picture.
+var stateCid = 'c' + Math.random().toString(36).slice(2, 10);
+var stateBits = null, stateBaseGen = null, stateBaseKey = null;
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // Global label data accessible from updateLabels
@@ -319,7 +327,98 @@ function cancelRightTimer() {
     rightDownTarget = null;
 }
 
-function drawGrid(data) {
+// Unsigned LEB128 — mirrors put_varint in server.rs. Multiplication, not <<,
+// so indices stay exact past 2^31.
+function readVarint(buf, off) {
+    var v = 0, shift = 0;
+    while (true) {
+        var b = buf[off]; off++;
+        v += (b & 0x7f) * Math.pow(2, shift);
+        if (!(b & 0x80)) return { v: v, next: off };
+        shift += 7;
+    }
+}
+
+// proto 3 payload: varint(count) then count entries of
+// varint(index - previous_index) + the new byte. Applies it to `prev` (the frame
+// we hold) and returns the rebuilt bitmap.
+function deltaApply(prev, src, off) {
+    var out = new Uint8Array(prev);
+    var c = readVarint(src, off); var count = c.v; off = c.next;
+    var idx = 0;
+    for (var e = 0; e < count; e++) {
+        var d = readVarint(src, off); off = d.next; idx += d.v;
+        if (idx < prev.length) out[idx] = src[off];
+        off++;
+    }
+    return { out: out, next: off };
+}
+
+// proto 3 steady state: walk the delta entries and repaint ONLY those cells.
+// Each entry is (byte index, new byte value); the OLD value comes from
+// `stateBits`, the frame we already hold, so the changed cells fall out of the
+// XOR. No bitmap rebuild, no full-buffer scan against prevBits, no overlay copy:
+// the cost is proportional to what changed, not to the viewport area.
+function paintDeltaEntries(src, off, vw, vh, serverScale) {
+    var total = vw * vh;
+    var c = readVarint(src, off); var count = c.v; off = c.next;
+
+    var dSize = cellSize * serverScale;
+    var dpr = window.devicePixelRatio || 1;
+    var dSizei = Math.ceil(dSize * dpr);
+    var cwActual = vw * dSizei;
+    var chActual = vh * dSizei;
+    var ox2i = Math.floor((canvasW * dpr - cwActual) / 2);
+    var oy2i = Math.floor((canvasH * dpr - chActual) / 2);
+
+    var aliveCells = [];
+    var deadCells = [];
+    var idx = 0;
+    for (var e = 0; e < count; e++) {
+        var d = readVarint(src, off); off = d.next; idx += d.v;
+        var nv = src[off++];
+        if (idx >= stateBits.length) continue;
+        var ov = stateBits[idx];
+        stateBits[idx] = nv;
+        var diff = ov ^ nv;
+        if (diff === 0) continue;
+        var startPixel = idx << 3;
+        for (var bit = 0; bit < 8; bit++) {
+            var pi = startPixel + bit;
+            if (pi >= total) break;
+            if (!(diff & (1 << bit))) continue;
+            var row = Math.floor(pi / vw);
+            var col = pi - row * vw;
+            if ((nv >> bit) & 1) aliveCells.push(col, row);
+            else deadCells.push(col, row);
+        }
+    }
+    if (aliveCells.length === 0 && deadCells.length === 0) return off;
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (var i = 0; i < deadCells.length; i += 2) {
+        // Same color rules as the scan path; hashlife sends no overlay, so the
+        // only alternatives are track color (static frame) and background.
+        if (tracksEnabled && camX === prevCamX && camY === prevCamY) ctx.fillStyle = '#3a3a5a';
+        else ctx.fillStyle = '#1a1a2e';
+        ctx.fillRect(ox2i + deadCells[i]*dSizei, oy2i + deadCells[i+1]*dSizei, dSizei, dSizei);
+    }
+    ctx.fillStyle = '#e94560';
+    for (var i = 0; i < aliveCells.length; i += 2)
+        ctx.fillRect(ox2i + aliveCells[i] * dSizei, oy2i + aliveCells[i+1] * dSizei, dSizei, dSizei);
+    ctx.restore();
+    return off;   // caller checks it consumed the payload exactly
+}
+
+// cid is always sent; base only when we still hold the frame for this exact URL.
+function stateUrl(url) {
+    var u = url + '&cid=' + stateCid;
+    if (stateBaseGen !== null && stateBaseKey === url) u += '&base=' + stateBaseGen;
+    return u;
+}
+
+function drawGrid(data, url) {
     var hdr  = new DataView(data, 0, 48);
     var gen     = hdr.getUint32(0, false);
     var vw      = hdr.getUint32(4, false);
@@ -350,6 +449,7 @@ function drawGrid(data) {
     if (gen < lblGen) {
         lblGen = 0; lblFps = 'Gen/s: 0';
         imgData = null;
+        stateBits = null; stateBaseGen = null; stateBaseKey = null;
         // Reset all user preferences on server restart
         localStorage.removeItem('gol_step');
         localStorage.removeItem('gol_speed');
@@ -384,6 +484,7 @@ function drawGrid(data) {
         }
         camX += delta; camY += delta;
         imgData = null;
+        stateBits = null; stateBaseGen = null; stateBaseKey = null;
         document.getElementById('hashlifeBtn').textContent = hashlifeMode ? 'Classic' : 'HashLife';
         savePrefs();
     }
@@ -395,23 +496,73 @@ function drawGrid(data) {
     var bitsLen = ((vw * vh + 7) >> 3);
     // Protocol version: v1 appends one u32 (proto_version) after the 12-field header.
     // Detect new vs old format by exact total length; old = 48-byte header.
-    var hdrLen = (data.byteLength === 52 + bitsLen + ol_len) ? 52 : 48;
-    if (hdrLen === 52) { protoVer = new DataView(data, 48, 4).getUint32(0, false); protoVerBad = (protoVer !== 1); }
-    else { protoVer = 0; protoVerBad = false; }
-    var bits = new Uint8Array(data, hdrLen, bitsLen);
-    var overlayOff = hdrLen + bitsLen;
-    var overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
+    // A v3 delta is only sent when it is strictly shorter than the raw payload,
+    // so it can never match either raw length and falls to the last branch.
+    var hdrLen;
+    if (data.byteLength === 52 + bitsLen + ol_len) hdrLen = 52;
+    else if (data.byteLength === 48 + bitsLen + ol_len) hdrLen = 48;
+    else hdrLen = 52;
+    protoVer = (hdrLen === 52) ? new DataView(data, 48, 4).getUint32(0, false) : 0;
+    protoVerBad = (protoVer !== 1 && protoVer !== 3 && protoVer !== 0);
+    // Full redraw (viewport/zoom/camera changed or first call) vs incremental.
+    // Computed before the payload is decoded: a delta that arrives when a full
+    // redraw is due is applied to the bitmap and redrawn whole.
+    var needsFullRedraw = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
+    var deltaPaint = false;
+    var bits, overlay;
+    if (protoVer === 3) {
+        if (stateBits === null || stateBits.length !== bitsLen || ol_len !== 0) {
+            // No frame to apply it to (we only ask when we have one). Drop this
+            // response; the next request omits base and comes back full.
+            stateBits = null; stateBaseGen = null; stateBaseKey = null;
+            return;
+        }
+        overlay = new Uint8Array(0);   // hashlife never sends an overlay
+        if (needsFullRedraw) {
+            var ap = deltaApply(stateBits, new Uint8Array(data), hdrLen);
+            if (ap.next !== data.byteLength) { protoVerBad = true; return; }
+            stateBits = ap.out;
+            bits = stateBits;
+        } else {
+            deltaPaint = true;         // painted straight from the entries below
+            bits = stateBits;
+        }
+    } else {
+        bits = new Uint8Array(data, hdrLen, bitsLen);
+        var overlayOff = hdrLen + bitsLen;
+        overlay = ol_len > 0 ? new Uint8Array(data, overlayOff, ol_len) : new Uint8Array(0);
+        // Classic keeps its existing full-frame process: no base, no delta.
+        stateBits = serverHashlife ? new Uint8Array(bits) : null;
+    }
+    if (stateBits !== null) { stateBaseGen = gen; stateBaseKey = url; }
+    else { stateBaseGen = null; stateBaseKey = null; }
 
     // Server-side aggregation: when serverScale > 1, the server sends an already-aggregated bitmap.
     // vw/vh in the header are the aggregated dimensions. Just render normally.
-    // Decide: full redraw (viewport/zoom changed or first call) vs delta update
     // At sub-pixel zoom, server sends aggregated bitmap — delta works fine (1px fillRect)
-    var needsFullRedraw = (vw !== prevVw || vh !== prevVh || camX !== prevCamX || camY !== prevCamY || !imgData);
 
     // Only resize offCanvas when needed — setting .width/.height clears it!
     if (offCanvas.width !== vw || offCanvas.height !== vh) {
         offCanvas.width  = vw;
         offCanvas.height = vh;
+    }
+
+    if (deltaPaint) {
+        // Changed cells only, straight from the delta entries.
+        var used = paintDeltaEntries(new Uint8Array(data), hdrLen, vw, vh, serverScale);
+        if (used !== data.byteLength) {
+            // Payload doesn't line up with what we hold — drop the base so the
+            // next request comes back whole, and force a full redraw.
+            protoVerBad = true;
+            stateBits = null; stateBaseGen = null; stateBaseKey = null;
+            imgData = null;
+            return;
+        }
+        prevBits = stateBits;
+        prevVw = vw; prevVh = vh; prevCamX = camX; prevCamY = camY;
+        prevOverlay = null;
+        updateLabels(vw, vh);
+        return;
     }
 
     if (needsFullRedraw) {
@@ -585,6 +736,7 @@ async function refresh() {
     var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
     var reqCamX = camX, reqCamY = camY; // viewport this request was made for
     var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
+    var furl = stateUrl(url);
     var seq = ++refreshSeq;
 
     // Wait until gen has advanced (avoid getting stale cached state)
@@ -593,13 +745,13 @@ async function refresh() {
         // Bail if the viewport moved or this request was superseded: a response
         // fetched at the old position would be painted at the new one (ghost tracks/cells)
         if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;
-        var r = await fetch(url);
+        var r = await fetch(furl);
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
         if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;   // stale response, discard
         var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen || !running) {
-            drawGrid(data);
+            drawGrid(data, url);
             return;
         }
         // Gen hasn't advanced — Python still stepping, wait and retry
@@ -619,13 +771,13 @@ async function zoomRefresh() {
             var scale = cellSize < 1 ? Math.round(1 / cellSize) : 1;
             var reqCamX = camX, reqCamY = camY; // viewport snapshot for this request
             var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
-            var r = await fetch(url);
+            var r = await fetch(stateUrl(url));
             var data = await r.arrayBuffer();
             // Camera moved during the fetch — bitmap is for the old viewport
             // (header has no vx/vy, drawGrid assumes current cam). Refetch at
             // the current position instead of painting a misaligned frame.
             if (camX !== reqCamX || camY !== reqCamY) continue;
-            drawGrid(data);
+            drawGrid(data, url);
             // If still panning, keep refreshing with latest cam position
             if (!panning) break;
         }
@@ -642,11 +794,11 @@ async function syncWithServer() {
     var reqCamX = camX, reqCamY = camY; // viewport this request was made for
     var url = '/state?vx=' + reqCamX + '&vy=' + reqCamY + '&vw=' + vp.vw + '&vh=' + vp.vh + '&scale=' + scale + '&maxcells=' + stateMaxCells();
     try {
-        var r = await fetch(url);
+        var r = await fetch(stateUrl(url));
         var data = await r.arrayBuffer();
         // Viewport moved during the fetch — bitmap is for the old position, discard
         if (camX !== reqCamX || camY !== reqCamY) return;
-        drawGrid(data);
+        drawGrid(data, url);
     } catch (e) {
         // Server may be down or unreachable, ignore
     }
