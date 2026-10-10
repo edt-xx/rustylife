@@ -247,6 +247,21 @@ var stateCid = 'c' + Math.random().toString(36).slice(2, 10);
 var stateBits = null, stateBaseGen = null, stateBaseKey = null;
 var prevVw = 0, prevVh = 0;
 var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
+// Per-chunk leg timings + delta-resync counter, surfaced in info line 1 so a
+// client-side stall is visible without DevTools (added while chasing the
+// 145K gens/s headless vs 118K browser gap on p_126m, 2026-10-10).
+// `resync()` is the ONE place that drops the held base frame: every discard
+// site goes through it so the counter cannot drift, and the reason string tells
+// us which handshake rule fired.
+var perfAction = 0, perfState = 0, perfPaint = 0;
+var perfProto = 0, perfBytes = 0, perfVw = 0, perfVh = 0;
+var perfFull = 0, perfDelta = 0, resyncCount = 0;
+function resync(reason) {
+    stateBits = null; stateBaseGen = null; stateBaseKey = null;
+    resyncCount++;
+    console.warn('[gol] delta resync:', reason, 'proto=' + perfProto,
+                 'bytes=' + perfBytes, 'vp=' + perfVw + 'x' + perfVh);
+}
 // Global label data accessible from updateLabels
 // NOTE (MED #7): lblGen is NOT purely a display value — it doubles as a
 // control flag for server-restart detection. The refresh handler treats
@@ -504,6 +519,8 @@ function drawGrid(data, url) {
     else hdrLen = 52;
     protoVer = (hdrLen === 52) ? new DataView(data, 48, 4).getUint32(0, false) : 0;
     protoVerBad = (protoVer !== 1 && protoVer !== 3 && protoVer !== 0);
+    perfProto = protoVer; perfBytes = data.byteLength; perfVw = vw; perfVh = vh;
+    if (protoVer === 3) perfDelta++; else perfFull++;
     // Full redraw (viewport/zoom/camera changed or first call) vs incremental.
     // Computed before the payload is decoded: a delta that arrives when a full
     // redraw is due is applied to the bitmap and redrawn whole.
@@ -514,13 +531,13 @@ function drawGrid(data, url) {
         if (stateBits === null || stateBits.length !== bitsLen || ol_len !== 0) {
             // No frame to apply it to (we only ask when we have one). Drop this
             // response; the next request omits base and comes back full.
-            stateBits = null; stateBaseGen = null; stateBaseKey = null;
+            resync('delta without held frame');
             return;
         }
         overlay = new Uint8Array(0);   // hashlife never sends an overlay
         if (needsFullRedraw) {
             var ap = deltaApply(stateBits, new Uint8Array(data), hdrLen);
-            if (ap.next !== data.byteLength) { protoVerBad = true; return; }
+            if (ap.next !== data.byteLength) { protoVerBad = true; resync('delta apply length'); return; }
             stateBits = ap.out;
             bits = stateBits;
         } else {
@@ -554,7 +571,7 @@ function drawGrid(data, url) {
             // Payload doesn't line up with what we hold — drop the base so the
             // next request comes back whole, and force a full redraw.
             protoVerBad = true;
-            stateBits = null; stateBaseGen = null; stateBaseKey = null;
+            resync('delta paint length');
             imgData = null;
             return;
         }
@@ -720,6 +737,15 @@ function updateLabels(vw, vh) {
             parts.push('Heap: ' + lblHeap + ' (' + lblTiles + ')');
         }
         if (protoVerBad) { parts.push('\u26a0 proto v' + protoVer); }
+        // Chunk legs: `state` includes `paint` (paint is inside the refresh call).
+        // f/d = full frames vs deltas received; resync only shows when non-zero.
+        if (perfAction || perfState || perfPaint) {
+            parts.push('act ' + perfAction.toFixed(0) + 'ms state ' + perfState.toFixed(0)
+                       + '(paint ' + perfPaint.toFixed(0) + ')ms');
+            parts.push('p' + perfProto + ' ' + (perfBytes / 1024).toFixed(1) + 'k'
+                       + ' f' + perfFull + '/d' + perfDelta
+                       + (resyncCount ? ' \u26a0resync:' + resyncCount : ''));
+        }
         l1.textContent = parts.join('\xa0\xa0');
     }
     var l2 = document.getElementById('infoLine2');
@@ -751,7 +777,9 @@ async function refresh() {
         var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
         if (gen !== initialGen || !running) {
+            var _tp = performance.now();
             drawGrid(data, url);
+            perfPaint = performance.now() - _tp;
             return;
         }
         // Gen hasn't advanced — Python still stepping, wait and retry
@@ -846,8 +874,12 @@ async function animLoop() {
     try {
         if (stepCount > 1) {
             // Batch-step: step on server, then fetch snapshot
+            var _ta = performance.now();
             await call({action:'batch-step', count: stepCount});
+            var _tb = performance.now();
             await refresh();
+            perfAction = _tb - _ta;              // server step time + response
+            perfState = performance.now() - _tb; // fetch + decode + paint
      } else {
             // Use zoomRefresh (no gen-wait loop) to avoid stale data issues with keep-alive
             await call({action:'step'});
