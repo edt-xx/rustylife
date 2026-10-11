@@ -254,6 +254,26 @@ var prevCamX = -1, prevCamY = -1;  // track pan to detect viewport shift
 // site goes through it so the counter cannot drift, and the reason string tells
 // us which handshake rule fired.
 var perfAction = 0, perfState = 0, perfPaint = 0;
+// refresh() is a retry loop, so `state` can hide round trips: it came back at
+// 42-43 ms for three consecutive chunks near gen 770K while paint stayed at
+// 0.5 ms (2026-10-10). These split that leg: attempts, cumulative fetch time,
+// and cumulative 5 ms retry sleeps.
+var perfTries = 0, perfFetch = 0, perfWait = 0;
+// Split of perfFetch: `head` = until fetch() resolves (response headers),
+// `body` = arrayBuffer() delivery after headers. The 42 ms plateau appeared at
+// ~1 KB of total response with the server writing in ~15us, so it has to be
+// either waiting on the response or waiting on the body hand-off.
+var perfHead = 0, perfBody = 0;
+// Main-thread canary for the fetch window: a 5ms interval counts its own fires
+// and the largest gap between them. If `body` is slow because the main thread
+// is busy (rAF loop, canvas work), the canary stops firing and maxgap grows.
+// If it keeps firing ~5ms apart, the main thread was idle and the body really
+// did arrive late.
+var perfCanary = 0, perfCanaryGap = 0;
+// Wall-clock ms just before the last /state fetch, so it can be subtracted from
+// the server's `t_ms=` (its handler entry): the difference is queueing on the
+// server side, the rest of `fetch` is on the browser side.
+var stateSentMs = 0;
 var perfProto = 0, perfBytes = 0, perfVw = 0, perfVh = 0;
 var perfFull = 0, perfDelta = 0, resyncCount = 0;
 function resync(reason) {
@@ -767,12 +787,32 @@ async function refresh() {
 
     // Wait until gen has advanced (avoid getting stale cached state)
     var initialGen = lblGen;
+    perfTries = 0; perfFetch = 0; perfWait = 0; perfHead = 0; perfBody = 0;
+    perfCanary = 0; perfCanaryGap = 0;
     while (true) {
         // Bail if the viewport moved or this request was superseded: a response
         // fetched at the old position would be painted at the new one (ghost tracks/cells)
         if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;
+        var _cCount = 0, _cMaxGap = 0, _cLast = performance.now();
+        var _cid = setInterval(function () {
+            var _cn = performance.now();
+            _cCount++;
+            if (_cn - _cLast > _cMaxGap) _cMaxGap = _cn - _cLast;
+            _cLast = _cn;
+        }, 5);
+        var _tf = performance.now();
+        stateSentMs = Date.now();
         var r = await fetch(furl);
+        var _th = performance.now();          // response headers in
         var data = await r.arrayBuffer();  // read fully before seq check — prevents stale overwrite
+        var _tb = performance.now();          // body fully delivered
+        clearInterval(_cid);
+        perfCanary += _cCount;
+        if (_cMaxGap > perfCanaryGap) perfCanaryGap = _cMaxGap;
+        perfFetch += performance.now() - _tf;
+        perfHead += _th - _tf;
+        perfBody += _tb - _th;
+        perfTries++;
         if (seq !== refreshSeq || camX !== reqCamX || camY !== reqCamY) return;   // stale response, discard
         var hdr = new DataView(data, 0, 48);
         var gen = hdr.getUint32(0, false);
@@ -783,7 +823,9 @@ async function refresh() {
             return;
         }
         // Gen hasn't advanced — Python still stepping, wait and retry
+        var _tw = performance.now();
         await new Promise(function(resolve) { setTimeout(resolve, 5); });
+        perfWait += performance.now() - _tw;
     }
 }
 
@@ -793,6 +835,7 @@ async function zoomRefresh() {
     if (zoomRefreshBusy) return;
     zoomRefreshBusy = true;
     try {
+        var lastReqX = null, lastReqY = null, stale = 0;
         while (true) {
             ensureCanvasSize();
             var vp = calcCells(cellSize);
@@ -804,10 +847,19 @@ async function zoomRefresh() {
             // Camera moved during the fetch — bitmap is for the old viewport
             // (header has no vx/vy, drawGrid assumes current cam). Refetch at
             // the current position instead of painting a misaligned frame.
-            if (camX !== reqCamX || camY !== reqCamY) continue;
+            if (camX !== reqCamX || camY !== reqCamY) {
+                // Bound it: a camera that will not settle must not spin here.
+                if (++stale > 2) { drawGrid(data, url); break; }
+                continue;
+            }
             drawGrid(data, url);
-            // If still panning, keep refreshing with latest cam position
+            // Loop only while panning AND the camera is actually still moving.
+            // mousemove re-calls zoomRefresh() on every move, so a held-but-still
+            // pan needs no further requests; a `panning` left set by a release
+            // that never reached the window used to spin here at ~450 req/s.
             if (!panning) break;
+            if (camX === lastReqX && camY === lastReqY) break;
+            lastReqX = camX; lastReqY = camY;
         }
     } finally {
         zoomRefreshBusy = false;
@@ -859,9 +911,10 @@ var tracksBeforePan = false; // restore tracks after pan
 
 function stopAnim() { running = false; lblFps = 'Gen/s: 0'; document.getElementById('playBtn').innerHTML = '&#9654; Play'; }
 
-function startAnim() { running = true; document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastTime = performance.now(); animLoop(); }
+function startAnim() { running = true; chunkEnd = performance.now(); document.getElementById('playBtn').innerHTML = '&#9638; Stop'; lastGenNum = lblGen; lastTime = performance.now(); animLoop(); }
 
 var animLoopPending = false; // prevent multiple simultaneous dispatches
+var chunkEnd = 0; // end of the previous chunk, for the inter-chunk `gap` leg
 async function animLoop() {
     var speedEl = document.getElementById('speedSlider');
     var stepEl = document.getElementById('stepSlider');
@@ -880,6 +933,26 @@ async function animLoop() {
             await refresh();
             perfAction = _tb - _ta;              // server step time + response
             perfState = performance.now() - _tb; // fetch + decode + paint
+            // Per-chunk breakdown, console only (added 2026-10-10). The info line
+            // legs sum to ~120 ms of a 137.7 ms chunk on p_126m, and headless runs
+            // the same build at ~105 ms/chunk — so ~18 ms/chunk has no leg. `gap`
+            // is the time BETWEEN chunks (setTimeout delay, browser timer clamping,
+            // rAF scheduling): the one thing no existing leg covers.
+            var _tc = performance.now();
+            // Per-chunk breakdown print (2026-10-10), kept commented so the legs
+            // above can be re-armed. Verdict it produced: body 41.5 ms -> 0.1 ms
+            // once the server listener got TCP_NODELAY; state now 1.7-4.1 ms.
+            // console.log('[chunk] gen=' + lblGen +
+            //             ' act=' + perfAction.toFixed(1) +
+            //             ' state=' + perfState.toFixed(1) +
+            //             ' (tries=' + perfTries + ' fetch=' + perfFetch.toFixed(1) +
+            //             ' head=' + perfHead.toFixed(1) + ' body=' + perfBody.toFixed(1) +
+            //             ' canary=' + perfCanary + '/' + perfCanaryGap.toFixed(1) +
+            //             ' wait=' + perfWait.toFixed(1) + ' paint=' + perfPaint.toFixed(1) +
+            //             ' sent=' + stateSentMs + ')' +
+            //             ' gap=' + (_tc - chunkEnd).toFixed(1) +
+            //             ' total=' + (_tc - startTime).toFixed(1));
+            chunkEnd = _tc;
      } else {
             // Use zoomRefresh (no gen-wait loop) to avoid stale data issues with keep-alive
             await call({action:'step'});

@@ -17,7 +17,25 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
     // GOL_PORT: experiment harness only (lets a second instance run beside the
     // production one). Uncommitted.
     let port: u16 = std::env::var("GOL_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(7654);
-    let server = Server::http(format!("0.0.0.0:{port}")).expect("Failed to start server");
+    // TCP_NODELAY set on the LISTENING socket is inherited by every accept()ed
+    // socket. tiny_http never sets it, so Nagle holds the first small write of
+    // each keep-alive response until the client's delayed ACK lands: measured
+    // 41 ms per /state exchange for payloads >= one MSS, 0.1 ms with NODELAY
+    // (shape probe reproducing tiny_http's write sequence, 2026-10-10).
+    let listener = std::net::TcpListener::bind(format!("0.0.0.0:{port}")).expect("Failed to bind");
+    {
+        unsafe extern "C" {
+            fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const i32, optlen: u32) -> i32;
+        }
+        use std::os::unix::io::AsRawFd;
+        const IPPROTO_TCP: i32 = 6;
+        const TCP_NODELAY: i32 = 1;
+        let on: i32 = 1;
+        unsafe {
+            setsockopt(listener.as_raw_fd(), IPPROTO_TCP, TCP_NODELAY, &on, 4);
+        }
+    }
+    let server = Server::from_listener(listener, None).expect("Failed to start server");
 
     println!("Game of Life running at http://localhost:{port}");
 
@@ -64,7 +82,19 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
             }
         };
 
+        // Transport probe for the /state body write (2026-10-10). Verdict: the
+        // 41-42 ms plateau was NOT the write — it was Nagle x delayed-ACK on the
+        // keep-alive socket (tiny_http sets no TCP_NODELAY). Fixed by setting
+        // TCP_NODELAY on the listening socket; the write itself measured
+        // 10-23 us all along. Probe kept commented so it can be re-armed.
         let _ = request.respond(response);
+        // let is_state = method.as_str() == "GET" && path == "/state";
+        // let body_len = response.data_length().unwrap_or(0);
+        // let t_write = std::time::Instant::now();
+        // if is_state {
+        //     eprintln!("[state-write] bytes={} write={:.0}us",
+        //         body_len, t_write.elapsed().as_nanos() as f64 / 1e3);
+        // }
     }
 }
 
@@ -295,6 +325,19 @@ fn serve_state(
         else { (vw, (vh as u64 * cap / prod) as u32) }
     };
 
+    // Pending diag: one line per /state request (61 per 1M segment at step
+    // 16384), priced per leg. Added 2026-10-10 to chase the segment-1 gap: the
+    // headless engine is equal to ebc3ae7 (median 6.53 vs 6.43 s per 1M on
+    // p_126m), so the 2 s lives here plus the client. `prev` = this client's
+    // base frame matched the server's copy; `d` = a delta was actually sent.
+    // Wall-clock entry time, so the client's `sent=` (Date.now() just before the
+    // fetch) can be compared against it: `t_ms - sent` is how long the request
+    // sat in the connection queue before this handler ran. Same machine, same
+    // clock, no skew to correct.
+    let _t_entry_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    let t0 = std::time::Instant::now();
     // Lock grid for snapshot
     let mut g = lock_grid(grid);
 
@@ -332,6 +375,7 @@ fn serve_state(
     // straight out of sim throughput (measured the hard way with the RLE codec;
     // docs/protocol.md).
     drop(g);
+    let _t_lock = t0.elapsed().as_nanos() as f64 / 1e3;
 
     let key = (vx, vy, final_vw, final_vh, scale, hashlife);
     let cid = params.get("cid").cloned().unwrap_or_default();
@@ -351,11 +395,14 @@ fn serve_state(
 
     let mut delta: Vec<u8> = Vec::new();
     let mut encoded = false;
+    let t_enc = std::time::Instant::now();
     if let Some(f) = &prev {
         // Half the bitmap is the break-even point (see use_delta below); past it
         // there is nothing to learn from finishing the scan.
         encoded = delta_encode(&f.bits, &final_bits, &mut delta, final_bits.len() / 2) != usize::MAX;
     }
+    let _t_enc = t_enc.elapsed().as_nanos() as f64 / 1e3;
+    let _dbytes = delta.len(); // `delta` is moved into the payload below
     // A delta has to beat half the bitmap to be sent. That bound also keeps a v3
     // total strictly shorter than the raw total, so the client's exact-length
     // check can never mistake a delta frame for a raw one.
@@ -390,6 +437,11 @@ fn serve_state(
     }
 
     drop(table);
+    // Per-request handler timing. Kept commented — the handler was never the
+    // cost (lock ~0.5 ms, enc ~50 us, total ~0.6 ms); the 40 ms was the socket.
+    // eprintln!("[state] gen={} vp={}x{} prev={} d={} dbytes={} bytes={} lock={:.0}us enc={:.0}us total={:.0}us t_ms={}",
+    //     base_gen, final_vw, final_vh, prev.is_some() as u8, use_delta as u8,
+    //     dbytes, data.len(), t_lock, t_enc, t0.elapsed().as_nanos() as f64 / 1e3, t_entry_ms);
     serve_octet_stream(data)
 }
 
