@@ -37,9 +37,11 @@ pub const MASK_SE: u16 = 0x0033;
 #[allow(dead_code)] // used by the pending per-gc walk diag in gc()
 static GC_ROT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Worker queues for walk_tree_roundrobin. Tunable for the A/B/C sweep without
-/// a rebuild: GOL_WALK_THREADS=n overrides the default. Expected optimum is
-/// 4..8 (8 physical cores; the walk's speedup plateaus around 4 workers).
+/// Worker queues for walk_tree_roundrobin. Tunable without a rebuild:
+/// GOL_WALK_THREADS=n, default 7, latched on first call (OnceLock) so it must be
+/// set before the process starts; values < 1 are rejected and fall back to 7.
+/// Expected optimum is 4..8 (8 physical cores; the walk's speedup plateaus
+/// around 4 workers). User-facing: see docs/environment.md.
 pub fn walk_threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {

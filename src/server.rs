@@ -14,8 +14,9 @@ fn lock_grid(grid: &Arc<Mutex<Grid>>) -> MutexGuard<'_, Grid> {
 
 pub fn run(grid: Arc<Mutex<Grid>>) {
     let frames: StateFramesHandle = Arc::new(Mutex::new(HashMap::new()));
-    // GOL_PORT: experiment harness only (lets a second instance run beside the
-    // production one). Uncommitted.
+    // GOL_PORT: listen port, default 7654. Unparsable value -> default.
+    // User-facing (see docs/environment.md): the usual way to run a second
+    // instance beside the production one, e.g. GOL_PORT=7698 ./game_of_life.
     let port: u16 = std::env::var("GOL_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(7654);
     // TCP_NODELAY set on the LISTENING socket is inherited by every accept()ed
     // socket. tiny_http never sets it, so Nagle holds the first small write of
