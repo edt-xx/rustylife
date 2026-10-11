@@ -98,15 +98,10 @@ pub struct HashLifeCache {
     pub arena: ahash::AHashMap<[u32; 4], u32>,
     /// Node storage: dense Vec indexed by idx. Grows lazily to the fresh-index
     /// high-water mark (`next_idx`); a reused (recovered) index is always
-    /// within it. Slots freed at GC are zeroed to EMPTY_NODE.
+    /// within it. Slots freed at GC are zeroed to EMPTY_NODE. A slot is freeable
+    /// iff it is not live: gc() drops the previous GC's recovered buffers before
+    /// scanning, so a dead slot can only be collected once.
     pub nodes: Vec<LifeNode>,
-    /// One bit per idx: tracks the CURRENTLY-allocated set. Set when the idx
-    /// is handed out by find_or_create, cleared when GC frees it. A freed or
-    /// never-allocated slot has its bit clear, so the GC scan never re-frees
-    /// it. (A map's extract_if removes the entry — the Vec keeps the slot, so
-    /// the bit must be cleared explicitly.) The `nodes` range is not the
-    /// allocated set; this bit is.
-    pub issued: Vec<u8>,
     /// Fast cache for advance_fast results: (node_idx, level) → advanced node.
     /// Grows with use; pruned (not rotated) by gc, which retains only entries
     /// whose referenced nodes are still live.
@@ -141,15 +136,11 @@ impl HashLifeCache {
     pub fn new() -> Self {
         let mut arena = ahash::AHashMap::with_capacity(65536);
         // Dense node storage: sentinels at idx 0/1. find_or_create resizes
-        // `nodes` lazily as new high-water indices are allocated and sets
-        // the matching `issued` bit — the bit IS the allocated set.
+        // `nodes` lazily as new high-water indices are allocated.
         let nodes = vec![
             EMPTY_NODE,
             LifeNode { north_west: 1, north_east: 1, south_west: 1, south_east: 1, is_empty: false },
         ];
-        let mut issued = vec![0u8; 2];
-        issued[0] = 1;
-        issued[1] = 1;
         // Index 0 = FALSE_NODE
         arena.insert([0,0,0,0], 0);
         // Index 1 = TRUE_NODE
@@ -157,7 +148,6 @@ impl HashLifeCache {
         Self {
             arena,
             nodes,
-            issued,
             fast_cache: ahash::AHashMap::new(),
             count_cache: ahash::AHashMap::new(),
             // No freelist worker: the fresh-index counter and the recovered
@@ -228,7 +218,6 @@ impl HashLifeCache {
                     None => {
                         self.alloc = AllocState::Index;
                         self.nodes.reserve(262144);
-                        self.issued.reserve(262144);
                         let i = self.next_idx;
                         self.next_idx += 1;
                         i
@@ -238,23 +227,19 @@ impl HashLifeCache {
         };
         let node = LifeNode { north_west: nw, north_east: ne, south_west: sw, south_east: se, is_empty };
         // Dense storage: lazily extend `nodes` on a new high-water idx (a fresh
-        // index can jump ahead of the Vec end) and set that idx's `issued` bit
-        // (GC clears it on free) so the GC scan can tell currently-allocated
-        // (bit set) from freed/never-allocated (bit clear). This runs the same
-        // for fresh (Index) and reused (Recovered) indices.
+        // index can jump ahead of the Vec end). This runs the same for fresh
+        // (Index) and reused (Recovered) indices.
         let i = idx as usize;
         if i >= self.nodes.len() {
             self.nodes.resize(i+1, EMPTY_NODE);
-            self.issued.resize(i+1, 0);
         }
-        self.issued[i] = 1;
         self.nodes[i] = node;
         self.arena.insert(key, idx);
         idx
     }
 
-    /// Serial twin of walk_tree_threaded: same four quadrant walks, same two    /// slow-cache walks (with the issued guard), same live bitvector — just on
-    /// one thread. Body is duplicated from walk_tree_threaded on purpose so
+    /// Serial twin of walk_tree_threaded: same four quadrant walks, same two
+    /// slow-cache walks, same live bitvector — just on one thread. Body is duplicated from walk_tree_threaded on purpose so
     /// the two can be A/B'd against a gc threshold; dedupe during cleanup.
     pub fn walk_tree(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
         let root_node = self.get_node(root);
@@ -270,7 +255,6 @@ impl HashLifeCache {
         extend_zeros(&mut live, live_size);
         live[root as usize].store(1, Ordering::SeqCst);
 
-        let issued = &self.issued;
 
         // 4 quadrant walks, sequentially.
         for &child in &children {
@@ -300,11 +284,6 @@ impl HashLifeCache {
                 stack.push((key >> 32) as u32);
                 while let Some(idx) = stack.pop() {
                     let i = idx as usize;
-                    // Skip nodes not currently issued (stale cache key may
-                    // reference a freed/reissued idx) — same guard as threaded.
-                    if issued[i] == 0 {
-                        continue;
-                    }
                     if live[i].load(Ordering::Relaxed) != 0 {
                         continue;
                     }
@@ -329,9 +308,6 @@ impl HashLifeCache {
                 stack.push((key >> 32) as u32);
                 while let Some(idx) = stack.pop() {
                     let i = idx as usize;
-                    if issued[i] == 0 {
-                        continue;
-                    }
                     if live[i].load(Ordering::Relaxed) != 0 {
                         continue;
                     }
@@ -379,10 +355,6 @@ impl HashLifeCache {
         // cache) is expanded once and the rest prune on the live bit.
         rayon::scope(|scope| {
             let live = &live;
-            // Shared reference to the issued bitvector so the `move` closures
-            // borrow (not move) it: `let issued = self.issued` moves out of
-            // `&self` (E0507); the `&` is Copy and each closure copies it.
-            let issued = &self.issued;
             // 4 threads for tree quadrants
             for &child in &children {
                 scope.spawn(move |_| {
@@ -413,13 +385,6 @@ impl HashLifeCache {
                     stack.push((key >> 32) as u32);
                     while let Some(idx) = stack.pop() {
                         let i = idx as usize;
-                        // Skip nodes not currently issued: a stale cache key
-                        // may reference an idx GC freed (possibly already
-                        // reissued to another node). Plain byte load, put
-                        // before the atomic live check.
-                        if issued[i] == 0 {
-                            continue;
-                        }
                         if live[i].load(Ordering::Relaxed) != 0 {
                             continue;
                         }
@@ -444,10 +409,6 @@ impl HashLifeCache {
                     stack.push((key >> 32) as u32);
                     while let Some(idx) = stack.pop() {
                         let i = idx as usize;
-                        // Same issued guard as the slow_cache_n thread.
-                        if issued[i] == 0 {
-                            continue;
-                        }
                         if live[i].load(Ordering::Relaxed) != 0 {
                             continue;
                         }
@@ -470,14 +431,12 @@ impl HashLifeCache {
     }
 
     /// C variant, worker half: walk one root's subtree with a private stack.
-    /// Every pop passes the `issued` guard; for tree-reachable nodes issued is
-    /// always 1, so this matches the A/B variants while letting one queue mix
-    /// tree and slow-cache roots (uniform code on every worker).
-    fn walk_node(&self, root: u32, live: &[AtomicU8], issued: &[u8]) {
+    /// Roots are tree quadrants and slow-cache keys, so one queue can mix tree
+    /// and slow-cache roots (uniform code on every worker).
+    fn walk_node(&self, root: u32, live: &[AtomicU8]) {
         let mut stack = vec![ root ];
         while let Some(idx) = stack.pop() {
             let i = idx as usize;
-            if issued[i] == 0 { continue; }
             if live[i].load(Ordering::Relaxed) != 0 { continue; }
             live[i].store(1, Ordering::SeqCst);
             if let Some(node) = self.nodes.get(i) {
@@ -530,11 +489,10 @@ impl HashLifeCache {
 
         rayon::scope(|scope| {
             let live = &live;
-            let issued = &self.issued;
             for q in queues {
                 scope.spawn(move |_| {
                     for &r in &q {
-                        self.walk_node(r, live, issued);
+                        self.walk_node(r, live);
                     }
                 });
             }
@@ -576,38 +534,40 @@ impl HashLifeCache {
         // spawned (both walk scopes joined), so no atomic ordering is needed
         // at read time.
         //eprintln!("gc n {} n1 {}",slow_cache_n.len(), slow_cache_n1.len());
+        // The `issued` bitvector is gone (2026-10-11): the scan treats every
+        // non-live slot as freeable, so the recovered buffers left over from the
+        // previous GC are dropped FIRST — a dead slot that was never reused would
+        // otherwise be collected twice and the same index handed to two nodes.
+        // Those buffers only ever hold dead slots, and a dead slot is re-discovered
+        // by this scan, so nothing is lost. Resetting to Index also means this GC's
+        // recovered buffer goes straight into `freed` for immediate reuse.
+        self.freed.clear();
+        self.reuse.clear();
+        self.alloc = AllocState::Index;
         let live_ref: &Vec<AtomicU8> = &live;
         let (freed_vec, live_len): (Vec<u32>, u64) = std::thread::scope(|s| {
             let nodes = &mut self.nodes;
-            let issued = &mut self.issued;
             // Sending Gc msg to worker directly (modified to just add to front) is 3-4% slower
             // It is critical to performance to use freed nodes asap avoiding 'new' nodes...
             let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
             s.spawn(move || {
                 // Dense Vec: no extract (removing an element would shift
-                // every index). Scan instead. A slot is freeable ONLY if
-                // issued (handed out of a buffer) and not live. Never-issued
-                // slots (the Vec's range always outruns the allocated set)
-                // are skipped: freeing them would double-allocate an index
-                // still held in its original buffer. Dead slots are zeroed
-                // so a freed slot never reads as a live node (the map's
-                // extract_if made freed slots simply absent).
+                // every index). Scan instead. A slot is freeable iff it is NOT
+                // live: the previous GC's recovered buffers were dropped before
+                // this scope, so a dead slot is collected exactly once. Dead
+                // slots are zeroed so a freed slot never reads as a live node
+                // (the map's extract_if made freed slots simply absent).
                 let mut fv: Vec<u32> = Vec::new();
                 for i in 0..nodes.len() {
-                    if issued[i] == 0 { continue; }
                     // Bitvector: direct byte load (the old shared-AHashSet
                     // contains was a hash probe per slot). Guarded get in case
                     // the Vec ever grew past the bitvector (shouldn't happen
                     // mid-gc; out-of-range reads as dead).
                     if live_ref.get(i).map_or(true, |b| b.load(Ordering::Relaxed) == 0) {
-                        // Free: zero the slot AND clear the issued bit. The
-                        // clear is the key — the Vec keeps the slot (a map's
-                        // extract_if removed it), so without clearing, the
-                        // next GC would see issued still set and free the
-                        // same idx again → double-allocation → clobbered
-                        // children → corruption.
+                        // Free: zero the slot. Double-collection is prevented by
+                        // dropping the recovered buffers at the top of gc(), not
+                        // by a per-slot bit.
                         nodes[i] = EMPTY_NODE;
-                        issued[i] = 0;
                         fv.push(i as u32);
                     }
                 }
@@ -622,9 +582,9 @@ impl HashLifeCache {
 
             // Thread: drop slow_cache_n entries whose key node or result is
             // not live (restore of the f6d4df2 retain; dca4da7 dropped it).
-            // Pairs with the walk's issued guard: stale keys are never marked
-            // live, so their entries are pruned here. The `move` moves the
-            // `&mut` param into this one thread; the scope owns its lifetime.
+            // Stale keys are never marked live, so their entries are pruned
+            // here. The `move` moves the `&mut` param into this one thread; the
+            // scope owns its lifetime.
             s.spawn(move || {
                 slow_cache_n.retain(|&key, ridx| live_ref.get((key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
