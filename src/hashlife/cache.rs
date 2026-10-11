@@ -3,20 +3,6 @@ use ahash::AHashMap;
 use std::collections::VecDeque;
 use std::sync::{mpsc, atomic::{AtomicU8, Ordering}};
 
-/// `Zeroed`), so `vec![...; n]` / `repeat().take()` / `repeat_n` can't fill
-/// one — write them in place.
-pub fn extend_zeros(v: &mut Vec<AtomicU8>, n: usize) {
-    if n == 0 { return; }
-    let start = v.len();
-    v.reserve(n);
-    unsafe {
-        for i in start..start + n {
-            *v.as_mut_ptr().add(i) = AtomicU8::new(0);
-        }
-        v.set_len(start + n);
-    }
-}
-
 /// FALSE_NODE = index 0 (all children 0 = empty)
 pub const FALSE_NODE: u32 = 0;
 
@@ -267,8 +253,13 @@ impl HashLifeCache {
         ];
 
         let live_size = self.nodes.len().max(2);
-        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
-        extend_zeros(&mut live, live_size);
+        // Zeroed live bitvector. AtomicU8 is not Clone (and is !From<Vec<u8>>),
+        // so the fill goes through a u8 buffer: `vec![0u8; n]` lowers to a single
+        // __rust_alloc_zeroed (fresh pages skip the fill entirely), and the
+        // elementwise map is proven layout-preserving, so it folds away — one
+        // allocation, no copy, no unsafe. The zeros are load-bearing: the gc free
+        // scan and the live_len sum read every slot.
+        let live: Vec<AtomicU8> = vec![0u8; live_size].into_iter().map(AtomicU8::from).collect();
         live[root as usize].store(1, Ordering::SeqCst);
 
         // Round-robin deal: root i -> queue i % nt. Counts stay within one of
