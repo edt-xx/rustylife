@@ -38,17 +38,22 @@ pub const MASK_SE: u16 = 0x0033;
 static GC_ROT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Worker queues for walk_tree_roundrobin. Tunable without a rebuild:
-/// GOL_WALK_THREADS=n, default 7, latched on first call (OnceLock) so it must be
-/// set before the process starts; values < 1 are rejected and fall back to 7.
+/// GOL_WALK_THREADS=n. Default is **physical cores - 1** (7 on an 8-core box),
+/// from `hashlife::physical_cores()` — the same core count the classic engine
+/// uses. Latched on first call (OnceLock) so it must be set before the process
+/// starts; values < 1 are rejected and fall back to the default.
 /// Expected optimum is 4..8 (8 physical cores; the walk's speedup plateaus
-/// around 4 workers). User-facing: see docs/environment.md.
+/// around 4 workers). Storage does NOT scale with n: each queue is reserved
+/// `arena.len()/n + 8`, so total queue capacity is about the arena size at any
+/// count — the variable changes only how many threads split the walk.
+/// User-facing: see docs/environment.md.
 pub fn walk_threads() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("GOL_WALK_THREADS").ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|v| *v >= 1)
-            .unwrap_or(7)
+            .unwrap_or_else(|| super::physical_cores().saturating_sub(1).max(1))
     })
 }
 

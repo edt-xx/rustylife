@@ -6,7 +6,7 @@ neither can be changed while the server is running.
 | Variable | Default | What it does |
 |----------|---------|--------------|
 | `GOL_PORT` | `7654` | TCP port for the web UI and the `/state` API |
-| `GOL_WALK_THREADS` | `7` | Worker threads used by the engine's per-gc cache walk |
+| `GOL_WALK_THREADS` | physical cores − 1 | Worker threads used by the engine's per-gc cache walk |
 
 ## GOL_PORT
 
@@ -37,7 +37,10 @@ Notes:
 ## GOL_WALK_THREADS
 
 Number of worker queues the HashLife cache walk uses when it walks the tree to
-recount live cells (it runs on each cache collection, not every step).
+recount live cells (it runs on each cache collection, not every step). The
+default is **physical cores − 1** — 7 on an 8-core machine — using the same
+core count the classic engine uses for its threading, so it adapts to the
+machine rather than being a fixed number.
 
 ```sh
 GOL_WALK_THREADS=4 ./target/release/game_of_life
@@ -46,7 +49,7 @@ GOL_WALK_THREADS=4 ./target/release/game_of_life
 Notes:
 
 - Read once and cached, so it must be set before the process starts.
-- Must be at least 1; `0` or an unparseable value falls back to the default `7`.
+- Must be at least 1; `0` or an unparseable value falls back to the default.
 - The useful range is roughly 4–8 on an 8-core machine; the walk's speedup
   plateaus around 4 workers. Raising it does not cost memory — the queues are
   sized `arena/nt` each, so total capacity is about the arena size either way —

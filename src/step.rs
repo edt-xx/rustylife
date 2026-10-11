@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Instant, Duration};
 use crate::grid::*;
 
@@ -55,17 +55,10 @@ fn log_generation_threshold(generation: u32, is_first_step: bool) {
 }
 
 fn max_procs() -> usize {
-    fn calc() -> usize {
-        // Cross-platform physical core count via sysinfo (static method in 0.37)
-        sysinfo::System::physical_core_count()
-            .map(|c| c as usize)
-            .unwrap_or_else(|| {
-                // Fallback: query logical threads, assume SMT=2
-                std::thread::available_parallelism().map(|p| p.get() / 2).unwrap_or(4)
-            })
-    }
-    static MAX: OnceLock<usize> = OnceLock::new();
-    *MAX.get_or_init(calc)
+    // Single source of truth in the lib, shared with the HashLife gc-walk
+    // worker default. This used to inline sysinfo's physical_core_count() with
+    // an available_parallelism()/2 fallback.
+    game_of_life::hashlife::physical_cores()
 }
 
 /// Compute tile key directly from packed u64 — masks bottom 2 bits of both x and y

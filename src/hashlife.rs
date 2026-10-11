@@ -27,6 +27,25 @@ pub use viewport::*;
 
 use ahash::AHashMap;
 
+/// Physical core count, cross-platform, latched on first call. `sysinfo` gives
+/// it directly; if that is unavailable, assume SMT=2 from the logical thread
+/// count. Shared by the classic engine's thread count (`src/step.rs`) and the
+/// HashLife gc-walk worker default (`src/hashlife/cache.rs`) so both agree on
+/// what "cores" means on this machine.
+pub fn physical_cores() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        // Static method in sysinfo 0.37.
+        sysinfo::System::physical_core_count()
+            .map(|c| c as usize)
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|p| p.get() / 2)
+                    .unwrap_or(4)
+            })
+    })
+}
+
 pub struct HashLife {
     pub cache: HashLifeCache,
     root: u32,
