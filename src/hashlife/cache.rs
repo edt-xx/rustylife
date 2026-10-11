@@ -29,14 +29,6 @@ pub const MASK_NE: u16 = 0x3300;
 pub const MASK_SW: u16 = 0x00CC;
 pub const MASK_SE: u16 = 0x0033;
 
-// TEMP walk A/B instrumentation: gc() alternates the two walk variants on
-// every call (even = serial walk_tree, odd = walk_tree_threaded) and prints
-// each call's timing with eprintln!. note_idx = nodes.len(), the arena
-// high-water the live bitvector is sized to. Remove after the threshold is
-// found.
-#[allow(dead_code)] // used by the pending per-gc walk diag in gc()
-static GC_ROT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Worker queues for walk_tree_roundrobin. Tunable without a rebuild:
 /// GOL_WALK_THREADS=n. Default is **physical cores - 1** (7 on an 8-core box),
 /// from `hashlife::physical_cores()` — the same core count the classic engine
@@ -238,198 +230,6 @@ impl HashLifeCache {
         idx
     }
 
-    /// Serial twin of walk_tree_threaded: same four quadrant walks, same two
-    /// slow-cache walks, same live bitvector — just on one thread. Body is duplicated from walk_tree_threaded on purpose so
-    /// the two can be A/B'd against a gc threshold; dedupe during cleanup.
-    pub fn walk_tree(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
-        let root_node = self.get_node(root);
-        let children = [
-            root_node.north_west,
-            root_node.north_east,
-            root_node.south_west,
-            root_node.south_east,
-        ];
-
-        let live_size = self.nodes.len().max(2);
-        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
-        extend_zeros(&mut live, live_size);
-        live[root as usize].store(1, Ordering::SeqCst);
-
-
-        // 4 quadrant walks, sequentially.
-        for &child in &children {
-            let mut stack = vec![ child ];
-            while let Some(idx) = stack.pop() {
-                if live[idx as usize].load(Ordering::Relaxed) != 0 {
-                    continue;
-                }
-                live[idx as usize].store(1, Ordering::SeqCst);
-                if let Some(node) = self.nodes.get(idx as usize) {
-                    if node.is_empty {
-                        continue;
-                    }
-                    stack.push(node.north_west);
-                    stack.push(node.north_east);
-                    stack.push(node.south_west);
-                    stack.push(node.south_east);
-                }
-            }
-        }
-
-        // slow_cache_n walk: iterate the map, push each referenced node,
-        // walk its subtree.
-        {
-            let mut stack = Vec::<u32>::new();
-            for (&key, _) in slow_cache_n.iter() {
-                stack.push((key >> 32) as u32);
-                while let Some(idx) = stack.pop() {
-                    let i = idx as usize;
-                    if live[i].load(Ordering::Relaxed) != 0 {
-                        continue;
-                    }
-                    live[i].store(1, Ordering::SeqCst);
-                    if let Some(node) = self.nodes.get(i) {
-                        if node.is_empty {
-                            continue;
-                        }
-                        stack.push(node.north_west);
-                        stack.push(node.north_east);
-                        stack.push(node.south_west);
-                        stack.push(node.south_east);
-                    }
-                }
-            }
-        }
-
-        // slow_cache_n1 walk: same shape, other cache.
-        {
-            let mut stack = Vec::<u32>::new();
-            for (&key, _) in slow_cache_n1.iter() {
-                stack.push((key >> 32) as u32);
-                while let Some(idx) = stack.pop() {
-                    let i = idx as usize;
-                    if live[i].load(Ordering::Relaxed) != 0 {
-                        continue;
-                    }
-                    live[i].store(1, Ordering::SeqCst);
-                    if let Some(node) = self.nodes.get(i) {
-                        if node.is_empty {
-                            continue;
-                        }
-                        stack.push(node.north_west);
-                        stack.push(node.north_east);
-                        stack.push(node.south_west);
-                        stack.push(node.south_east);
-                    }
-                }
-            }
-        }
-
-        live
-    }
-
-    /// Collect all reachable node indices from root using a rayon::scope:
-    /// 6 jobs on the shared pool (4 tree quadrants + one per slow cache).
-    /// Was std::thread::scope, which spawned 6 fresh OS threads per gc call.
-    pub fn walk_tree_threaded(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
-        let root_node = self.get_node(root);
-        let children = [
-            root_node.north_west,
-            root_node.north_east,
-            root_node.south_west,
-            root_node.south_east,
-        ];
-
-        // Live bitvector: one byte per idx, sized to the node range; marked
-        // idempotently so overlapping walks can mark the same byte. nodes
-        // never shrinks (freed slots are zeroed, not removed) and does not
-        // grow during the walk, so the size holds for the whole gc.
-        let live_size = self.nodes.len().max(2);
-        let mut live: Vec<AtomicU8> = Vec::with_capacity(live_size);
-        extend_zeros(&mut live, live_size);
-        live[root as usize].store(1, Ordering::SeqCst);
-
-        // Walk scope: 4 quadtree threads + one thread per slow cache, all
-        // pruning on live concurrently. No dedup set: the mark is idempotent
-        // (load-check + store), so a node reached by any walk (quadrant or
-        // cache) is expanded once and the rest prune on the live bit.
-        rayon::scope(|scope| {
-            let live = &live;
-            // 4 threads for tree quadrants
-            for &child in &children {
-                scope.spawn(move |_| {
-                    let mut stack = vec![ child ];
-                    while let Some(idx) = stack.pop() {
-                        if live[idx as usize].load(Ordering::Relaxed) != 0 {
-                            continue;
-                        }
-                        live[idx as usize].store(1, Ordering::SeqCst);
-                        if let Some(node) = self.nodes.get(idx as usize) {
-                            if node.is_empty {
-                                continue;
-                            }
-                            stack.push(node.north_west);
-                            stack.push(node.north_east);
-                            stack.push(node.south_west);
-                            stack.push(node.south_east);
-                        }
-                    }
-                });
-            }
-
-            // slow_cache_n walk: iterate the map, push each referenced node,
-            // walk its subtree. Overlaps the n1 thread; live dedups.
-            scope.spawn(move |_| {
-                let mut stack = Vec::<u32>::new();
-                for (&key, _) in slow_cache_n.iter() {
-                    stack.push((key >> 32) as u32);
-                    while let Some(idx) = stack.pop() {
-                        let i = idx as usize;
-                        if live[i].load(Ordering::Relaxed) != 0 {
-                            continue;
-                        }
-                        live[i].store(1, Ordering::SeqCst);
-                        if let Some(node) = self.nodes.get(i) {
-                            if node.is_empty {
-                                continue;
-                            }
-                            stack.push(node.north_west);
-                            stack.push(node.north_east);
-                            stack.push(node.south_west);
-                            stack.push(node.south_east);
-                        }
-                    }
-                }
-            });
-
-            // slow_cache_n1 walk: same shape, other cache.
-            scope.spawn(move |_| {
-                let mut stack = Vec::<u32>::new();
-                for (&key, _) in slow_cache_n1.iter() {
-                    stack.push((key >> 32) as u32);
-                    while let Some(idx) = stack.pop() {
-                        let i = idx as usize;
-                        if live[i].load(Ordering::Relaxed) != 0 {
-                            continue;
-                        }
-                        live[i].store(1, Ordering::SeqCst);
-                        if let Some(node) = self.nodes.get(i) {
-                            if node.is_empty {
-                                continue;
-                            }
-                            stack.push(node.north_west);
-                            stack.push(node.north_east);
-                            stack.push(node.south_west);
-                            stack.push(node.south_east);
-                        }
-                    }
-                }
-            });
-        });
-
-        live
-    }
-
     /// C variant, worker half: walk one root's subtree with a private stack.
     /// Roots are tree quadrants and slow-cache keys, so one queue can mix tree
     /// and slow-cache roots (uniform code on every worker).
@@ -509,8 +309,8 @@ impl HashLifeCache {
         // serial 67.2; at >=2M nodes 19.9 vs 53.4 / 72.7), and confirmed by Ed
         // in the UI. p_acorn 5000 gens pinned serial vs rr produced identical
         // node/alive counts and identical bbox.
-        // walk_tree (serial) and walk_tree_threaded (4 quadrants + 2 slow
-        // caches) are kept for reference and for the pending diag below.
+        // The serial and threaded variants these were measured against were
+        // removed 2026-10-11; the numbers above are the record of that A/B.
         let live = self.walk_tree_roundrobin(root, slow_cache_n1, slow_cache_n);
         // Pending diag: per-gc walk timing. Measured 2026-10-10 on p_126m via the
         // browser path: ~19 ms total per 1M gens (61 calls at step 16384) at both
