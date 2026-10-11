@@ -547,12 +547,14 @@ impl HashLifeCache {
         // walk_tree (serial) and walk_tree_threaded (4 quadrants + 2 slow
         // caches) are kept for reference and for the pending diag below.
         let live = self.walk_tree_roundrobin(root, slow_cache_n1, slow_cache_n);
-        // Pending diag: per-gc walk timing + the three-way rotation. Uncomment
-        // to re-run the sweep (GOL_WALK_VARIANT=serial|threaded|rr pins one):
-        // let rot = GC_ROT.fetch_add(1, Ordering::Relaxed);
+        // Pending diag: per-gc walk timing. Measured 2026-10-10 on p_126m via the
+        // browser path: ~19 ms total per 1M gens (61 calls at step 16384) at both
+        // rr6 and rr12 = 0.2% of the segment, so the walk is not a throughput
+        // lever at this pattern size. Uncomment to re-measure; t0 must stay ABOVE
+        // the walk. The rr field is what proves GOL_WALK_THREADS=n reached the code.
         // let t0 = std::time::Instant::now();
-        // eprintln!("[walk] rot={} note_idx={} arena={} ({:.1} MB) rr{} {:.1} us",
-        //     rot, self.nodes.len(), self.arena.len(),
+        // eprintln!("[walk] note_idx={} arena={} ({:.1} MB) rr{} {:.1} us",
+        //     self.nodes.len(), self.arena.len(),
         //     self.nodes.len() as f64 * std::mem::size_of::<LifeNode>() as f64 / 1e6,
         //     walk_threads(), t0.elapsed().as_nanos() as f64 / 1e3);
 
