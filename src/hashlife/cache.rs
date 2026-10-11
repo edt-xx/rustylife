@@ -336,12 +336,25 @@ impl HashLifeCache {
         self.reuse.clear();
         self.alloc = AllocState::Index;
         let live_ref: &Vec<AtomicU8> = &live;
-        let (freed_vec, live_len): (Vec<u32>, u64) = std::thread::scope(|s| {
-            let nodes = &mut self.nodes;
+        // Retain phase runs on the rayon pool, not fresh OS threads. It used to be
+        // std::thread::scope, which paid 7 create+join pairs per gc call (~25-40 us
+        // each, x 61 gc calls per 1M gens at step 16384) and oversubscribed the box:
+        // the 16 pool workers are still alive after the walk, plus 7 fresh threads on
+        // 16 logical CPUs. On the pool these tasks are also work-stolen, which matters
+        // because their costs are unequal (full-arena free scan vs a count_cache
+        // retain). INVARIANT: gc() must not be called from inside a rayon worker --
+        // the recv() calls below block a thread while the pool drains these jobs.
+        // gc() is main/server-thread only today.
+        let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
+        let (tx2, rx2) = mpsc::channel::<u64>();
+        let nodes = &mut self.nodes;
+        let fast_cache = &mut self.fast_cache;
+        let arena = &mut self.arena;
+        let count_cache = &mut self.count_cache;
+        rayon::scope(|s| {
             // Sending Gc msg to worker directly (modified to just add to front) is 3-4% slower
             // It is critical to performance to use freed nodes asap avoiding 'new' nodes...
-            let (tx1, rx1) = mpsc::channel::<Vec<u32>>();
-            s.spawn(move || {
+            s.spawn(move |_| {
                 // Dense Vec: no extract (removing an element would shift
                 // every index). Scan instead. A slot is freeable iff it is NOT
                 // live: the previous GC's recovered buffers were dropped before
@@ -365,51 +378,48 @@ impl HashLifeCache {
                 let _ = tx1.send(fv);
             });
 
-            // Thread: remove dead entries from fast_cache
-            let fast_cache = &mut self.fast_cache;
-            s.spawn(|| {
+            // Task: remove dead entries from fast_cache
+            s.spawn(|_| {
                 fast_cache.retain(|&(nidx, _), ridx| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread: drop slow_cache_n entries whose key node or result is
+            // Task: drop slow_cache_n entries whose key node or result is
             // not live (restore of the f6d4df2 retain; dca4da7 dropped it).
             // Stale keys are never marked live, so their entries are pruned
             // here. The `move` moves the `&mut` param into this one thread; the
             // scope owns its lifetime.
-            s.spawn(move || {
+            s.spawn(move |_| {
                 slow_cache_n.retain(|&key, ridx| live_ref.get((key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
             // and n1
-            s.spawn(move || {
+            s.spawn(move |_| {
                 slow_cache_n1.retain(|&key, ridx| live_ref.get((key >> 32) as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0) && live_ref.get(*ridx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread: remove dead entries from arena, add sentinels
-            let arena = &mut self.arena;
-            s.spawn(|| {
+            // Task: remove dead entries from arena, add sentinels
+            s.spawn(|_| {
                 arena.retain(|_, idx| live_ref.get(*idx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
                 arena.entry([0,0,0,0]).or_insert(0);
                 arena.entry([1,1,1,1]).or_insert(1);
             });
 
-            // Thread: retain live entries in count_cache
-            let count_cache = &mut self.count_cache;
-            s.spawn(|| {
+            // Task: retain live entries in count_cache
+            s.spawn(|_| {
                 count_cache.retain(|&(nidx, _), _| live_ref.get(nidx as usize).map_or(false, |b| b.load(Ordering::Relaxed) != 0));
             });
 
-            // Thread: sum the live bitvector (plain Relaxed loads — all
+            // Task: sum the live bitvector (plain Relaxed loads — all
             // marks are done). Overlaps with the retains instead of running
             // sequentially before them.
-            let (tx2, rx2) = mpsc::channel::<u64>();
-            s.spawn(move || {
+            s.spawn(move |_| {
                 let len: u64 = live_ref.iter().map(|b| b.load(Ordering::Relaxed) as u64).sum();
                 let _ = tx2.send(len);
             });
 
-            (rx1.recv().unwrap(), rx2.recv().unwrap())
         });
+        let freed_vec = rx1.recv().unwrap();
+        let live_len = rx2.recv().unwrap();
         //eprintln!("slow n {} n1 {}",slow_cache_n.len(), slow_cache_n1.len());
         // gc() returns the recovered indices; from here the GC is main-thread
         // only. Feed them to the freelist state machine:
