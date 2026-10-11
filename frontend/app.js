@@ -757,15 +757,19 @@ function updateLabels(vw, vh) {
             parts.push('Heap: ' + lblHeap + ' (' + lblTiles + ')');
         }
         if (protoVerBad) { parts.push('\u26a0 proto v' + protoVer); }
-        // Chunk legs: `state` includes `paint` (paint is inside the refresh call).
-        // f/d = full frames vs deltas received; resync only shows when non-zero.
-        if (perfAction || perfState || perfPaint) {
-            parts.push('act ' + perfAction.toFixed(0) + 'ms state ' + perfState.toFixed(0)
-                       + '(paint ' + perfPaint.toFixed(0) + ')ms');
-            parts.push('p' + perfProto + ' ' + (perfBytes / 1024).toFixed(1) + 'k'
-                       + ' f' + perfFull + '/d' + perfDelta
-                       + (resyncCount ? ' \u26a0resync:' + resyncCount : ''));
-        }
+        // Chunk legs in info line 1 (added 2026-10-10 to find the ~40 ms /state
+        // plateau — it was Nagle x delayed-ACK, fixed by TCP_NODELAY on the
+        // server listener). Kept commented; the perf* assignments still run, so
+        // uncommenting this block re-arms the display. Note the resync warning
+        // counter lives here too: while commented, a delta resync is only
+        // visible via the '[gol] delta resync:' console.warn.
+        // if (perfAction || perfState || perfPaint) {
+        //     parts.push('act ' + perfAction.toFixed(0) + 'ms state ' + perfState.toFixed(0)
+        //                + '(paint ' + perfPaint.toFixed(0) + ')ms');
+        //     parts.push('p' + perfProto + ' ' + (perfBytes / 1024).toFixed(1) + 'k'
+        //                + ' f' + perfFull + '/d' + perfDelta
+        //                + (resyncCount ? ' \u26a0resync:' + resyncCount : ''));
+        // }
         l1.textContent = parts.join('\xa0\xa0');
     }
     var l2 = document.getElementById('infoLine2');
