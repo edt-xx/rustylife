@@ -24,6 +24,10 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
     // 41 ms per /state exchange for payloads >= one MSS, 0.1 ms with NODELAY
     // (shape probe reproducing tiny_http's write sequence, 2026-10-10).
     let listener = std::net::TcpListener::bind(format!("0.0.0.0:{port}")).expect("Failed to bind");
+    // `TcpListener` has no `set_nodelay` in std (that method is on `TcpStream`), so
+    // the option is set with a raw setsockopt on each platform. The unix-only
+    // version compiled before `4eb4f10` and broke `--target x86_64-pc-windows-gnu`.
+    #[cfg(not(windows))]
     {
         unsafe extern "C" {
             fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const i32, optlen: u32) -> i32;
@@ -34,6 +38,21 @@ pub fn run(grid: Arc<Mutex<Grid>>) {
         let on: i32 = 1;
         unsafe {
             setsockopt(listener.as_raw_fd(), IPPROTO_TCP, TCP_NODELAY, &on, 4);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        // ws2_32: int setsockopt(SOCKET s, int level, int optname, const char *optval, int optlen)
+        // SOCKET is UINT_PTR, hence usize here. ws2_32 is already linked by std.
+        unsafe extern "C" {
+            fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
+        }
+        const IPPROTO_TCP: i32 = 6;
+        const TCP_NODELAY: i32 = 1;
+        let on: i8 = 1;
+        unsafe {
+            setsockopt(listener.as_raw_socket() as usize, IPPROTO_TCP, TCP_NODELAY, &on, 4);
         }
     }
     let server = Server::from_listener(listener, None).expect("Failed to start server");
