@@ -159,6 +159,25 @@ fn parse_rle(text: &str) -> Vec<(u64, u64)> {
 
 // -------------------------------------------------------------------- main
 
+// Signed bbox of packed coords (low 64 = x, high 64 = y). Signed compare is the
+// correct order in hashlife space — a wide pattern straddles the u64 sign bit.
+fn flat_bbox(flat: &[u128]) -> (i64, i64, i64, i64) {
+    let f0 = flat[0];
+    let mnx0 = (f0 & 0xFFFF_FFFF_FFFF_FFFF) as u64 as i64;
+    let mny0 = (f0 >> 64) as u64 as i64;
+    let (mut mnx, mut mxx) = (mnx0, mnx0);
+    let (mut mny, mut mxy) = (mny0, mny0);
+    for f in flat.iter().skip(1) {
+        let x = (*f & 0xFFFF_FFFF_FFFF_FFFF) as u64 as i64;
+        let y = (*f >> 64) as u64 as i64;
+        if x < mnx { mnx = x; }
+        if x > mxx { mxx = x; }
+        if y < mny { mny = y; }
+        if y > mxy { mxy = y; }
+    }
+    (mnx, mxx, mny, mxy)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = args.get(1).cloned().unwrap_or_else(|| "/home/ed/builds/a_lif/Spiral growth.mc".into());
@@ -193,10 +212,52 @@ fn main() {
     eprintln!("from_flat: nodes={}, alive={}", hf.cache.nodes.len(), hf.alive_count());
 
     // Advance.
+    // Interleaved mode (7th arg "1"): fill the viewport between steps exactly
+    // the way serve_state does, and print per-chunk step/fill ms. Added
+    // 2026-10-10 to reproduce the live-vs-headless step gap locally: the browser
+    // run costs 140.6 ms per 16384-chunk on p_126m, this bench 101.8 ms, and the
+    // /state handler itself only accounts for ~0.4 ms of it.
+    let interleave = args.get(7).map(|s| s == "1").unwrap_or(false);
+    let iv = if interleave {
+        // Viewport centered on the pattern's INITIAL bbox and then held fixed —
+        // what the browser does after a load (camera at the pattern center, no
+        // pan), so the fill window matches the client's vx/vy behaviour.
+        let (mnx, mxx, mny, mxy) = flat_bbox(&flat);
+        let cx = mnx + (mxx - mnx) / 2;
+        let cy = mny + (mxy - mny) / 2;
+        let hvx = cx.wrapping_sub(vw as i64 / 2) as u64;
+        let hvy = cy.wrapping_sub(vh as i64 / 2) as u64;
+        let (ia, ib, iwa, iha) = hf.aligned_viewport(hvx, hvy, vw, vh, scale);
+        let su = scale as usize;
+        let aw = if scale > 1 { (iwa as usize + su - 1) / su } else { iwa as usize };
+        let ah = if scale > 1 { (iha as usize + su - 1) / su } else { iha as usize };
+        let blen = (aw * ah + 7) / 8;
+        eprintln!("[bench_state] interleaved fill: ({},{}) {}x{} scale {} buffer {} bytes",
+            ia, ib, iwa, iha, scale, blen);
+        Some((ia, ib, iwa, iha, blen))
+    } else {
+        None
+    };
+
     let mut gen_done: u32 = 0;
     let ts = Instant::now();
     while gen_done < max_gens {
+        let t_step = Instant::now();
         hf.step_n(step);
+        let step_ms = t_step.elapsed().as_secs_f64() * 1000.0;
+        if let Some((ia, ib, iwa, iha, blen)) = iv {
+            // Server-style: fresh zeroed buffer per call (no reuse), same call.
+            let t_fill = Instant::now();
+            let mut bits = vec![0u8; blen];
+            if scale > 1 {
+                hf.populate_aggregated_viewport(ia, ib, iwa, iha, scale, &mut bits);
+            } else {
+                hf.populate_viewport(ia, ib, iwa, iha, &mut bits);
+            }
+            eprintln!("[bench_state] gen={} step={:.1}ms fill={:.1}ms nodes={}",
+                gen_done.saturating_add(step), step_ms,
+                t_fill.elapsed().as_secs_f64() * 1000.0, hf.cache.nodes.len());
+        }
         gen_done = gen_done.saturating_add(step);
     }
     eprintln!("stepped to gen {} in {:.2}s ({} nodes, {} alive)",
