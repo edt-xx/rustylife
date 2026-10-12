@@ -15,7 +15,7 @@ pub const MASK_NE: u16 = 0x3300;
 pub const MASK_SW: u16 = 0x00CC;
 pub const MASK_SE: u16 = 0x0033;
 
-/// Worker queues for walk_tree_roundrobin. Tunable without a rebuild:
+/// Thread count for `walk_tree_dynamic`. Tunable without a rebuild:
 /// GOL_WALK_THREADS=n. Default is **physical cores - 1** (7 on an 8-core box),
 /// from `hashlife::physical_cores()` — the same core count the classic engine
 /// uses. Latched on first call (OnceLock) so it must be set before the process
@@ -258,7 +258,7 @@ impl HashLifeCache {
     /// inside the mutex, one thread at a time, so the enumeration itself is serial
     /// regardless of batch size. Making that parallel needs an indexable root
     /// source, not a shared iterator.
-    pub fn walk_tree_roundrobin(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
+    pub fn walk_tree_dynamic(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
         let root_node = self.get_node(root);
         let children = [
             root_node.north_west,
@@ -369,7 +369,7 @@ impl HashLifeCache {
         // node/alive counts and identical bbox.
         // The serial and threaded variants these were measured against were
         // removed 2026-10-11; the numbers above are the record of that A/B.
-        let live = self.walk_tree_roundrobin(root, slow_cache_n1, slow_cache_n);
+        let live = self.walk_tree_dynamic(root, slow_cache_n1, slow_cache_n);
         // Pending diag: per-gc walk timing. Measured 2026-10-10 on p_126m via the
         // browser path: ~19 ms total per 1M gens (61 calls at step 16384) at both
         // rr6 and rr12 = 0.2% of the segment, so the walk is not a throughput
