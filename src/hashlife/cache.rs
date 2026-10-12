@@ -1,7 +1,7 @@
 //! Node arena, freelist, and HashLifeCache (find_or_create, walks, gc).
 use ahash::AHashMap;
 use std::collections::VecDeque;
-use std::sync::{mpsc, atomic::{AtomicU8, Ordering}};
+use std::sync::{mpsc, atomic::{AtomicU8, AtomicUsize, Ordering}, Mutex};
 
 /// FALSE_NODE = index 0 (all children 0 = empty)
 pub const FALSE_NODE: u32 = 0;
@@ -236,13 +236,28 @@ impl HashLifeCache {
     }
 
     /// C variant: one flat root list (4 quadrants + every slow_cache_n and
-    /// slow_cache_n1 key), dealt round-robin into walk_threads() queues, one
-    /// rayon job per queue. Balances by entry count instead of by tree shape.
-    /// Round-robin is acceptable here because most roots are slow_cache
-    /// entries whose arena indices are already scattered, so the quadrant
-    /// split buys little locality anyway.
-    /// NOTE: the queue storage (~|n|+|n1| u32) is allocated per call and is
-    /// inside the measured time — reuse it if this variant wins.
+    /// slow_cache_n1 key), pulled dynamically by walk_threads() tasks — there is
+    /// no queue table. Each task first drains the four root children through an
+    /// atomic cursor, then takes growing batches of keys from one shared iterator
+    /// over both slow caches until that iterator runs dry.
+    ///
+    /// Balancing follows actual subtree cost rather than entry count: the four
+    /// children are the largest subtrees in the walk, so pulling them first means
+    /// the longest jobs all start at t=0 and the small slow_cache roots fill in
+    /// the tail (longest-processing-time-first, for free).
+    ///
+    /// Nothing is allocated for the deal. The table this replaces was nt buffers
+    /// totalling ~arena.len() u32 per call (~4 MB per 1M slow_cache entries), and
+    /// it was pushed root by root. Lock traffic is one mutex hold per batch.
+    /// MEASURED (2026-10-12, Step+1 at ~2.3M slow_cache entries): a cap that
+    /// SCALES with the root count (total/1024, i.e. 1024 here) is slower than a
+    /// fixed one. Bigger batches save lock overhead we were not paying much of,
+    /// and cost the freedom to rebalance — per-root cost varies a lot in hash
+    /// order, so granularity is worth more than hold count. Hence the fixed cap
+    /// below. The cap only bounds lock overhead anyway: every next() call runs
+    /// inside the mutex, one thread at a time, so the enumeration itself is serial
+    /// regardless of batch size. Making that parallel needs an indexable root
+    /// source, not a shared iterator.
     pub fn walk_tree_roundrobin(&self, root: u32, slow_cache_n1: &AHashMap<u64, u32>, slow_cache_n: &AHashMap<u64, u32>) -> Vec<AtomicU8> {
         let root_node = self.get_node(root);
         let children = [
@@ -262,28 +277,80 @@ impl HashLifeCache {
         let live: Vec<AtomicU8> = vec![0u8; live_size].into_iter().map(AtomicU8::from).collect();
         live[root as usize].store(1, Ordering::SeqCst);
 
-        // Round-robin deal: root i -> queue i % nt. Counts stay within one of
-        // each other, so no worker is left holding most of the work.
         let nt = walk_threads();
-        let mut queues: Vec<Vec<u32>> = vec![ Vec::with_capacity(self.arena.len() / nt + 8); nt ];
-        let mut rr = 0usize;
-        {
-            let mut push = |idx: u32| {
-                queues[rr].push(idx);
-                rr += 1;
-                if rr == nt { rr = 0; }
-            };
-            for &c in &children { push(c); }
-            for (&key, _) in slow_cache_n.iter() { push((key >> 32) as u32); }
-            for (&key, _) in slow_cache_n1.iter() { push((key >> 32) as u32); }
-        }
+        // The four root children come off a fixed array through an atomic cursor
+        // before anything touches the iterator, so the four biggest walks start
+        // immediately. Each task does one wasted fetch_add when it discovers the
+        // array is drained. Children are taken unconditionally, exactly as the old
+        // deal pushed them: walk_node is idempotent through the live byte, so a
+        // duplicate child costs a walk and cannot change the result.
+        let child_cursor = AtomicUsize::new(0);
+        // Fixed batch cap, and therefore the stack buffer's size (512 B).
+        // MEASURED on grover, Step+1 at ~2.3M slow_cache entries (7 walk threads,
+        // summed where blocks line up):
+        //   64  -> 101.95 s
+        //   128 -> 100.76 s  <- fastest; faster than 64 in 6 of 8 blocks, and the
+        //                        normal (non-Step+1) segment agreed
+        //   256 -> slower than 128
+        //   1024 (scaling total/1024) -> clearly slower
+        // Unimodal with the peak at 128: larger batches save lock overhead we are
+        // not paying much of, and cost the freedom to rebalance once per-root cost
+        // varies. Hold count at 2.3M roots is ~18k here.
+        const HARD_BATCH: usize = 128;
+        let roots = Mutex::new(
+            slow_cache_n
+                .iter()
+                .map(|(&key, _)| (key >> 32) as u32)
+                .chain(slow_cache_n1.iter().map(|(&key, _)| (key >> 32) as u32)),
+        );
 
         rayon::scope(|scope| {
             let live = &live;
-            for q in queues {
+            let roots = &roots;
+            let child_cursor = &child_cursor;
+            let children = &children;
+            for _ in 0..nt {
                 scope.spawn(move |_| {
-                    for &r in &q {
-                        self.walk_node(r, live);
+                    loop {
+                        let i = child_cursor.fetch_add(1, Ordering::Relaxed);
+                        if i >= children.len() { break; }
+                        self.walk_node(children[i], live);
+                    }
+                    // Four pulls per size, doubling up to `cap` (k counts pulls
+                    // from 1): pulls 1-4 -> 1 root, 5-8 -> 2, 9-12 -> 4, ... so the
+                    // ramp covers 4*(HARD_BATCH-1) roots per worker before holds go
+                    // full size — 1020 roots at cap 256.
+                    // Two reasons it is keyed to the per-worker pull index rather
+                    // than to global progress. (1) walk_node returns immediately on
+                    // an already-live root, so cost per root FALLS over the call —
+                    // the expensive roots are walked first, and they must be the
+                    // small, preemptible ones. (2) A worker that happens to land on
+                    // expensive subtrees simply takes fewer pulls, so it stays at
+                    // small batches and can hand work back; keying the ramp to
+                    // global progress would instead hand it a big batch precisely
+                    // because the others had made progress.
+                    let mut k = 0usize;
+                    loop {
+                        k += 1;
+                        // trailing_zeros caps the shift at log2(HARD_BATCH), so the
+                        // exponent stays in range however long the walk runs.
+                        let step = ((k - 1) / 4).min(HARD_BATCH.trailing_zeros() as usize);
+                        let want = (1usize << step).min(HARD_BATCH);
+                        let mut batch = [0u32; HARD_BATCH];
+                        let mut n = 0usize;
+                        {
+                            let mut it = roots.lock().unwrap();
+                            for slot in batch[..want].iter_mut() {
+                                match it.next() {
+                                    Some(r) => { *slot = r; n += 1; }
+                                    None => break,
+                                }
+                            }
+                        }
+                        if n == 0 { break; }
+                        for &r in &batch[..n] {
+                            self.walk_node(r, live);
+                        }
                     }
                 });
             }
