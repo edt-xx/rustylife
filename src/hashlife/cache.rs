@@ -291,12 +291,12 @@ impl HashLifeCache {
         //   64  -> 101.95 s
         //   128 -> 100.76 s  <- fastest; faster than 64 in 6 of 8 blocks, and the
         //                        normal (non-Step+1) segment agreed
-        //   256 -> slower than 128
+        //   256 -> fastest with *2 and growing faster
         //   1024 (scaling total/1024) -> clearly slower
-        // Unimodal with the peak at 128: larger batches save lock overhead we are
+        // Unimodal with the peak at 256; larger batches save lock overhead we are
         // not paying much of, and cost the freedom to rebalance once per-root cost
         // varies. Hold count at 2.3M roots is ~18k here.
-        const HARD_BATCH: usize = 128;
+        const HARD_BATCH: usize = 256;
         let roots = Mutex::new(
             slow_cache_n
                 .iter()
@@ -335,7 +335,7 @@ impl HashLifeCache {
                         // trailing_zeros caps the shift at log2(HARD_BATCH), so the
                         // exponent stays in range however long the walk runs.
                         let step = ((k - 1) / 4).min(HARD_BATCH.trailing_zeros() as usize);
-                        let want = (1usize << step).min(HARD_BATCH);
+                        let want = (1usize << step*2).min(HARD_BATCH);
                         let mut batch = [0u32; HARD_BATCH];
                         let mut n = 0usize;
                         {
