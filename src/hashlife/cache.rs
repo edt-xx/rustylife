@@ -285,7 +285,7 @@ impl HashLifeCache {
         // deal pushed them: walk_node is idempotent through the live byte, so a
         // duplicate child costs a walk and cannot change the result.
         let child_cursor = AtomicUsize::new(0);
-        // Fixed batch cap, and therefore the stack buffer's size (512 B).
+        // Fixed batch cap, and therefore the stack buffer's size (1 KB).
         // MEASURED on grover, Step+1 at ~2.3M slow_cache entries (7 walk threads,
         // summed where blocks line up):
         //   64  -> 101.95 s
@@ -295,7 +295,7 @@ impl HashLifeCache {
         //   1024 (scaling total/1024) -> clearly slower
         // Unimodal with the peak at 256; larger batches save lock overhead we are
         // not paying much of, and cost the freedom to rebalance once per-root cost
-        // varies. Hold count at 2.3M roots is ~18k here.
+        // varies. Hold count at 2.3M roots is ~9k here.
         const HARD_BATCH: usize = 256;
         let roots = Mutex::new(
             slow_cache_n
@@ -316,10 +316,13 @@ impl HashLifeCache {
                         if i >= children.len() { break; }
                         self.walk_node(children[i], live);
                     }
-                    // Four pulls per size, doubling up to `cap` (k counts pulls
-                    // from 1): pulls 1-4 -> 1 root, 5-8 -> 2, 9-12 -> 4, ... so the
-                    // ramp covers 4*(HARD_BATCH-1) roots per worker before holds go
-                    // full size — 1020 roots at cap 256.
+                    // Four pulls per size, squaring up to HARD_BATCH (k counts pulls
+                    // from 1): pulls 1-4 -> 1 root, 5-8 -> 4, 9-12 -> 16, 13-16 -> 64,
+                    // 17-20 -> 256, and it stays at the cap. So the ramp spans
+                    // 4*(1+4+16+64) = 340 roots per worker before holds go full size.
+                    // Squaring reaches the cap in five sizes instead of eight: the
+                    // first holds stay small and preemptible, but a worker that is
+                    // clearly past the expensive roots gets to full-size batches sooner.
                     // Two reasons it is keyed to the per-worker pull index rather
                     // than to global progress. (1) walk_node returns immediately on
                     // an already-live root, so cost per root FALLS over the call —
